@@ -3,14 +3,79 @@ import { Background, BackgroundVariant, Panel, ReactFlow } from '@xyflow/react'
 import { ZoomControls, buildEdges, buildNodes, edgeTypes, nodeTypes } from './showchartGraph'
 import Card from './Card'
 import {
+  deptOf,
   step,
+  timelineEnd,
   timerEvent,
   transitionLabel,
   transitionTrigger,
   type PchiEvent,
   type ShowContext,
+  type ShowTimeline,
   type Showchart,
 } from '@pchi/sdk'
+
+const fmt = (ms: number) => {
+  const s = Math.max(0, ms) / 1000
+  return `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, '0')}`
+}
+
+/** Cues already due after `elapsed` ms in `state` (used when joining mid-state). */
+const dueCues = (def: Showchart, state: string, elapsed: number) =>
+  new Set(
+    (def.states.find((s) => s.id === state)?.timeline?.lanes ?? [])
+      .flatMap((l) => l.cues)
+      .filter((c) => c.at_ms <= elapsed)
+      .map((c) => c.id),
+  )
+
+/** Read-only view of the running state's timeline: lanes, cues, and a playhead. */
+function LiveTimeline({ state, tl, elapsed, fired }: { state: string; tl: ShowTimeline; elapsed: number; fired: Set<string> }) {
+  const total = Math.max(timelineEnd(tl) + 1000, 5000)
+  const pct = (ms: number) => `${Math.min(100, (ms / total) * 100)}%`
+  const p = Math.min(1, Math.max(0, elapsed / total))
+  return (
+    <section className="live-tl" aria-label={`Timeline for ${state}`}>
+      <header>
+        <b>{state}</b>
+        <span className="muted">timeline</span>
+        <span className="spacer" />
+        <span className="time">{fmt(elapsed)}</span>
+        <span className="muted">/ {fmt(total)}</span>
+      </header>
+      <div className="live-tl-body">
+        {tl.lanes.map((l) => {
+          const d = deptOf(l.dept)
+          return (
+            <div className="live-lane" key={l.id}>
+              <span className="lname" style={{ borderLeftColor: d.color }} title={l.name || l.id}>
+                {l.name || l.id}
+              </span>
+              <div className="ltrack">
+                {l.cues.map((c) => {
+                  const done = fired.has(c.id)
+                  const first = c.action.payload ? Object.values(c.action.payload)[0] : undefined
+                  const text = c.label ?? `${c.action.kind}${first !== undefined && first !== '' ? ` · ${String(first)}` : ''}`
+                  return (
+                    <div
+                      key={c.id}
+                      className={`lcue ${done ? 'fired' : elapsed < c.at_ms ? 'upcoming' : 'due'}`}
+                      style={{ left: pct(c.at_ms), width: pct(c.length_ms ?? 0), background: `${d.color}${done ? '55' : '22'}`, borderColor: d.color }}
+                      title={`${text} at ${fmt(c.at_ms)}${done ? ' (fired)' : ''}`}
+                    >
+                      <span>{done ? '✓ ' : ''}{text}</span>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          )
+        })}
+        <div className="live-playhead" style={{ left: `calc(var(--lname-w) + (100% - var(--lname-w)) * ${p})` }} aria-hidden />
+      </div>
+    </section>
+  )
+}
 
 type Status = 'connecting' | 'online' | 'offline'
 
@@ -39,6 +104,8 @@ export default function LivePanel({ onFeed, onStatus }: Props) {
   // machines cannot throw the countdown off.
   const [enteredAt, setEnteredAt] = useState(() => Date.now())
   const [now, setNow] = useState(() => Date.now())
+  // cue ids the server has fired in the current state
+  const [fired, setFired] = useState<Set<string>>(new Set())
   const onStatusRef = useRef(onStatus)
   onStatusRef.current = onStatus
   useEffect(() => onStatusRef.current(status), [status])
@@ -71,11 +138,17 @@ export default function LivePanel({ onFeed, onStatus }: Props) {
             setState(String(msg.state))
             setCtx((msg.context as ShowContext) ?? {})
             setEnteredAt(Date.now() - Number(msg.elapsed_ms ?? 0))
+            // joined mid-state: the cues already due must have fired
+            setFired(dueCues(msg.definition as Showchart, String(msg.state), Number(msg.elapsed_ms ?? 0)))
+            break
+          case 'action':
+            if (typeof msg.cue === 'string') setFired((f) => new Set(f).add(String(msg.cue)))
             break
           case 'transition':
             if (msg.applied) {
               setState(String(msg.to))
               setEnteredAt(Date.now())
+              setFired(new Set())
               setTrail((t) => [...t.slice(-49), { ts: Number(msg.ts), text: `${msg.event}  ${msg.from} → ${msg.to}  (${msg.source})` }])
             } else {
               setTrail((t) => [...t.slice(-49), { ts: Number(msg.ts), text: `${msg.event} ignored in ${msg.from}  (${msg.source})` }])
@@ -113,8 +186,15 @@ export default function LivePanel({ onFeed, onStatus }: Props) {
     [def, state, ctx],
   )
 
-  // tick only while there is something to count down
-  const counting = timerRows.some((r) => now - enteredAt <= r.ms + 500)
+  // the running state's timeline, if it has one
+  const tl = def?.states.find((s) => s.id === state)?.timeline
+  const lanes = tl?.lanes ?? []
+  const elapsed = Math.max(0, now - enteredAt)
+  const tlTotal = Math.max(timelineEnd(tl) + 1000, 5000)
+  const tlHeight = lanes.length > 0 ? Math.min(240, 46 + lanes.length * 32) : 0
+
+  // tick only while there is something to count down or a timeline is still playing
+  const counting = timerRows.some((r) => now - enteredAt <= r.ms + 500) || (lanes.length > 0 && elapsed <= tlTotal + 500)
   useEffect(() => {
     if (!counting) return
     setNow(Date.now())
@@ -130,7 +210,8 @@ export default function LivePanel({ onFeed, onStatus }: Props) {
   const available = (def?.transitions ?? []).filter((t) => t.source === state)
 
   return (
-    <div className="cv has-right">
+    <div className={`cv has-right ${tlHeight ? 'has-tl' : ''}`} style={{ ['--tl-h' as string]: `${tlHeight}px` }}>
+      {def && tl && tlHeight > 0 && <LiveTimeline state={state} tl={tl} elapsed={elapsed} fired={fired} />}
       {def ? (
         <div className="cv-canvas">
         <ReactFlow
