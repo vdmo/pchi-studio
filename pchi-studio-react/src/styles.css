@@ -77,3 +77,117 @@ textarea { background: #0e0f12; color: inherit; border: 1px solid #2e3440; borde
 .examples { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
 .examples button { font-size: 12px; border-radius: 12px; }
 .cmdbar button:focus-visible, .cmdbar input:focus-visible { outline: 2px solid #3b82f6; outline-offset: 1px; }
+
+/* ───────── canvas-first editor (Showchart + Live) ───────── */
+.cv { grid-column: 1 / -1; grid-row: 2; position: relative; min-height: 0; min-width: 0; }
+.cv-canvas { position: absolute; top: 0; bottom: 0; left: 0; right: 0; }
+.cv-canvas .react-flow { --xy-background-color: #14151b; background: #14151b; }
+.react-flow__panel button, .cv .card button, .cv .cmdbar button { font: inherit; }
+.react-flow__attribution { opacity: .45; }
+
+/* state nodes */
+.sn { position: relative; min-width: 136px; max-width: 230px; padding: 10px 16px; background: #262933; border: 1.5px solid #4a4e5c; border-radius: 9px; text-align: center; color: #e8e9ee; box-shadow: 0 4px 14px rgba(0,0,0,.28); cursor: pointer; }
+.sn.selected { border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,.28); }
+.sn.current { border-color: #fbbf24; background: #3a331a; box-shadow: 0 0 0 3px rgba(251,191,36,.24); }
+.sn-label { font-size: 15px; font-weight: 700; letter-spacing: .01em; }
+.sn-sub { font-size: 11px; color: #9a9eac; margin-top: 2px; }
+.sn-actions { list-style: none; margin: 8px 0 0; padding: 7px 0 0; border-top: 1px solid #3a3d4a; text-align: left; font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #b6bac7; }
+.sn-actions li { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.55; }
+.sn-actions .more { color: #7a7f92; }
+.sn-h { opacity: 0; width: 6px; height: 6px; min-width: 0; min-height: 0; }
+.sn-init { position: absolute; left: -21px; top: -10px; width: 9px; height: 9px; border-radius: 50%; background: #e8e9ee; }
+.sn-init::after { content: ''; position: absolute; left: 4px; top: 4px; width: 23px; height: 1.5px; background: #e8e9ee; transform: rotate(24deg); transform-origin: left center; }
+
+/* edge labels */
+.edge-pill { position: absolute; pointer-events: all; display: flex; gap: 7px; align-items: baseline; background: #14151b; border: 1.5px solid #7a7f92; border-radius: 999px; padding: 2px 11px; font-size: 11px; white-space: nowrap; color: #e8e9ee; }
+.edge-pill b { font-weight: 700; letter-spacing: .03em; text-transform: uppercase; }
+.edge-pill i { font-style: normal; color: #9a9eac; }
+.edge-pill.active { border-color: #fbbf24; color: #fbbf24; }
+.edge-pill.active i { color: #d9b64a; }
+
+/* floating controls */
+.zoom, .toolbar, .crumb { background: #1b1d25; border: 1px solid #2f323e; border-radius: 10px; box-shadow: 0 6px 20px rgba(0,0,0,.3); }
+.zoom { display: flex; align-items: center; gap: 2px; padding: 3px; }
+.zoom button { border: 0; background: none; padding: 3px 9px; }
+.zoom span { min-width: 44px; text-align: center; font-size: 12px; }
+.toolbar { display: flex; gap: 3px; padding: 4px; }
+.toolbar button { border: 0; background: none; padding: 5px 12px; font-size: 15px; border-radius: 7px; }
+.toolbar button.on { background: #3b82f6; color: #fff; }
+.p-crumb { display: flex; gap: 8px; align-items: center; }
+.crumb { padding: 6px 11px; font-size: 13px; }
+.status { border-radius: 999px; padding: 4px 11px; font-size: 12px; background: #1b1d25; }
+.status.good { color: #34d399; border-color: #1f5a46; }
+.status.bad { color: #f87171; border-color: #6b2b2b; }
+.p-top-right button { background: #1b1d25; border-radius: 9px; padding: 6px 12px; box-shadow: 0 6px 20px rgba(0,0,0,.3); }
+.p-top-right button.on { background: #2f3a52; border-color: #3b82f6; }
+
+/* the command palette floats at the top centre */
+.p-palette { width: clamp(300px, 50%, 620px); }
+.p-palette .cmdbar { padding: 6px; background: #1b1d25; border: 1px solid #2f323e; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,.4); max-height: 60vh; overflow: auto; }
+.inwrap { position: relative; flex: 1; min-width: 0; display: flex; }
+.inwrap input { width: 100%; }
+.kbd { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); font: 11px ui-monospace, monospace; color: #7a7f92; border: 1px solid #343846; border-radius: 5px; padding: 1px 5px; pointer-events: none; }
+
+/* cards (drawers) */
+.card { position: absolute; z-index: 6; width: 310px; max-height: calc(100% - 150px); display: flex; flex-direction: column; background: rgba(27,29,37,.97); border: 1px solid #2f323e; border-radius: 12px; box-shadow: 0 12px 34px rgba(0,0,0,.45); }
+.card.left { top: 60px; left: 12px; }
+.card.right { top: 60px; right: 12px; }
+.card > header { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid #2f323e; }
+.card > header h4 { margin: 0; font-size: 13px; text-transform: none; }
+.card-body { padding: 10px; overflow: auto; display: flex; flex-direction: column; gap: 6px; }
+button.icon { background: none; border: 0; padding: 2px 7px; color: #9a9eac; font-size: 15px; }
+.seg { display: inline-flex; border: 1px solid #2f323e; border-radius: 7px; overflow: hidden; }
+.seg button { border: 0; border-radius: 0; background: none; padding: 2px 9px; font-size: 12px; }
+.seg button.on { background: #2f3a52; color: #fff; }
+.row-btn { text-align: left; width: 100%; }
+.row-btn.sel { border-color: #3b82f6; background: #232b3d; }
+.event-btn { display: flex; justify-content: space-between; gap: 8px; width: 100%; }
+.card .bigstate { font-size: 24px; margin: 2px 0 4px; }
+.cv button:focus-visible, .cv input:focus-visible, .cv textarea:focus-visible, .cv select:focus-visible { outline: 2px solid #3b82f6; outline-offset: 1px; }
+
+/* canvas modes: the grid gives the canvas everything, the event stream is a slim bar */
+.app.show, .app.live { grid-template-rows: 44px minmax(0, 1fr) auto; }
+.slimfoot { grid-area: f; display: block; border-top: 1px solid #262a33; background: #13151a; max-height: 45vh; overflow: auto; }
+.console.slim { padding: 4px 10px; }
+.console.slim .bar { margin: 0; gap: 8px; }
+.console.slim .bar h4 { margin: 0; flex: 0 0 auto; font-size: 13px; }
+.console.slim .lines { max-height: 32vh; overflow: auto; margin-top: 6px; }
+/* header: never wrap */
+header { white-space: nowrap; }
+header button, header .btn { white-space: nowrap; }
+header input { width: 118px; }
+header strong { font-size: 15px; letter-spacing: .01em; }
+
+/* open panels dock beside the canvas instead of covering it */
+.cv.has-left > .cv-canvas { left: 322px; }
+.cv.has-right > .cv-canvas { right: 322px; }
+/* on narrow windows panels overlay the canvas instead of squeezing it */
+@media (max-width: 900px) {
+  .cv.has-left > .cv-canvas { left: 0; }
+  .cv.has-right > .cv-canvas { right: 0; }
+}
+
+/* ───────── direct manipulation ───────── */
+.sn-h { opacity: 0; width: 11px; height: 11px; background: #3b82f6; border: 2px solid #14151b; transition: opacity .12s; }
+.sn:hover .sn-h, .sn.selected .sn-h, .react-flow__handle.connectingfrom, .react-flow__handle.connectingto { opacity: 1; }
+.sn-edit { width: 100%; min-width: 96px; text-align: center; font: inherit; font-size: 15px; font-weight: 700; background: #14151b; color: #e8e9ee; border: 1.5px solid #3b82f6; border-radius: 6px; padding: 1px 4px; }
+.edge-pill { cursor: pointer; }
+.edge-pill:hover, .edge-pill.chosen { border-color: #3b82f6; color: #fff; }
+.edge-pill:focus-visible { outline: 2px solid #3b82f6; outline-offset: 2px; }
+.toast { position: absolute; left: 50%; bottom: 56px; transform: translateX(-50%); background: #23252f; border: 1px solid #3a3d4a; border-radius: 9px; padding: 7px 14px; font-size: 13px; white-space: nowrap; box-shadow: 0 8px 24px rgba(0,0,0,.4); }
+.empty-hint { margin-top: 140px !important; text-align: center; color: #9a9eac; font-size: 14px; pointer-events: none; }
+.empty-hint p { margin: 4px 0; } kbd { font: 12px ui-monospace, monospace; border: 1px solid #3a3d4a; border-radius: 5px; padding: 1px 6px; background: #1b1d25; }
+button.danger { color: #f87171; border-color: #6b2b2b; }
+button.danger:hover { background: #3a1f22; }
+.btnrow { display: flex; gap: 6px; } .btnrow button { flex: 1; }
+.actions { display: flex; flex-direction: column; gap: 6px; }
+.action { border: 1px solid #2f323e; border-radius: 9px; padding: 7px; display: flex; flex-direction: column; gap: 5px; background: #171921; }
+.arow, .kv { display: flex; gap: 6px; align-items: center; } .arow input, .kv input { flex: 1; min-width: 0; font-size: 12px; }
+.kv span { font-size: 11px; color: #9a9eac; min-width: 54px; }
+button.x { padding: 1px 8px; } button.link { background: none; border: 0; color: #7aa7ff; padding: 0; text-align: left; font-size: 12px; }
+
+/* the app fills the window and never scrolls as a page */
+html, body, #root { height: 100%; overflow: hidden; }
+header { min-width: 0; overflow: hidden; gap: 8px; }
+header input { width: 100px; flex: 0 1 100px; min-width: 60px; }
+.card > header { flex-wrap: wrap; overflow: visible; }

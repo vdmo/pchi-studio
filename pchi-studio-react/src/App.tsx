@@ -279,22 +279,13 @@ export default function App() {
         />
       </aside>}
 
-      <footer>
-        {mode === 'live' ? (
-          <section className="timeline">
-            <h4>Live</h4>
-            <p className="muted">
-              Observing a show running in pchi-studio-api. Every feed message appears in the event stream.
-            </p>
-          </section>
-        ) : mode === 'show' ? (
-          <section className="timeline">
-            <h4>Showchart</h4>
-            <p className="muted">
-              Saved in the .pchi file as <code>showchart</code>. Untick “Send actions to Core” to simulate only.
-            </p>
-          </section>
-        ) : mode === 'design' ? (
+      {mode === 'show' || mode === 'live' ? (
+        <footer className="slimfoot">
+          <EventConsole log={log} onClear={() => setLog([])} collapsible />
+        </footer>
+      ) : (
+        <footer>
+        {mode === 'design' ? (
           <Timeline clips={timeline} onChange={setTimeline} nodeIds={nodes.map((n) => n.id)} />
         ) : (
           <section className="timeline">
@@ -307,6 +298,7 @@ export default function App() {
         )}
         <EventConsole log={log} onClear={() => setLog([])} />
       </footer>
+      )}
     </div>
   )
 }

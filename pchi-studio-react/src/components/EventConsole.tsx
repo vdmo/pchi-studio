@@ -14,10 +14,14 @@ const DIR_NAME = { in: 'received', out: 'sent', sim: 'simulated' } as const
 export default function EventConsole({
   log,
   onClear,
+  collapsible = false,
 }: {
   log: LogEntry[]
   onClear: () => void
+  /** Start as a slim bar that expands on click (used over the canvas). */
+  collapsible?: boolean
 }) {
+  const [shown, setShown] = useState(!collapsible)
   const [open, setOpen] = useState<Set<number>>(new Set())
   const [filter, setFilter] = useState('')
 
@@ -37,8 +41,13 @@ export default function EventConsole({
     })
 
   return (
-    <section className="console">
+    <section className={`console ${collapsible ? "slim" : ""}`}>
       <div className="bar">
+        {collapsible && (
+          <button className="icon" onClick={() => setShown((s) => !s)} aria-expanded={shown} aria-label={shown ? "Collapse event stream" : "Expand event stream"}>
+            {shown ? "▾" : "▸"}
+          </button>
+        )}
         <h4>
           Event stream <span className="muted">{filter ? `${rows.length} of ${log.length}` : log.length}</span>
         </h4>
@@ -46,7 +55,7 @@ export default function EventConsole({
         <button onClick={() => setOpen(new Set(open.size ? [] : rows.map((r) => r.id)))}>{open.size ? 'collapse' : 'expand'}</button>
         <button onClick={onClear}>clear</button>
       </div>
-      <div className="lines">
+      {shown && <div className="lines">
         {rows.length === 0 && <p className="muted">{log.length ? 'No events match the filter.' : 'No events yet.'}</p>}
         {rows.map((l) => {
           const isOpen = open.has(l.id)
@@ -62,7 +71,7 @@ export default function EventConsole({
             </div>
           )
         })}
-      </div>
+      </div>}
     </section>
   )
 }

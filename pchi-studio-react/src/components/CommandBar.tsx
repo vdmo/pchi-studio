@@ -6,6 +6,11 @@ type Ok = Extract<CommandResult, { ok: true }>
 interface Props {
   chart: Showchart
   onApply: (chart: Showchart) => void
+  /** Undo/redo act on the editor's shared history. They return false when there is nothing to do. */
+  onUndo: () => boolean
+  onRedo: () => boolean
+  canUndo: boolean
+  canRedo: boolean
 }
 
 // Web Speech API is not in every TypeScript DOM lib, so keep a tiny local shape.
@@ -42,52 +47,45 @@ type Message = { kind: 'ok' | 'error' | 'info'; text: string; hint?: string; lin
  * typed commands apply at once (and can be undone); spoken ones are shown as a
  * preview first, because a misheard command is the main risk with voice.
  */
-export default function CommandBar({ chart, onApply }: Props) {
+export default function CommandBar({ chart, onApply, onUndo, onRedo, canUndo, canRedo }: Props) {
   const [text, setText] = useState('')
   const [msg, setMsg] = useState<Message | null>(null)
   const [plan, setPlan] = useState<{ result: Ok; heard: string } | null>(null)
-  const [past, setPast] = useState<Showchart[]>([])
-  const [future, setFuture] = useState<Showchart[]>([])
   const [listening, setListening] = useState(false)
   const [askPrivacy, setAskPrivacy] = useState(false)
   const [voiceOk, setVoiceOk] = useState(false) // privacy notice accepted this session
   const [showExamples, setShowExamples] = useState(false)
   const rec = useRef<Recognition>()
+  const inputRef = useRef<HTMLInputElement>(null)
   const chartRef = useRef(chart)
   chartRef.current = chart
 
   useEffect(() => () => rec.current?.abort(), [])
 
-  // Read the chart BEFORE queuing state updates: updater functions can run more than
-  // once (and after the new chart has rendered), so they must not read a mutable ref.
+  // Ctrl/Cmd+K jumps to the command box from anywhere
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault()
+        inputRef.current?.focus()
+        inputRef.current?.select()
+      }
+    }
+    window.addEventListener('keydown', h)
+    return () => window.removeEventListener('keydown', h)
+  }, [])
+
+  // The undo history lives in the editor (it also covers dragging, deleting and
+  // field edits), so a command is just one more change handed to onApply.
   const commit = (r: Ok, label: string) => {
-    const before = chartRef.current
-    setPast((p) => [...p.slice(-49), before])
-    setFuture([])
     onApply(r.chart)
     setPlan(null)
     setText('')
     setMsg({ kind: 'ok', text: label, lines: [...r.steps.map((s) => s.summary), ...r.notes.map((n) => `assumed ${n}`)] })
   }
 
-  const undo = () => {
-    const prev = past.at(-1)
-    if (!prev) return setMsg({ kind: 'info', text: 'Nothing to undo.' })
-    const now = chartRef.current
-    setFuture((f) => [now, ...f])
-    setPast((p) => p.slice(0, -1))
-    onApply(prev)
-    setMsg({ kind: 'ok', text: 'Undone.' })
-  }
-  const redo = () => {
-    const next = future[0]
-    if (!next) return setMsg({ kind: 'info', text: 'Nothing to redo.' })
-    const now = chartRef.current
-    setPast((p) => [...p, now])
-    setFuture((f) => f.slice(1))
-    onApply(next)
-    setMsg({ kind: 'ok', text: 'Redone.' })
-  }
+  const undo = () => setMsg(onUndo() ? { kind: 'ok', text: 'Undone.' } : { kind: 'info', text: 'Nothing to undo.' })
+  const redo = () => setMsg(onRedo() ? { kind: 'ok', text: 'Redone.' } : { kind: 'info', text: 'Nothing to redo.' })
 
   const run = (input: string, fromVoice: boolean) => {
     const r = runCommandText(input, chartRef.current)
@@ -143,13 +141,17 @@ export default function CommandBar({ chart, onApply }: Props) {
           if (text.trim()) run(text, false)
         }}
       >
-        <input
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          placeholder={listening ? 'Listening…' : 'Arrange the show: “chain preshow, intro, drop, finale” or “when entering drop set lighting look blue”'}
-          aria-label="Show command"
-          spellCheck={false}
-        />
+        <div className="inwrap">
+          <input
+            ref={inputRef}
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            placeholder={listening ? 'Listening…' : 'Type or say a command…'}
+            aria-label="Show command"
+            spellCheck={false}
+          />
+          {!text && !listening && <kbd className="kbd">Ctrl K</kbd>}
+        </div>
         <button
           type="button"
           className={`mic ${listening ? 'on' : ''}`}
@@ -162,8 +164,8 @@ export default function CommandBar({ chart, onApply }: Props) {
           {listening ? '■' : '🎤'}
         </button>
         <button type="submit" disabled={!text.trim()}>Do it</button>
-        <button type="button" onClick={undo} disabled={!past.length} title="Undo the last command">↶</button>
-        <button type="button" onClick={redo} disabled={!future.length} title="Redo">↷</button>
+        <button type="button" onClick={undo} disabled={!canUndo} title="Undo (Ctrl+Z)">↶</button>
+        <button type="button" onClick={redo} disabled={!canRedo} title="Redo (Ctrl+Shift+Z)">↷</button>
         <button type="button" onClick={() => setShowExamples((s) => !s)} aria-expanded={showExamples} title="Examples">?</button>
       </form>
 

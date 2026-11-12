@@ -315,6 +315,8 @@ export interface ShowTransition {
 export type ShowContext = Record<string, unknown>
 
 export interface Showchart {
+  /** Where each state sits on the canvas (saved with the show). Missing states are laid out automatically. */
+  layout?: Record<string, { x: number; y: number }>
   id?: string
   name?: string
   version?: string
@@ -526,7 +528,7 @@ export function layoutShowchart(c: Showchart): Record<string, { x: number; y: nu
     const d = depth.get(s.id) ?? extra++
     const r = rows.get(d) ?? 0
     rows.set(d, r + 1)
-    out[s.id] = { x: d * 320, y: r * 130 }
+    out[s.id] = { x: d * 320, y: r * 170 }
   }
   return out
 }

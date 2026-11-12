@@ -1,17 +1,41 @@
-import { useEffect, useMemo, useState } from 'react'
-import { ReactFlow, Background, Controls } from '@xyflow/react'
-import { buildEdges, buildNodes, edgeTypes } from './showchartGraph'
-import CommandBar from './CommandBar'
+import { useEffect, useMemo, useState, type MouseEvent } from 'react'
 import {
+  Background,
+  BackgroundVariant,
+  Panel,
+  ReactFlow,
+  ReactFlowProvider,
+  useNodesState,
+  useReactFlow,
+  type Connection,
+  type Node,
+} from '@xyflow/react'
+import {
+  EditorCtx,
+  ZoomControls,
+  buildEdges,
+  buildNodes,
+  edgeTypes,
+  nodeTypes,
+  type EditorCtxValue,
+  type StateNodeData,
+} from './showchartGraph'
+import CommandBar from './CommandBar'
+import Card from './Card'
+import ActionList from './ActionList'
+import { useHistory } from './useHistory'
+import {
+  CommandError,
   actionToEvent,
+  applyCommand,
   enterActions,
   step,
   transitionLabel,
   transitionTrigger,
   validateShowchart,
   type PchiEvent,
-  type ShowContext,
   type ShowAction,
+  type ShowContext,
   type Showchart,
 } from '@pchi/sdk'
 
@@ -24,31 +48,186 @@ interface Props {
   note: (e: PchiEvent) => void
 }
 
-const parseActions = (text: string): ShowAction[] => {
-  try {
-    const v = JSON.parse(text || '[]')
-    return Array.isArray(v) ? v : []
-  } catch {
-    return []
-  }
+type Tool = 'select' | 'pan'
+type RightTab = 'simulate' | 'state' | 'transition'
+
+const toId = (s: string) => s.trim().replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '').toUpperCase()
+
+export default function ShowchartPanel(props: Props) {
+  // the provider lets the editor use the React Flow instance (screen → canvas coordinates)
+  return (
+    <ReactFlowProvider>
+      <Editor {...props} />
+    </ReactFlowProvider>
+  )
 }
 
-export default function ShowchartPanel({ chart, onChange, emit, note }: Props) {
+function Editor({ chart, onChange, emit, note }: Props) {
+  const rf = useReactFlow()
+  const history = useHistory(chart, onChange)
+  const { commit } = history
+
   const [current, setCurrent] = useState(chart.initial)
   const [live, setLive] = useState(false) // false = simulate only, true = also send to Core
   const [trail, setTrail] = useState<string[]>([chart.initial])
   const [selected, setSelected] = useState<string | null>(null)
+  const [selectedT, setSelectedT] = useState<number | null>(null)
+  const [renaming, setRenaming] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
   const [ctx, setCtx] = useState<ShowContext>(chart.context ?? {})
   const [ctxText, setCtxText] = useState(JSON.stringify(chart.context ?? {}, null, 1))
   const [ctxBad, setCtxBad] = useState(false)
+  const [tool, setTool] = useState<Tool>('select')
+  const [outline, setOutline] = useState(false)
+  const [right, setRight] = useState<RightTab | null>(null)
+
   const issues = useMemo(() => validateShowchart(chart), [chart])
-  const blocked = issues.some((i) => !i.includes('unreachable'))
+  const hard = issues.filter((i) => !i.includes('unreachable'))
+  const blocked = hard.length > 0
 
   useEffect(() => {
     setCurrent(chart.initial)
     setTrail([chart.initial])
   }, [chart.initial])
 
+  // a selection that no longer exists (after undo, delete or a command) is dropped
+  useEffect(() => {
+    if (selected && !chart.states.some((s) => s.id === selected)) setSelected(null)
+    if (selectedT !== null && selectedT >= chart.transitions.length) setSelectedT(null)
+  }, [chart, selected, selectedT])
+
+  useEffect(() => {
+    if (!notice) return
+    const id = window.setTimeout(() => setNotice(null), 4000)
+    return () => window.clearTimeout(id)
+  }, [notice])
+
+  // Controlled nodes so dragging is smooth; positions are written back to the chart on drop.
+  const [nodes, setNodes, onNodesChange] = useNodesState<Node<StateNodeData>>([])
+  useEffect(() => {
+    // Keep each node's measured size when rebuilding from the chart: React Flow hides a node
+    // until it has measured it, and a rebuild that dropped the measurement would leave a
+    // freshly added state invisible (and un-focusable).
+    setNodes((prev) =>
+      buildNodes(chart, current, tool === 'select', selected).map((n) => {
+        const old = prev.find((p) => p.id === n.id)
+        return old ? { ...n, measured: old.measured, width: old.width, height: old.height } : n
+      }),
+    )
+  }, [chart, current, tool, selected, setNodes])
+  const edges = useMemo(() => buildEdges(chart, current), [chart, current])
+
+  // ── edits ──
+  const patchState = (id: string, patch: Partial<Showchart['states'][number]>, key?: string) =>
+    commit({ ...chart, states: chart.states.map((s) => (s.id === id ? { ...s, ...patch } : s)) }, key)
+  const patchT = (i: number, patch: Partial<Showchart['transitions'][number]>, key?: string) =>
+    commit({ ...chart, transitions: chart.transitions.map((x, j) => (j === i ? { ...x, ...patch } : x)) }, key)
+
+  const deleteTransition = (i: number) => {
+    commit({ ...chart, transitions: chart.transitions.filter((_, j) => j !== i) })
+    setSelectedT(null)
+    setNotice('Transition deleted. Ctrl+Z to undo.')
+  }
+  const deleteState = (id: string) => {
+    try {
+      commit(applyCommand(chart, { op: 'removeState', id }).chart)
+      setSelected(null)
+      setNotice(`Deleted ${id} and its transitions. Ctrl+Z to undo.`)
+    } catch (e) {
+      setNotice(e instanceof CommandError ? e.message : 'Could not delete that state.')
+    }
+  }
+
+  const rename = (id: string, to: string): string | null => {
+    const newId = toId(to)
+    setRenaming(null)
+    if (!newId) {
+      setNotice('A state needs a name.')
+      return 'empty'
+    }
+    try {
+      const r = applyCommand(chart, { op: 'renameState', from: id, to: newId })
+      const layout = r.chart.layout ? { ...r.chart.layout } : undefined
+      if (layout?.[id]) {
+        layout[newId] = layout[id]
+        delete layout[id]
+      }
+      commit(layout ? { ...r.chart, layout } : r.chart)
+      if (selected === id) setSelected(newId)
+      if (current === id) setCurrent(newId)
+      return null
+    } catch (e) {
+      const m = e instanceof CommandError ? e.message : 'Could not rename.'
+      setNotice(m)
+      return m
+    }
+  }
+
+  const onConnect = (c: Connection) => {
+    if (!c.source || !c.target) return
+    const taken = new Set(chart.transitions.filter((t) => t.source === c.source && !t.guard).map((t) => t.event))
+    let name = 'EVENT'
+    let n = 1
+    while (taken.has(name)) name = `EVENT_${++n}`
+    commit({ ...chart, transitions: [...chart.transitions, { source: c.source, target: c.target, event: name }] })
+    setSelectedT(chart.transitions.length)
+    setSelected(null)
+    setRight('transition')
+  }
+
+  const addStateAt = (e: MouseEvent) => {
+    if (!(e.target as HTMLElement).classList.contains('react-flow__pane')) return
+    const p = rf.screenToFlowPosition({ x: e.clientX, y: e.clientY })
+    let id = 'STATE'
+    let n = 1
+    while (chart.states.some((s) => s.id === id)) id = `STATE_${++n}`
+    const next: Showchart = {
+      ...chart,
+      states: [...chart.states, { id }],
+      layout: { ...(chart.layout ?? {}), [id]: { x: Math.round(p.x), y: Math.round(p.y) } },
+    }
+    if (!chart.states.some((s) => s.id === chart.initial)) next.initial = id
+    commit(next)
+    setSelected(id)
+    setSelectedT(null)
+    setRenaming(id)
+  }
+
+  // ── keyboard: undo/redo, delete, rename, escape ──
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement | null
+      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable)) return
+      const mod = e.ctrlKey || e.metaKey
+      const k = e.key.toLowerCase()
+      if (mod && k === 'z') {
+        e.preventDefault()
+        if (!(e.shiftKey ? history.redo() : history.undo())) setNotice(e.shiftKey ? 'Nothing to redo.' : 'Nothing to undo.')
+      } else if (mod && k === 'y') {
+        e.preventDefault()
+        history.redo()
+      } else if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (selectedT !== null) {
+          e.preventDefault()
+          deleteTransition(selectedT)
+        } else if (selected) {
+          e.preventDefault()
+          deleteState(selected)
+        }
+      } else if (e.key === 'F2' && selected) {
+        e.preventDefault()
+        setRenaming(selected)
+      } else if (e.key === 'Escape') {
+        setSelected(null)
+        setSelectedT(null)
+      }
+    }
+    window.addEventListener('keydown', h)
+    return () => window.removeEventListener('keydown', h)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected, selectedT, chart, history.undo, history.redo])
+
+  // ── simulation ──
   const run = (actions: ShowAction[]) =>
     actions.forEach((a) => {
       const ev = actionToEvent(a)
@@ -74,181 +253,262 @@ export default function ShowchartPanel({ chart, onChange, emit, note }: Props) {
   }
 
   const available = chart.transitions.filter((t) => t.source === current)
-  const patchT = (i: number, patch: Partial<Showchart['transitions'][number]>) =>
-    onChange({ ...chart, transitions: chart.transitions.map((x, j) => (j === i ? { ...x, ...patch } : x)) })
-  const nodes = useMemo(() => buildNodes(chart, current, true), [chart, current])
-  const edges = useMemo(() => buildEdges(chart, current), [chart, current])
-
-  const patchState = (id: string, patch: Partial<Showchart['states'][number]>) =>
-    onChange({ ...chart, states: chart.states.map((s) => (s.id === id ? { ...s, ...patch } : s)) })
-
   const sel = chart.states.find((s) => s.id === selected)
+  const selT = selectedT !== null ? chart.transitions[selectedT] : undefined
 
-  return (
-    <div className="showpanel">
-      <aside className="library">
-        <h4>States</h4>
-        {chart.states.map((s) => (
-          <button
-            key={s.id}
-            className={s.id === selected ? 'sel' : ''}
-            onClick={() => setSelected(s.id)}
-            title={s.id === chart.initial ? 'initial state' : ''}
-          >
-            {s.id === chart.initial ? '● ' : ''}
-            {s.id}
-          </button>
-        ))}
-        <button
-          onClick={() => {
-            const id = prompt('New state id (e.g. FINALE)')?.trim().toUpperCase()
-            if (id && !chart.states.some((s) => s.id === id)) onChange({ ...chart, states: [...chart.states, { id }] })
-          }}
-        >
-          + state
-        </button>
-        <h4>Transitions</h4>
-        {chart.transitions.map((t, i) => (
-          <div key={i} className="tgroup">
-            <div className="trow">
-              <select value={t.source} onChange={(e) => patchT(i, { source: e.target.value })}>
-                {chart.states.map((s) => <option key={s.id}>{s.id}</option>)}
-              </select>
-              <input value={t.event ?? ''} placeholder="event" onChange={(e) => patchT(i, { event: e.target.value || undefined })} />
-              <select value={t.target} onChange={(e) => patchT(i, { target: e.target.value })}>
-                {chart.states.map((s) => <option key={s.id}>{s.id}</option>)}
-              </select>
-              <button className="x" onClick={() => onChange({ ...chart, transitions: chart.transitions.filter((_, j) => j !== i) })}>×</button>
-            </div>
-            <div className="trow2">
-              <input value={t.guard ?? ''} placeholder="guard (name or energy > 0.7)" onChange={(e) => patchT(i, { guard: e.target.value || undefined })} />
-              <input type="number" min={0} value={t.after_ms ?? ''} placeholder="after ms" onChange={(e) => patchT(i, { after_ms: e.target.value === '' ? undefined : Number(e.target.value) })} />
-            </div>
-          </div>
-        ))}
-        <button
-          onClick={() =>
-            chart.states.length &&
-            onChange({ ...chart, transitions: [...chart.transitions, { source: chart.states[0].id, target: chart.states[0].id, event: 'EVENT' }] })
-          }
-        >
-          + transition
-        </button>
-      </aside>
+  const selectState = (id: string | null) => {
+    setSelected(id)
+    setSelectedT(null)
+    if (id) setRight('state')
+  }
+  const editTransition = (i: number) => {
+    setSelectedT(i)
+    setSelected(null)
+    setRight('transition')
+  }
 
-      <main className="cmdmain">
-        <CommandBar chart={chart} onApply={onChange} />
-        <div className="flowwrap">
-        <ReactFlow nodes={nodes} edges={edges} edgeTypes={edgeTypes} nodesConnectable={false} onNodeClick={(_, n) => setSelected(n.id)} colorMode="dark" fitView>
-          <Background />
-          <Controls />
-        </ReactFlow>
-        </div>
-      </main>
-
-      <aside className="inspector">
-        <h4>Run</h4>
-        <p>
-          Current: <b>{current}</b>
-        </p>
-        <label className="row">
-          <input type="checkbox" checked={live} onChange={(e) => setLive(e.target.checked)} />
-          Send actions to Core
-        </label>
-        {blocked && <p className="warn">Fix errors before running.</p>}
-        {available.length === 0 && <p className="muted">No events available from here.</p>}
-        {available.map((t, i) => {
-          const trig = transitionTrigger(t)
-          const ok = trig !== undefined && step(chart, ctx, current, trig)?.target === t.target
-          return (
-            <button key={i} disabled={blocked || !ok} onClick={() => trig && fire(trig)} title={ok ? '' : 'guard not satisfied (or shadowed by an earlier transition)'}>
-              ▶ {transitionLabel(t)} → {t.target}
-            </button>
-          )
-        })}
-        <button onClick={reset} disabled={blocked}>↺ Reset</button>
-        <p className="muted">{trail.join('  ·  ')}</p>
-
-        <label>
-          Context (JSON, read by guards)
-          <textarea
-            rows={4}
-            value={ctxText}
-            style={ctxBad ? { borderColor: '#ef4444' } : undefined}
-            onChange={(e) => {
-              setCtxText(e.target.value)
-              try {
-                const v = JSON.parse(e.target.value || '{}')
-                if (v === null || typeof v !== 'object' || Array.isArray(v)) throw new Error()
-                setCtx(v)
-                setCtxBad(false)
-              } catch {
-                setCtxBad(true)
-              }
-            }}
-          />
-        </label>
-
-        {issues.length > 0 && (
-          <>
-            <h5>Problems</h5>
-            {issues.map((i) => (
-              <p key={i} className={i.includes('unreachable') ? 'muted' : 'warn'}>{i}</p>
-            ))}
-          </>
-        )}
-
-        {sel && (
-          <>
-            <h4>{sel.id}</h4>
-            <label>
-              Label
-              <input value={sel.label ?? ''} onChange={(e) => patchState(sel.id, { label: e.target.value })} />
-            </label>
-            <button onClick={() => onChange({ ...chart, initial: sel.id })} disabled={chart.initial === sel.id}>
-              Make initial
-            </button>
-            <ActionsField
-              key={`${sel.id}-enter`}
-              title="Enter actions (JSON)"
-              value={sel.enter_actions}
-              onValid={(a) => patchState(sel.id, { enter_actions: a })}
-            />
-            <ActionsField
-              key={`${sel.id}-exit`}
-              title="Exit actions (JSON)"
-              value={sel.exit_actions}
-              onValid={(a) => patchState(sel.id, { exit_actions: a })}
-            />
-          </>
-        )}
-      </aside>
-    </div>
+  const editor = useMemo<EditorCtxValue>(
+    () => ({
+      selectedTransition: selectedT,
+      editTransition,
+      renaming,
+      startRename: (id) => {
+        setSelected(id)
+        setRenaming(id)
+      },
+      rename,
+      cancelRename: () => setRenaming(null),
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [selectedT, renaming, chart, selected, current],
   )
-}
 
-function ActionsField({ title, value, onValid }: { title: string; value?: ShowAction[]; onValid: (a: ShowAction[]) => void }) {
-  const [text, setText] = useState(JSON.stringify(value ?? [], null, 1))
-  const [bad, setBad] = useState(false)
+  const stateOptions = chart.states.map((s) => <option key={s.id}>{s.id}</option>)
+
   return (
-    <label>
-      {title}
-      <textarea
-        rows={5}
-        value={text}
-        style={bad ? { borderColor: '#ef4444' } : undefined}
-        onChange={(e) => {
-          setText(e.target.value)
-          try {
-            const v = JSON.parse(e.target.value || '[]')
-            if (!Array.isArray(v)) throw new Error()
-            setBad(false)
-            onValid(parseActions(e.target.value))
-          } catch {
-            setBad(true)
-          }
-        }}
-      />
-    </label>
+    <EditorCtx.Provider value={editor}>
+      <div className={`cv ${outline ? 'has-left' : ''} ${right ? 'has-right' : ''}`}>
+        <div className="cv-canvas" onDoubleClick={addStateAt}>
+          <ReactFlow
+            nodes={nodes}
+            edges={edges}
+            nodeTypes={nodeTypes}
+            edgeTypes={edgeTypes}
+            nodeOrigin={[0.5, 0.5]}
+            onNodesChange={onNodesChange}
+            nodesConnectable={tool === 'select'}
+            nodesDraggable={tool === 'select'}
+            onConnect={onConnect}
+            onNodeClick={(_, n) => selectState(n.id)}
+            onEdgeClick={(_, e) => typeof e.data?.index === 'number' && editTransition(e.data.index)}
+            onPaneClick={() => {
+              setSelected(null)
+              setSelectedT(null)
+            }}
+            onNodeDragStop={(_, n) =>
+              commit({ ...chart, layout: { ...(chart.layout ?? {}), [n.id]: { x: Math.round(n.position.x), y: Math.round(n.position.y) } } })
+            }
+            zoomOnDoubleClick={false}
+            deleteKeyCode={null}
+            // React Flow re-focuses the selected node, which would steal focus from the rename box
+            nodesFocusable={renaming === null}
+            connectionLineStyle={{ stroke: '#3b82f6', strokeWidth: 2 }}
+            colorMode="dark"
+            minZoom={0.2}
+            fitView
+            fitViewOptions={{ padding: 0.18 }}
+            // remount when the canvas is resized by a docked panel or states are added, so it re-fits
+            key={`${chart.states.length}-${outline}-${right !== null}`}
+          >
+            <Background variant={BackgroundVariant.Dots} gap={22} size={1.2} color="#2b2e3a" />
+
+            <Panel position="top-center" className="p-palette">
+              <CommandBar chart={chart} onApply={commit} onUndo={history.undo} onRedo={history.redo} canUndo={history.canUndo} canRedo={history.canRedo} />
+            </Panel>
+
+            <Panel position="top-left" className="p-crumb">
+              <span className="crumb">
+                <span className="muted">root</span> <span aria-hidden>›</span> <b>{chart.name ?? chart.id ?? 'show'}</b>
+              </span>
+              <button className={`status ${blocked ? 'bad' : 'good'}`} onClick={() => setRight('simulate')} title={blocked ? hard.join('\n') : 'No problems'}>
+                {blocked ? `⚠ ${hard.length} problem${hard.length > 1 ? 's' : ''}` : '✓ valid'}
+              </button>
+            </Panel>
+
+            <Panel position="top-right" className="p-top-right">
+              <button className={outline ? 'on' : ''} onClick={() => setOutline((o) => !o)} aria-pressed={outline}>☰ Outline</button>
+            </Panel>
+
+            <Panel position="bottom-left">
+              <ZoomControls />
+            </Panel>
+
+            <Panel position="bottom-center">
+              {notice && (
+                <div className="toast" role="status">
+                  {notice}
+                </div>
+              )}
+              <div className="toolbar" role="toolbar" aria-label="Canvas tools">
+                <button className={tool === 'select' ? 'on' : ''} onClick={() => setTool('select')} aria-pressed={tool === 'select'} title="Select, move and connect states">↖</button>
+                <button className={tool === 'pan' ? 'on' : ''} onClick={() => setTool('pan')} aria-pressed={tool === 'pan'} title="Pan the canvas">✋</button>
+                <button className={right === 'simulate' ? 'on' : ''} onClick={() => setRight((r) => (r === 'simulate' ? null : 'simulate'))} aria-pressed={right === 'simulate'} title="Simulate the show">▶</button>
+              </div>
+            </Panel>
+
+            {chart.states.length === 0 && (
+              <Panel position="top-center" className="empty-hint">
+                <p>Double-click the canvas to add a state,</p>
+                <p>or press <kbd>Ctrl K</kbd> and say “chain preshow, intro, drop, finale”.</p>
+              </Panel>
+            )}
+          </ReactFlow>
+        </div>
+
+        {outline && (
+          <Card title="Outline" className="left" onClose={() => setOutline(false)}>
+            <h5>States</h5>
+            {chart.states.map((s) => (
+              <button key={s.id} className={`row-btn ${s.id === selected ? 'sel' : ''}`} onClick={() => selectState(s.id)}>
+                {s.id === chart.initial ? '● ' : ''}
+                {s.id}
+                {s.label ? <span className="muted"> · {s.label}</span> : null}
+              </button>
+            ))}
+            <h5>Transitions</h5>
+            {chart.transitions.map((t, i) => (
+              <button key={i} className={`row-btn ${i === selectedT ? 'sel' : ''}`} onClick={() => editTransition(i)}>
+                {t.source} → {t.target} <span className="muted">· {transitionLabel(t)}</span>
+              </button>
+            ))}
+            <p className="muted">Tip: drag from a state’s edge to another state to connect them. Double-click a state to rename it.</p>
+          </Card>
+        )}
+
+        {right && (
+          <Card
+            title={right === 'simulate' ? 'Simulate' : right === 'transition' ? 'Transition' : sel ? sel.id : 'State'}
+            className="right"
+            onClose={() => setRight(null)}
+            tabs={
+              <span className="seg" role="tablist">
+                <button role="tab" aria-selected={right === 'simulate'} className={right === 'simulate' ? 'on' : ''} onClick={() => setRight('simulate')}>Run</button>
+                <button role="tab" aria-selected={right === 'state'} className={right === 'state' ? 'on' : ''} onClick={() => setRight('state')}>State</button>
+                <button role="tab" aria-selected={right === 'transition'} className={right === 'transition' ? 'on' : ''} onClick={() => setRight('transition')}>Link</button>
+              </span>
+            }
+          >
+            {right === 'simulate' ? (
+              <>
+                <p className="bigstate">{current || '—'}</p>
+                <label className="row">
+                  <input type="checkbox" checked={live} onChange={(e) => setLive(e.target.checked)} />
+                  Send actions to Core
+                </label>
+                {blocked && <p className="warn">Fix the problems below before running.</p>}
+                {available.length === 0 && <p className="muted">No events leave this state.</p>}
+                {available.map((t, i) => {
+                  const trig = transitionTrigger(t)
+                  const ok = trig !== undefined && step(chart, ctx, current, trig)?.target === t.target
+                  return (
+                    <button key={i} className="event-btn" disabled={blocked || !ok} onClick={() => trig && fire(trig)} title={ok ? '' : 'guard not satisfied (or shadowed by an earlier transition)'}>
+                      <span>▶ {transitionLabel(t)}</span>
+                      <span className="muted">→ {t.target}</span>
+                    </button>
+                  )
+                })}
+                <button onClick={reset} disabled={blocked}>↺ Reset</button>
+                <p className="muted">{trail.join('  ·  ')}</p>
+                <label>
+                  Context (JSON, read by guards)
+                  <textarea
+                    rows={4}
+                    value={ctxText}
+                    style={ctxBad ? { borderColor: '#ef4444' } : undefined}
+                    onChange={(e) => {
+                      setCtxText(e.target.value)
+                      try {
+                        const v = JSON.parse(e.target.value || '{}')
+                        if (v === null || typeof v !== 'object' || Array.isArray(v)) throw new Error()
+                        setCtx(v)
+                        setCtxBad(false)
+                      } catch {
+                        setCtxBad(true)
+                      }
+                    }}
+                  />
+                </label>
+                {issues.length > 0 && (
+                  <>
+                    <h5>Problems</h5>
+                    {issues.map((i) => (
+                      <p key={i} className={i.includes('unreachable') ? 'muted' : 'warn'}>{i}</p>
+                    ))}
+                  </>
+                )}
+              </>
+            ) : right === 'transition' ? (
+              selT && selectedT !== null ? (
+                <>
+                  <label>
+                    From
+                    <select value={selT.source} onChange={(e) => patchT(selectedT, { source: e.target.value })}>{stateOptions}</select>
+                  </label>
+                  <label>
+                    To
+                    <select value={selT.target} onChange={(e) => patchT(selectedT, { target: e.target.value })}>{stateOptions}</select>
+                  </label>
+                  <label>
+                    Event
+                    <input
+                      value={selT.event ?? ''}
+                      placeholder="e.g. START (leave empty for a timer)"
+                      onChange={(e) => patchT(selectedT, { event: e.target.value.toUpperCase().replace(/\s+/g, '_') || undefined }, `t${selectedT}:event`)}
+                    />
+                  </label>
+                  <label>
+                    Delay (ms)
+                    <input
+                      type="number"
+                      min={0}
+                      value={selT.after_ms ?? ''}
+                      placeholder="fires on its own after this long"
+                      onChange={(e) => patchT(selectedT, { after_ms: e.target.value === '' ? undefined : Number(e.target.value) }, `t${selectedT}:after`)}
+                    />
+                  </label>
+                  <label>
+                    Only if
+                    <input
+                      value={selT.guard ?? ''}
+                      placeholder="energy > 0.7 or a guard name"
+                      onChange={(e) => patchT(selectedT, { guard: e.target.value || undefined }, `t${selectedT}:guard`)}
+                    />
+                  </label>
+                  <button className="danger" onClick={() => deleteTransition(selectedT)}>Delete transition</button>
+                </>
+              ) : (
+                <p className="muted">Click a transition’s label on the canvas to edit it, or drag from one state to another to create one.</p>
+              )
+            ) : sel ? (
+              <>
+                <label>
+                  Label
+                  <input value={sel.label ?? ''} placeholder="a friendly name" onChange={(e) => patchState(sel.id, { label: e.target.value || undefined }, `label:${sel.id}`)} />
+                </label>
+                <div className="btnrow">
+                  <button onClick={() => setRenaming(sel.id)} title="Rename (F2)">Rename</button>
+                  <button onClick={() => commit({ ...chart, initial: sel.id })} disabled={chart.initial === sel.id}>Make initial</button>
+                </div>
+                <ActionList title="On enter" actions={sel.enter_actions} onChange={(a) => patchState(sel.id, { enter_actions: a }, `act:${sel.id}:enter`)} />
+                <ActionList title="On exit" actions={sel.exit_actions} onChange={(a) => patchState(sel.id, { exit_actions: a }, `act:${sel.id}:exit`)} />
+                <button className="danger" onClick={() => deleteState(sel.id)}>Delete state</button>
+              </>
+            ) : (
+              <p className="muted">Click a state on the canvas to edit it.</p>
+            )}
+          </Card>
+        )}
+      </div>
+    </EditorCtx.Provider>
   )
 }

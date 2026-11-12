@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { ReactFlow, Background, Controls } from '@xyflow/react'
-import { buildEdges, buildNodes, edgeTypes } from './showchartGraph'
+import { Background, BackgroundVariant, Panel, ReactFlow } from '@xyflow/react'
+import { ZoomControls, buildEdges, buildNodes, edgeTypes, nodeTypes } from './showchartGraph'
+import Card from './Card'
 import {
   step,
   timerEvent,
@@ -129,60 +130,44 @@ export default function LivePanel({ onFeed, onStatus }: Props) {
   const available = (def?.transitions ?? []).filter((t) => t.source === state)
 
   return (
-    <div className="showpanel live">
-      <aside className="library">
-        <h4>Runtime</h4>
-        <p>
-          <span className={`pill ${status}`}>feed: {status}</span>
+    <div className="cv has-right">
+      {def ? (
+        <div className="cv-canvas">
+        <ReactFlow
+          nodes={nodes}
+          edges={edges}
+          nodeTypes={nodeTypes}
+          edgeTypes={edgeTypes}
+          nodeOrigin={[0.5, 0.5]}
+          nodesConnectable={false}
+          nodesDraggable={false}
+          colorMode="dark"
+          minZoom={0.2}
+          fitView
+          fitViewOptions={{ padding: 0.18 }}
+          key={def.id ?? 'show'}
+        >
+          <Background variant={BackgroundVariant.Dots} gap={22} size={1.2} color="#2b2e3a" />
+          <Panel position="top-left" className="p-crumb">
+            <span className="crumb">
+              <span className="muted">root</span> <span aria-hidden>›</span> <b>{def.name ?? def.id ?? 'show'}</b>
+              {def.version ? <span className="muted"> v{def.version}</span> : null}
+            </span>
+            <span className={`pill ${status}`} role="status">feed: {status}</span>
+          </Panel>
+          <Panel position="bottom-left">
+            <ZoomControls />
+          </Panel>
+        </ReactFlow>
+        </div>
+      ) : (
+        <p className="muted pad">
+          <span className={`pill ${status}`} role="status">feed: {status}</span>{' '}
+          {status === 'online' ? 'Waiting for the show…' : 'Not connected. Start the runtime:  pchi-studio-api <show.pchi.json>  (port 3100)'}
         </p>
-        {def && (
-          <p className="muted">
-            {def.name ?? def.id ?? 'show'} {def.version ? `v${def.version}` : ''}
-          </p>
-        )}
-        <h5>Context</h5>
-        <pre className="ctx">{JSON.stringify(ctx, null, 1)}</pre>
-        <label>
-          Set context value
-          <div className="trow2">
-            <input value={key} onChange={(e) => setKey(e.target.value)} placeholder="key" />
-            <input
-              value={val}
-              onChange={(e) => setVal(e.target.value)}
-              placeholder="value"
-              onKeyDown={(e) => {
-                if (e.key !== 'Enter') return
-                let v: unknown = val
-                try {
-                  v = JSON.parse(val)
-                } catch {
-                  /* plain text */
-                }
-                send({ type: 'context', key, value: v })
-              }}
-            />
-          </div>
-          <span className="muted">Enter to send</span>
-        </label>
-      </aside>
+      )}
 
-      <main>
-        {def ? (
-          <ReactFlow nodes={nodes} edges={edges} edgeTypes={edgeTypes} nodesConnectable={false} nodesDraggable={false} colorMode="dark" fitView key={def.id ?? 'show'}>
-            <Background />
-            <Controls showInteractive={false} />
-          </ReactFlow>
-        ) : (
-          <p className="muted pad">
-            {status === 'online'
-              ? 'Waiting for the show…'
-              : 'Not connected. Start the runtime:  pchi-studio-api <show.pchi.json>  (port 3100)'}
-          </p>
-        )}
-      </main>
-
-      <aside className="inspector">
-        <h4>State</h4>
+      <Card title="Show" className="right">
         <p className="bigstate">{state || '—'}</p>
         {timerRows.map((r, i) => {
           const elapsed = Math.max(0, now - enteredAt)
@@ -207,8 +192,9 @@ export default function LivePanel({ onFeed, onStatus }: Props) {
           const trig = transitionTrigger(t)
           const ok = def && trig !== undefined && step(def, ctx, state, trig)?.target === t.target
           return (
-            <button key={i} disabled={!ok || t.event === undefined} onClick={() => t.event && send({ type: 'input', event: t.event })} title={t.event === undefined ? 'timed: fires on its own' : ok ? '' : 'guard not satisfied'}>
-              ▶ {transitionLabel(t)} → {t.target}
+            <button key={i} className="event-btn" disabled={!ok || t.event === undefined} onClick={() => t.event && send({ type: 'input', event: t.event })} title={t.event === undefined ? 'timed: fires on its own' : ok ? '' : 'guard not satisfied'}>
+              <span>▶ {transitionLabel(t)}</span>
+              <span className="muted">→ {t.target}</span>
             </button>
           )
         })}
@@ -222,7 +208,32 @@ export default function LivePanel({ onFeed, onStatus }: Props) {
             </div>
           ))}
         </div>
-      </aside>
+        <h5>Context</h5>
+        <pre className="ctx">{JSON.stringify(ctx, null, 1)}</pre>
+        <label>
+          Set a value
+          <div className="trow2">
+            <input value={key} onChange={(e) => setKey(e.target.value)} placeholder="key" />
+            <input
+              value={val}
+              onChange={(e) => setVal(e.target.value)}
+              placeholder="value"
+              onKeyDown={(e) => {
+                if (e.key !== 'Enter') return
+                let v: unknown = val
+                try {
+                  v = JSON.parse(val)
+                } catch {
+                  /* plain text */
+                }
+                send({ type: 'context', key, value: v })
+              }}
+            />
+          </div>
+          <span className="muted">Enter to send</span>
+        </label>
+
+      </Card>
     </div>
   )
 }
