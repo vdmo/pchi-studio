@@ -16,6 +16,12 @@ export default defineConfig({
     port: 5173,
     fs: { allow: ['..'] },
     proxy: {
+      // pchi-studio-api: live show state feed
+      '/api': {
+        target: 'http://127.0.0.1:3100',
+        ws: true,
+        rewrite: (p) => p.replace(/^\/api/, ''),
+      },
       '/core': {
         target: 'http://127.0.0.1:3000',
         ws: true,

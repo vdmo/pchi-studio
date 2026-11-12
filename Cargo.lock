@@ -1074,6 +1074,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "pchi-studio-api"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "futures-util",
+ "pchi-eventstore",
+ "pchi-showchart",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+]
+
+[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

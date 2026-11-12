@@ -32,6 +32,7 @@ import Inspector, { type EdgeSel } from './components/Inspector'
 import EventConsole, { type LogEntry } from './components/EventConsole'
 import Timeline from './components/Timeline'
 import ShowchartPanel from './components/ShowchartPanel'
+import LivePanel from './components/LivePanel'
 
 type FNode = Node<{ node: PchiNode }>
 type FEdge = Edge<{ behaviour: EdgeBehaviour }>
@@ -68,7 +69,7 @@ const CATEGORIES = Object.keys(CATEGORY_COLOR) as NodeCategory[]
 
 export default function App() {
   const initial = useMemo(() => newShow(), [])
-  const [mode, setMode] = useState<'design' | 'run' | 'show'>('design')
+  const [mode, setMode] = useState<'design' | 'run' | 'show' | 'live'>('design')
   const [showchart, setShowchart] = useState(initial.showchart ?? newShowchart())
   const [meta, setMeta] = useState({ project: initial.project, name: initial.name })
   const [timeline, setTimeline] = useState(initial.timeline)
@@ -204,6 +205,7 @@ export default function App() {
           <button className={mode === 'design' ? 'on' : ''} onClick={() => setMode('design')}>Design</button>
           <button className={mode === 'run' ? 'on' : ''} onClick={() => setMode('run')}>Run</button>
           <button className={mode === 'show' ? 'on' : ''} onClick={() => setMode('show')}>Showchart</button>
+          <button className={mode === 'live' ? 'on' : ''} onClick={() => setMode('live')}>Live</button>
         </div>
         <input value={meta.project} onChange={(e) => setMeta({ ...meta, project: e.target.value })} title="project" />
         <input value={meta.name} onChange={(e) => setMeta({ ...meta, name: e.target.value })} title="show" />
@@ -216,6 +218,8 @@ export default function App() {
           <input type="file" accept=".pchi,.json" hidden onChange={(e) => e.target.files?.[0] && load(e.target.files[0])} />
         </label>
       </header>
+
+      {mode === 'live' && <LivePanel onFeed={(e) => pushLog('in', e)} />}
 
       {mode === 'show' && (
         <ShowchartPanel chart={showchart} onChange={setShowchart} emit={emit} note={(e) => pushLog('sim', e)} />
@@ -237,7 +241,7 @@ export default function App() {
         </aside>
       )}
 
-      {mode !== 'show' && <main>
+      {mode !== 'show' && mode !== 'live' && <main>
         <ReactFlow
           nodes={nodes}
           edges={edges}
@@ -259,7 +263,7 @@ export default function App() {
         </ReactFlow>
       </main>}
 
-      {mode !== 'show' && <aside className="inspector">
+      {mode !== 'show' && mode !== 'live' && <aside className="inspector">
         <Inspector
           node={node}
           edge={edge}
@@ -271,7 +275,14 @@ export default function App() {
       </aside>}
 
       <footer>
-        {mode === 'show' ? (
+        {mode === 'live' ? (
+          <section className="timeline">
+            <h4>Live</h4>
+            <p className="muted">
+              Observing a show running in pchi-studio-api. Every feed message appears in the event stream.
+            </p>
+          </section>
+        ) : mode === 'show' ? (
           <section className="timeline">
             <h4>Showchart</h4>
             <p className="muted">

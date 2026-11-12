@@ -43,3 +43,7 @@ textarea { background: #0e0f12; color: inherit; border: 1px solid #2e3440; borde
 .tgroup { margin-bottom: 6px; padding-bottom: 6px; border-bottom: 1px solid #262a33; }
 .trow2 { display: grid; grid-template-columns: 1fr 80px; gap: 3px; margin-top: 3px; }
 .trow2 input { min-width: 0; font-size: 12px; padding: 3px; }
+.bigstate { font-size: 26px; font-weight: 700; margin: 4px 0 8px; color: #fbbf24; }
+.ctx { background: #0e0f12; border: 1px solid #2e3440; border-radius: 6px; padding: 6px; font-size: 12px; margin: 0 0 8px; overflow: auto; max-height: 160px; }
+.pad { padding: 16px; }
+.trail { font-size: 12px; overflow: auto; }
