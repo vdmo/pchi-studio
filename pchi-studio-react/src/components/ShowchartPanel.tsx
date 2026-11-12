@@ -21,6 +21,7 @@ import {
   type StateNodeData,
 } from './showchartGraph'
 import CommandBar from './CommandBar'
+import StartScreen from './StartScreen'
 import Card from './Card'
 import ActionList from './ActionList'
 import type { History } from './useHistory'
@@ -315,16 +316,16 @@ function Editor({ chart, history, note }: Props) {
             <Background variant={BackgroundVariant.Dots} gap={22} size={1.2} color="#2b2e3a" />
 
             <Panel position="top-center" className="p-palette">
-              <CommandBar chart={chart} onApply={commit} onUndo={history.undo} onRedo={history.redo} canUndo={history.canUndo} canRedo={history.canRedo} />
+              <CommandBar chart={chart} onApply={commit} onUndo={history.undo} onRedo={history.redo} canUndo={history.canUndo} canRedo={history.canRedo} stateContext={selected ?? undefined} />
             </Panel>
 
             <Panel position="top-left" className="p-crumb">
               <span className="crumb">
                 <span className="muted">root</span> <span aria-hidden>›</span> <b>{chart.name ?? chart.id ?? 'show'}</b>
               </span>
-              <button className={`status ${blocked ? 'bad' : 'good'}`} onClick={() => setRight('simulate')} title={blocked ? hard.join('\n') : 'No problems'}>
+              {chart.states.length > 0 && <button className={`status ${blocked ? 'bad' : 'good'}`} onClick={() => setRight('simulate')} title={blocked ? hard.join('\n') : 'No problems'}>
                 {blocked ? `⚠ ${hard.length} problem${hard.length > 1 ? 's' : ''}` : '✓ valid'}
-              </button>
+              </button>}
             </Panel>
 
             <Panel position="top-right" className="p-top-right">
@@ -348,13 +349,8 @@ function Editor({ chart, history, note }: Props) {
               </div>
             </Panel>
 
-            {chart.states.length === 0 && (
-              <Panel position="top-center" className="empty-hint">
-                <p>Double-click the canvas to add a state,</p>
-                <p>or press <kbd>Ctrl K</kbd> and say “chain preshow, intro, drop, finale”.</p>
-              </Panel>
-            )}
           </ReactFlow>
+          {chart.states.length === 0 && <StartScreen chart={chart} onApply={commit} />}
         </div>
 
         {outline && (

@@ -1,16 +1,26 @@
 import { useEffect, useRef, useState } from 'react'
-import { COMMAND_EXAMPLES, runCommandText, type CommandResult, type Showchart } from '@pchi/sdk'
+import { COMMAND_EXAMPLES, runCommandText, type LiveAction, type LiveResult, type Showchart } from '@pchi/sdk'
 
-type Ok = Extract<CommandResult, { ok: true }>
+/** What a confirmed command will do: shown in the voice preview, then applied. */
+interface Exec {
+  summaries: string[]
+  notes: string[]
+  apply: () => void
+}
 
 interface Props {
-  chart: Showchart
-  onApply: (chart: Showchart) => void
+  chart?: Showchart
+  onApply?: (chart: Showchart) => void
+  /** Operate a running show instead of editing the chart: no undo, and the runtime has the last word. */
+  live?: { run: (text: string) => LiveResult; apply: (a: LiveAction) => void; examples: string[] }
   /** Undo/redo act on the editor's shared history. They return false when there is nothing to do. */
-  onUndo: () => boolean
-  onRedo: () => boolean
-  canUndo: boolean
-  canRedo: boolean
+  onUndo?: () => boolean
+  onRedo?: () => boolean
+  canUndo?: boolean
+  canRedo?: boolean
+  /** The state the user is looking at: timeline commands without "in <state>" apply to it. */
+  stateContext?: string
+  placeholder?: string
 }
 
 // Web Speech API is not in every TypeScript DOM lib, so keep a tiny local shape.
@@ -47,10 +57,10 @@ type Message = { kind: 'ok' | 'error' | 'info'; text: string; hint?: string; lin
  * typed commands apply at once (and can be undone); spoken ones are shown as a
  * preview first, because a misheard command is the main risk with voice.
  */
-export default function CommandBar({ chart, onApply, onUndo, onRedo, canUndo, canRedo }: Props) {
+export default function CommandBar({ chart, onApply, live, onUndo, onRedo, canUndo, canRedo, stateContext, placeholder }: Props) {
   const [text, setText] = useState('')
   const [msg, setMsg] = useState<Message | null>(null)
-  const [plan, setPlan] = useState<{ result: Ok; heard: string } | null>(null)
+  const [plan, setPlan] = useState<{ exec: Exec; heard: string } | null>(null)
   const [listening, setListening] = useState(false)
   const [askPrivacy, setAskPrivacy] = useState(false)
   const [voiceOk, setVoiceOk] = useState(false) // privacy notice accepted this session
@@ -59,6 +69,10 @@ export default function CommandBar({ chart, onApply, onUndo, onRedo, canUndo, ca
   const inputRef = useRef<HTMLInputElement>(null)
   const chartRef = useRef(chart)
   chartRef.current = chart
+  const liveRef = useRef(live)
+  liveRef.current = live
+  const stateRef = useRef(stateContext)
+  stateRef.current = stateContext
 
   useEffect(() => () => rec.current?.abort(), [])
 
@@ -77,19 +91,30 @@ export default function CommandBar({ chart, onApply, onUndo, onRedo, canUndo, ca
 
   // The undo history lives in the editor (it also covers dragging, deleting and
   // field edits), so a command is just one more change handed to onApply.
-  const commit = (r: Ok, label: string) => {
-    onApply(r.chart)
+  const commit = (x: Exec, label: string) => {
+    x.apply()
     setPlan(null)
     setText('')
-    setMsg({ kind: 'ok', text: label, lines: [...r.steps.map((s) => s.summary), ...r.notes.map((n) => `assumed ${n}`)] })
+    setMsg({ kind: 'ok', text: label, lines: [...x.summaries, ...x.notes.map((n) => `assumed ${n}`)] })
   }
 
-  const undo = () => setMsg(onUndo() ? { kind: 'ok', text: 'Undone.' } : { kind: 'info', text: 'Nothing to undo.' })
-  const redo = () => setMsg(onRedo() ? { kind: 'ok', text: 'Redone.' } : { kind: 'info', text: 'Nothing to redo.' })
+  const undo = () => setMsg(onUndo?.() ? { kind: 'ok', text: 'Undone.' } : { kind: 'info', text: 'Nothing to undo.' })
+  const redo = () => setMsg(onRedo?.() ? { kind: 'ok', text: 'Redone.' } : { kind: 'info', text: 'Nothing to redo.' })
 
   const run = (input: string, fromVoice: boolean) => {
-    const r = runCommandText(input, chartRef.current)
     setPlan(null)
+    const lv = liveRef.current
+    if (lv) {
+      const r = lv.run(input)
+      if (!r.ok) return setMsg({ kind: 'error', text: r.error, hint: r.hint })
+      const exec: Exec = { summaries: [r.summary], notes: r.notes, apply: () => lv.apply(r.action) }
+      if (fromVoice) {
+        setMsg(null)
+        return setPlan({ exec, heard: input })
+      }
+      return commit(exec, 'Sent.')
+    }
+    const r = runCommandText(input, chartRef.current!, { state: stateRef.current })
     if (!r.ok) return setMsg({ kind: 'error', text: r.error, hint: r.hint })
     const only = r.steps.length === 1 ? r.steps[0].command.op : null
     if (only === 'undo' || only === 'redo' || only === 'help') setText('')
@@ -101,8 +126,8 @@ export default function CommandBar({ chart, onApply, onUndo, onRedo, canUndo, ca
     }
     if (fromVoice) {
       setMsg(null)
-      setPlan({ result: r, heard: input })
-    } else commit(r, 'Done.')
+      setPlan({ exec: { summaries: r.steps.map((s) => s.summary), notes: r.notes, apply: () => onApply?.(r.chart) }, heard: input })
+    } else commit({ summaries: r.steps.map((s) => s.summary), notes: r.notes, apply: () => onApply?.(r.chart) }, 'Done.')
   }
 
   const startVoice = () => {
@@ -146,7 +171,7 @@ export default function CommandBar({ chart, onApply, onUndo, onRedo, canUndo, ca
             ref={inputRef}
             value={text}
             onChange={(e) => setText(e.target.value)}
-            placeholder={listening ? 'Listening…' : 'Type or say a command…'}
+            placeholder={listening ? 'Listening…' : (placeholder ?? 'Type or say a command…')}
             aria-label="Show command"
             spellCheck={false}
           />
@@ -164,8 +189,12 @@ export default function CommandBar({ chart, onApply, onUndo, onRedo, canUndo, ca
           {listening ? '■' : '🎤'}
         </button>
         <button type="submit" disabled={!text.trim()}>Do it</button>
-        <button type="button" onClick={undo} disabled={!canUndo} title="Undo (Ctrl+Z)">↶</button>
-        <button type="button" onClick={redo} disabled={!canRedo} title="Redo (Ctrl+Shift+Z)">↷</button>
+        {!live && (
+          <>
+            <button type="button" onClick={undo} disabled={!canUndo} title="Undo (Ctrl+Z)">↶</button>
+            <button type="button" onClick={redo} disabled={!canRedo} title="Redo (Ctrl+Shift+Z)">↷</button>
+          </>
+        )}
         <button type="button" onClick={() => setShowExamples((s) => !s)} aria-expanded={showExamples} title="Examples">?</button>
       </form>
 
@@ -193,14 +222,14 @@ export default function CommandBar({ chart, onApply, onUndo, onRedo, canUndo, ca
             I heard: <b>“{plan.heard}”</b>
           </p>
           <ul>
-            {plan.result.steps.map((s, i) => (
-              <li key={i}>{s.summary}</li>
+            {plan.exec.summaries.map((s, i) => (
+              <li key={i}>{s}</li>
             ))}
-            {plan.result.notes.map((n, i) => (
+            {plan.exec.notes.map((n, i) => (
               <li key={`n${i}`} className="muted">assumed {n}</li>
             ))}
           </ul>
-          <button autoFocus onClick={() => commit(plan.result, 'Done.')}>Apply</button>
+          <button autoFocus onClick={() => commit(plan.exec, live ? 'Sent.' : 'Done.')}>{live ? 'Send' : 'Apply'}</button>
           <button onClick={() => setPlan(null)}>Cancel</button>
         </div>
       )}
@@ -223,7 +252,7 @@ export default function CommandBar({ chart, onApply, onUndo, onRedo, canUndo, ca
 
       {showExamples && (
         <div className="examples">
-          {COMMAND_EXAMPLES.map((ex) => (
+          {(live?.examples ?? COMMAND_EXAMPLES).map((ex) => (
             <button key={ex} type="button" onClick={() => setText(ex)} title="Put this in the box">
               {ex}
             </button>

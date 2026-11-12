@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent, type PointerEvent } from 'react'
 import Card from './Card'
 import ActionList from './ActionList'
+import CommandBar from './CommandBar'
 import type { History } from './useHistory'
 import {
   DEPTS,
@@ -248,6 +249,18 @@ export default function TimelinePanel({ chart, history, note }: Props) {
   return (
     <div className={`cv ${selCue ? 'has-right' : ''}`}>
       <div className="cv-canvas tl-canvas">
+        <div className="tl-cmd">
+          <CommandBar
+            chart={chart}
+            onApply={commit}
+            onUndo={history.undo}
+            onRedo={history.redo}
+            canUndo={history.canUndo}
+            canRedo={history.canRedo}
+            stateContext={stateId}
+            placeholder={`Timeline commands for ${stateId}, e.g. “at 4 seconds lighting look blue”`}
+          />
+        </div>
         <div className="tl-bar">
           <div className="tl-states" role="tablist" aria-label="State timelines">
             {chart.states.map((s) => (

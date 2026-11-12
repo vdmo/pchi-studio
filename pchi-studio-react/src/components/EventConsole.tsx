@@ -41,19 +41,19 @@ export default function EventConsole({
     })
 
   return (
-    <section className={`console ${collapsible ? "slim" : ""}`}>
+    <section className={`console ${collapsible ? "slim" : ""} ${collapsible && !shown ? 'folded' : ''}`}>
       <div className="bar">
         {collapsible && (
           <button className="icon" onClick={() => setShown((s) => !s)} aria-expanded={shown} aria-label={shown ? "Collapse event stream" : "Expand event stream"}>
             {shown ? "▾" : "▸"}
           </button>
         )}
-        <h4>
-          Event stream <span className="muted">{filter ? `${rows.length} of ${log.length}` : log.length}</span>
+        <h4 onClick={collapsible ? () => setShown((x) => !x) : undefined} style={collapsible ? { cursor: 'pointer' } : undefined}>
+          {collapsible && !shown ? 'Events' : 'Event stream'} <span className="muted">{filter ? `${rows.length} of ${log.length}` : log.length}</span>
         </h4>
-        <input className="filter" value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="filter: type or text" aria-label="Filter events" />
-        <button onClick={() => setOpen(new Set(open.size ? [] : rows.map((r) => r.id)))}>{open.size ? 'collapse' : 'expand'}</button>
-        <button onClick={onClear}>clear</button>
+        {shown && <input className="filter" value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="filter: type or text" aria-label="Filter events" />}
+        {shown && <button onClick={() => setOpen(new Set(open.size ? [] : rows.map((r) => r.id)))}>{open.size ? 'collapse' : 'expand'}</button>}
+        {shown && <button onClick={onClear}>clear</button>}
       </div>
       {shown && <div className="lines">
         {rows.length === 0 && <p className="muted">{log.length ? 'No events match the filter.' : 'No events yet.'}</p>}

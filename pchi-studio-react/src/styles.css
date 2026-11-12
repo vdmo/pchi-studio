@@ -262,3 +262,35 @@ button.primary { background: #3b82f6; border-color: #3b82f6; color: #fff; }
 .lcue.upcoming { opacity: .9; }
 .lcue.due { box-shadow: 0 0 0 2px #fbbf24; }
 .live-playhead { position: absolute; top: 0; bottom: 0; width: 2px; background: #fbbf24; z-index: 3; pointer-events: none; box-shadow: 0 0 8px rgba(251,191,36,.6); }
+
+/* command bar as a plain row above the timeline */
+.tl-cmd { padding: 10px 14px 0; }
+.tl-cmd .cmdbar { padding: 6px; background: #1b1d25; border: 1px solid #2f323e; border-radius: 12px; max-height: 40vh; overflow: auto; }
+
+/* --- start screen (empty Show tab) --- */
+.start { position: absolute; z-index: 6; top: 110px; left: 50%; transform: translateX(-50%); width: min(640px, calc(100% - 32px)); padding: 22px 24px; background: #1b1d25; border: 1px solid #2f323e; border-radius: 14px; box-shadow: 0 16px 48px rgba(0,0,0,.5); }
+.start h2 { margin: 0 0 4px; font-size: 20px; }
+.start > p { margin: 0 0 14px; }
+.start form { display: flex; gap: 8px; }
+.start form input { flex: 1; min-width: 0; padding: 9px 12px; font-size: 15px; }
+.start button.primary { background: #3b82f6; border-color: #3b82f6; color: #fff; }
+.start button.primary:disabled { opacity: .5; }
+.start-err { margin: 10px 0 0 !important; color: #f87171; font-size: 13px; }
+.start-ideas { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 16px; }
+.start-ideas button { font-size: 12px; padding: 3px 9px; border-radius: 999px; color: #9a9eac; }
+.start-templates { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; }
+.start-templates button { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: 12px; text-align: left; border-radius: 10px; }
+.start-templates button:hover { border-color: #3b82f6; }
+.start-templates .muted { font-size: 12px; }
+.start-foot { margin: 16px 0 0 !important; font-size: 12px; }
+
+/* --- quieter footer: a folded event stream is just a small chip --- */
+.slimfoot:has(.console.folded) { width: max-content; border: 0; background: transparent; position: absolute; right: 10px; bottom: 8px; z-index: 5; }
+.console.folded { padding: 2px 8px !important; background: #13151a; border: 1px solid #262a33; border-radius: 999px; }
+
+/* narrow windows: the command bar gets its own row under the breadcrumb instead of fighting it */
+@media (max-width: 900px) {
+  .p-palette { width: calc(100% - 24px) !important; margin-top: 46px !important; }
+}
+.app { position: relative; }
+.cv.has-right .p-palette, .cv.has-left .p-palette { margin-top: 46px !important; }

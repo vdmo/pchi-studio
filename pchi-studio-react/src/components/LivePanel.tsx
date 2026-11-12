@@ -2,13 +2,17 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Background, BackgroundVariant, Panel, ReactFlow } from '@xyflow/react'
 import { ZoomControls, buildEdges, buildNodes, edgeTypes, nodeTypes } from './showchartGraph'
 import Card from './Card'
+import CommandBar from './CommandBar'
 import {
+  LIVE_EXAMPLES,
   deptOf,
+  parseLiveCommand,
   step,
   timelineEnd,
   timerEvent,
   transitionLabel,
   transitionTrigger,
+  type LiveAction,
   type PchiEvent,
   type ShowContext,
   type ShowTimeline,
@@ -204,6 +208,16 @@ export default function LivePanel({ onFeed, onStatus }: Props) {
 
   const send = (m: PchiEvent) => ws.current?.readyState === WebSocket.OPEN && ws.current.send(JSON.stringify(m))
 
+  const liveApi = useMemo(
+    () => ({
+      run: (text: string) => parseLiveCommand(text, def, state, ctx),
+      apply: (a: LiveAction) => send(a.kind === 'event' ? { type: 'input', event: a.event } : a.kind === 'reset' ? { type: 'reset' } : { type: 'context', key: a.key, value: a.value }),
+      examples: LIVE_EXAMPLES,
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [def, state, ctx],
+  )
+
   const nodes = useMemo(() => (def ? buildNodes(def, state, false) : []), [def, state])
   const edges = useMemo(() => (def ? buildEdges(def, state) : []), [def, state])
 
@@ -229,6 +243,9 @@ export default function LivePanel({ onFeed, onStatus }: Props) {
           key={def.id ?? 'show'}
         >
           <Background variant={BackgroundVariant.Dots} gap={22} size={1.2} color="#2b2e3a" />
+          <Panel position="top-center" className="p-palette">
+            <CommandBar live={liveApi} placeholder={`Operate the show, e.g. "go to ${(available.find((t) => t.event)?.target ?? 'drop').toLowerCase()}"`} />
+          </Panel>
           <Panel position="top-left" className="p-crumb">
             <span className="crumb">
               <span className="muted">root</span> <span aria-hidden>›</span> <b>{def.name ?? def.id ?? 'show'}</b>

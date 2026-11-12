@@ -10,7 +10,18 @@
 // Importing values from './index' is circular (index re-exports this file);
 // that is safe because nothing here runs at import time.
 
-import { guardError, type ShowAction, type ShowContext, type Showchart, type ShowState, type ShowTransition } from './index'
+import {
+  DEPTS,
+  guardError,
+  type ShowAction,
+  type ShowContext,
+  type ShowCue,
+  type ShowLane,
+  type Showchart,
+  type ShowState,
+  type ShowTimeline,
+  type ShowTransition,
+} from './index'
 
 export type ShowCommand =
   | { op: 'clearShow' }
@@ -24,6 +35,14 @@ export type ShowCommand =
   | { op: 'addAction'; state: string; when: 'enter' | 'exit'; action: ShowAction }
   | { op: 'clearActions'; state: string; when?: 'enter' | 'exit' }
   | { op: 'setContext'; key: string; value: unknown }
+  // timelines: lanes and cues inside a state
+  | { op: 'addLane'; state: string; dept?: string; name?: string; standard?: boolean }
+  | { op: 'removeLane'; state: string; dept?: string; name?: string }
+  | { op: 'addCue'; state: string; dept?: string; laneName?: string; at_ms: number; length_ms?: number; label?: string; action: ShowAction }
+  | { op: 'moveCue'; state: string; dept?: string; laneName?: string; from_ms: number; to_ms: number }
+  | { op: 'removeCue'; state: string; dept?: string; laneName?: string; at_ms: number }
+  | { op: 'setTimelineLength'; state: string; duration_ms: number }
+  | { op: 'clearTimeline'; state: string }
   | { op: 'undo' }
   | { op: 'redo' }
   | { op: 'help' }
@@ -56,6 +75,12 @@ export const COMMAND_EXAMPLES = [
   'start at preshow',
   'set energy to 0.8',
   'remove state breakdown',
+  'add the standard lanes in intro',
+  'add a lighting cue at 4 seconds look blue in intro',
+  'at 10 seconds laser cue l3 in drop',
+  'move the lighting cue at 2 seconds to 5 seconds in intro',
+  'remove the laser cue at 4 seconds in intro',
+  'set intro length to 20 seconds',
   'undo',
 ]
 
@@ -285,6 +310,15 @@ export function applyCommand(chart: Showchart, cmd: ShowCommand): { chart: Showc
       c.context = { ...(c.context ?? {}), [cmd.key]: cmd.value } as ShowContext
       return { chart: c, summary: `Set context ${cmd.key} = ${JSON.stringify(cmd.value)}` }
 
+    case 'addLane':
+    case 'removeLane':
+    case 'addCue':
+    case 'moveCue':
+    case 'removeCue':
+    case 'setTimelineLength':
+    case 'clearTimeline':
+      return applyTimeline(c, cmd)
+
     case 'undo':
     case 'redo':
     case 'help':
@@ -341,7 +375,7 @@ function splitStateAndActions(rest: string): { stateText: string; phrases: strin
   return stateText ? { stateText, phrases } : null
 }
 
-const FRAGMENT_START = 'add|create|new|make|remove|delete|rename|label|title|connect|link|disconnect|unlink|set|start|begin|when|on|from|clear|chain|sequence|undo|redo|help|entering|leaving'
+const FRAGMENT_START = 'add|create|new|make|remove|delete|rename|label|title|connect|link|disconnect|unlink|set|start|begin|when|on|from|clear|chain|sequence|undo|redo|help|entering|leaving|move|at'
 
 function splitFragments(text: string): string[] {
   return text
@@ -351,12 +385,12 @@ function splitFragments(text: string): string[] {
     .filter(Boolean)
 }
 
-const DEPTS = /^(?:scene|lighting|lights?|laser|audio|sound|playlist|output|initial|start|cue)\b/i
+const RESERVED_KEYS = /^(?:scene|lighting|lights?|laser|audio|sound|playlist|output|initial|start|cue)\b/i
 
 class Unparsed extends Error {}
 
 /** Parse one fragment against `chart` (for name resolution). */
-function parseFragment(text: string, chart: Showchart, notes: string[]): ShowCommand[] {
+function parseFragment(text: string, chart: Showchart, notes: string[], defaultState?: string): ShowCommand[] {
   let m: RegExpMatchArray | null
   const st = (raw: string) => {
     const id = resolveState(chart, raw, notes)
@@ -368,6 +402,10 @@ function parseFragment(text: string, chart: Showchart, notes: string[]): ShowCom
   if (/^redo$/i.test(text)) return [{ op: 'redo' }]
   if (/^(?:help|what can i say|commands|examples)\??$/i.test(text)) return [{ op: 'help' }]
   if (/^(?:new|clear|reset|empty)\s+(?:the\s+)?show$/i.test(text)) return [{ op: 'clearShow' }]
+
+  // timelines (lanes and cues) get the first look: their phrases share words with the others
+  const timeline = parseTimelineFragment(text, chart, notes, defaultState)
+  if (timeline) return timeline
 
   // chain preshow, intro, drop → states + NEXT transitions
   if ((m = text.match(/^(?:chain|sequence|flow|arrange|build|show)(?:\s+(?:of|with|from))?\s*:?\s+(.+)$/i))) {
@@ -448,7 +486,7 @@ function parseFragment(text: string, chart: Showchart, notes: string[]): ShowCom
   if (tr) return [tr]
 
   // context: "set energy to 0.8"
-  if ((m = text.match(/^set\s+([\w.]+)\s+(?:to|=|as)\s+(.+)$/i)) && !DEPTS.test(m[1])) {
+  if ((m = text.match(/^set\s+([\w.]+)\s+(?:to|=|as)\s+(.+)$/i)) && !RESERVED_KEYS.test(m[1])) {
     let value: unknown = m[2].trim()
     try {
       value = JSON.parse(m[2].trim().toLowerCase())
@@ -528,7 +566,7 @@ function parseTransition(text: string, chart: Showchart, notes: string[]): ShowC
  * result carries the new chart and a step-by-step summary. All-or-nothing:
  * if any part fails, nothing changes.
  */
-export function runCommandText(text: string, chart: Showchart): CommandResult {
+export function runCommandText(text: string, chart: Showchart, opts: { state?: string } = {}): CommandResult {
   const fragments = splitFragments(text)
   if (!fragments.length) return { ok: false, error: 'Type or say a command.', hint: COMMAND_EXAMPLES[0] }
   const notes: string[] = []
@@ -538,7 +576,7 @@ export function runCommandText(text: string, chart: Showchart): CommandResult {
     for (const frag of fragments) {
       let cmds: ShowCommand[]
       try {
-        cmds = parseFragment(frag, working, notes)
+        cmds = parseFragment(frag, working, notes, opts.state)
       } catch (e) {
         if (e instanceof Unparsed) throw new CommandError(`I didn't understand "${frag}".`, `Try something like: ${COMMAND_EXAMPLES[1]}  ·  ${COMMAND_EXAMPLES[2]}  ·  say "help" for more`)
         throw e
@@ -554,4 +592,306 @@ export function runCommandText(text: string, chart: Showchart): CommandResult {
     throw e
   }
   return { ok: true, chart: working, steps, notes }
+}
+
+// ───────────────────────── timeline commands ─────────────────────────
+// Lanes and cues inside a state's timeline: "add a lighting cue at 4 seconds in intro".
+
+const DEPT_WORDS: Record<string, string> = {
+  visual: 'visual', visuals: 'visual', video: 'visual', vj: 'visual', scene: 'visual',
+  lighting: 'lighting', lights: 'lighting', light: 'lighting',
+  laser: 'laser', lasers: 'laser',
+  audio: 'audio', sound: 'audio',
+  other: 'other',
+}
+const deptFromWord = (w?: string) => (w ? DEPT_WORDS[w.toLowerCase()] : undefined)
+const deptFromKind = (kind: string): string => {
+  const head = kind.split('.')[0]
+  return head === 'scene' || head === 'renderer' || head === 'output' || head === 'playlist' ? 'visual' : deptFromWord(head) ?? 'other'
+}
+
+const fmtSecs = (ms: number) => `${(ms / 1000).toFixed(ms % 1000 ? (ms % 100 ? 2 : 1) : 0)} s`
+
+const TIME_UNIT = '(?:ms|milliseconds?|s|secs?|seconds?|m|mins?|minutes?)'
+
+/** "4 seconds", "4s", "four seconds", "1:30", "a minute", "2.5" (bare = seconds) → ms, or null. */
+function parseTime(src: string): number | null {
+  const s = src.trim().replace(/\s+/g, ' ')
+  let m = s.match(/^(\d+):(\d{2}(?:\.\d+)?)$/)
+  if (m) return Math.round((Number(m[1]) * 60 + Number(m[2])) * 1000)
+  m = s.match(new RegExp(`^(\\d+(?:\\.\\d+)?|[a-z]+)\\s*(${TIME_UNIT})$`, 'i'))
+  if (m) return duration(m[1], m[2])
+  m = s.match(/^(\d+(?:\.\d+)?)$/)
+  if (m) return Math.round(Number(m[1]) * 1000)
+  return null
+}
+const TIME_SRC = `(?:\\d+:\\d{2}(?:\\.\\d+)?|(?:\\d+(?:\\.\\d+)?|[a-z]+)\\s*${TIME_UNIT}\\b|\\d+(?:\\.\\d+)?)`
+
+/** Remove the first match of `re` from `text`; returns [match, textWithoutIt]. */
+function take(text: string, re: RegExp): [RegExpMatchArray | null, string] {
+  const m = text.match(re)
+  if (!m || m.index === undefined) return [null, text]
+  return [m, (text.slice(0, m.index) + ' ' + text.slice(m.index + m[0].length)).replace(/\s+/g, ' ').trim()]
+}
+
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+/** "in intro" / "during drop": finds an existing state named after in/during, removes that phrase. */
+function takeState(text: string, chart: Showchart, notes: string[]): { state?: string; rest: string } {
+  const re = /\b(?:in|during|within)\s+(?:the\s+)?([a-z0-9_ ]+?)(?=\s+(?:at|after|for|lasting|on|with)\b|$|,)/gi
+  for (const m of text.matchAll(re)) {
+    const words = m[1].trim().split(/\s+/)
+    for (let n = words.length; n >= 1; n--) {
+      const cand = words.slice(0, n).join(' ')
+      const id = resolveState(chart, cand, notes)
+      if (id) {
+        const phrase = new RegExp(`\\b(?:in|during|within)\\s+(?:the\\s+)?${escapeRe(cand)}\\b`, 'i')
+        return { state: id, rest: text.replace(phrase, ' ').replace(/\s+/g, ' ').trim() }
+      }
+    }
+  }
+  return { rest: text }
+}
+
+type LaneSpec = { dept?: string; name?: string }
+
+function findLane(tl: ShowTimeline, spec: LaneSpec): ShowLane | undefined {
+  if (spec.name) {
+    const want = squash(spec.name)
+    const byName = tl.lanes.find((l) => squash(l.id) === want || squash(l.name ?? '') === want)
+    if (byName) return byName
+  }
+  return spec.dept && spec.dept !== 'other' ? tl.lanes.find((l) => l.dept === spec.dept) : undefined
+}
+
+function makeLane(tl: ShowTimeline, spec: LaneSpec): ShowLane {
+  const d = DEPTS.find((x) => x.id === (spec.dept ?? 'other')) ?? DEPTS[4]
+  const name = spec.name ?? d.label
+  const base = spec.dept && spec.dept !== 'other' && !spec.name ? spec.dept : norm(name).toLowerCase() || 'lane'
+  let id = base
+  for (let n = 2; tl.lanes.some((l) => l.id === id); n++) id = `${base}-${n}`
+  return { id, name, dept: spec.dept ?? 'other', cues: [] }
+}
+
+const laneLabel = (l: ShowLane) => l.name || l.id
+
+type TimelineCommand = Extract<ShowCommand, { op: 'addLane' | 'removeLane' | 'addCue' | 'moveCue' | 'removeCue' | 'setTimelineLength' | 'clearTimeline' }>
+
+/** Apply a timeline command to a copy of the chart. */
+function applyTimeline(chart: Showchart, cmd: TimelineCommand): { chart: Showchart; summary: string } {
+  const state = chart.states.find((s) => s.id === cmd.state)
+  if (!state) throw new CommandError(`There is no state ${cmd.state}.`, `States: ${stateList(chart)}`)
+  const tl: ShowTimeline = { ...(state.timeline ?? { lanes: [] }), lanes: (state.timeline?.lanes ?? []).map((l) => ({ ...l, cues: [...l.cues] })) }
+  const done = (summary: string) => ({
+    chart: { ...chart, states: chart.states.map((s) => (s.id === cmd.state ? { ...s, timeline: tl } : s)) },
+    summary,
+  })
+  const laneIn = (spec: LaneSpec): ShowLane => {
+    const l = findLane(tl, spec)
+    if (!l) throw new CommandError(`${cmd.state} has no ${spec.name ?? spec.dept ?? ''} lane.`, `Lanes: ${tl.lanes.map(laneLabel).join(', ') || 'none yet'}`)
+    return l
+  }
+
+  switch (cmd.op) {
+    case 'addLane': {
+      if (cmd.standard) {
+        const added = DEPTS.slice(0, 4).filter((d) => !tl.lanes.some((l) => l.dept === d.id))
+        added.forEach((d) => tl.lanes.push(makeLane(tl, { dept: d.id })))
+        return done(added.length ? `Add ${added.map((d) => d.label).join(', ')} lanes to ${cmd.state}` : `${cmd.state} already has the standard lanes`)
+      }
+      const spec = { dept: cmd.dept, name: cmd.name }
+      const existing = findLane(tl, spec)
+      if (existing) return done(`${cmd.state} already has a ${laneLabel(existing)} lane`)
+      const lane = makeLane(tl, spec)
+      tl.lanes.push(lane)
+      return done(`Add lane ${laneLabel(lane)} to ${cmd.state}`)
+    }
+    case 'removeLane': {
+      const lane = laneIn({ dept: cmd.dept, name: cmd.name })
+      tl.lanes = tl.lanes.filter((l) => l.id !== lane.id)
+      return done(`Remove lane ${laneLabel(lane)} from ${cmd.state}${lane.cues.length ? ` (and its ${lane.cues.length} cue${lane.cues.length > 1 ? 's' : ''})` : ''}`)
+    }
+    case 'addCue': {
+      const spec: LaneSpec = { dept: cmd.dept, name: cmd.laneName }
+      let lane = findLane(tl, spec)
+      let created = false
+      if (!lane) {
+        lane = makeLane(tl, spec)
+        tl.lanes.push(lane)
+        created = true
+      }
+      const dup = lane.cues.find((c) => c.at_ms === cmd.at_ms && c.action.kind === cmd.action.kind && JSON.stringify(c.action.payload ?? {}) === JSON.stringify(cmd.action.payload ?? {}))
+      const where = `${fmtSecs(cmd.at_ms)} on ${laneLabel(lane)} (${cmd.state})`
+      if (dup) return done(`${cmd.action.kind} at ${where} is already there`)
+      let id = `${lane.id}-${cmd.at_ms}`
+      for (let n = 2; tl.lanes.some((l) => l.cues.some((c) => c.id === id)); n++) id = `${lane.id}-${cmd.at_ms}-${n}`
+      const cue: ShowCue = { id, at_ms: cmd.at_ms, ...(cmd.length_ms ? { length_ms: cmd.length_ms } : {}), ...(cmd.label ? { label: cmd.label } : {}), action: cmd.action }
+      lane.cues.push(cue)
+      const blank = Object.values(cmd.action.payload ?? {}).some((v) => v === '')
+      return done(`Add ${cmd.action.kind} ${JSON.stringify(cmd.action.payload ?? {})} at ${where}${created ? `  (also created lane ${laneLabel(lane)})` : ''}${blank ? '  (value left blank: set it in the cue editor)' : ''}`)
+    }
+    case 'moveCue':
+    case 'removeCue': {
+      const spec: LaneSpec | undefined = cmd.dept || cmd.laneName ? { dept: cmd.dept, name: cmd.laneName } : undefined
+      const at = cmd.op === 'moveCue' ? cmd.from_ms : cmd.at_ms
+      const lanes = spec ? [laneIn(spec)] : tl.lanes
+      const hits = lanes.flatMap((l) => l.cues.filter((c) => c.at_ms === at).map((c) => ({ l, c })))
+      if (hits.length === 0) {
+        const times = lanes.flatMap((l) => l.cues.map((c) => fmtSecs(c.at_ms)))
+        throw new CommandError(
+          `There is no cue at ${fmtSecs(at)} in ${cmd.state}${spec ? ' on that lane' : ''}.`,
+          times.length ? `Cues are at: ${[...new Set(times)].join(', ')}` : 'This state has no cues yet.',
+        )
+      }
+      if (hits.length > 1) {
+        throw new CommandError(`${hits.length} cues start at ${fmtSecs(at)} in ${cmd.state}. Say which lane, e.g. "the lighting cue".`, `Lanes: ${hits.map((h) => laneLabel(h.l)).join(', ')}`)
+      }
+      const { l, c } = hits[0]
+      if (cmd.op === 'removeCue') {
+        l.cues = l.cues.filter((x) => x.id !== c.id)
+        return done(`Remove ${c.action.kind} at ${fmtSecs(at)} on ${laneLabel(l)} (${cmd.state})`)
+      }
+      l.cues = l.cues.map((x) => (x.id === c.id ? { ...x, at_ms: cmd.to_ms } : x))
+      return done(`Move ${c.action.kind} on ${laneLabel(l)} from ${fmtSecs(at)} to ${fmtSecs(cmd.to_ms)} (${cmd.state})`)
+    }
+    case 'setTimelineLength':
+      tl.duration_ms = cmd.duration_ms
+      return done(`Set the ${cmd.state} timeline length to ${fmtSecs(cmd.duration_ms)}`)
+    case 'clearTimeline': {
+      const n = tl.lanes.reduce((a, l) => a + l.cues.length, 0)
+      tl.lanes = tl.lanes.map((l) => ({ ...l, cues: [] }))
+      return done(`Clear ${n} cue${n === 1 ? '' : 's'} from ${cmd.state}`)
+    }
+  }
+}
+
+/** Default action for a department when only a value was given ("a lighting cue ... blue"). */
+function deptAction(dept: string, value: string): ShowAction {
+  const d = DEPTS.find((x) => x.id === dept) ?? DEPTS[4]
+  // "a lighting cue ... look blue" / "a laser cue ... cue l3": drop the noun the department already implies
+  const bare = value.replace(/^(?:(?:set|to|with|look|cue|preset|scene|snapshot|stem)\s+)+/i, '')
+  return { kind: d.kind, payload: { [d.field]: bare ? val(bare) : '' } }
+}
+
+/**
+ * Parse timeline phrases. Returns null when the fragment is not about lanes or
+ * cues, so the other command families get their turn.
+ */
+function parseTimelineFragment(text: string, chart: Showchart, notes: string[], defaultState?: string): ShowCommand[] | null {
+  const needState = (s?: string | null): string => {
+    const st = s ?? defaultState
+    if (!st) throw new CommandError('Which state is that for?', 'Say it with the state, e.g. "… in intro", or open the Timeline tab and pick one.')
+    return st
+  }
+  const stateNamed = (name?: string): string | undefined => {
+    if (!name) return undefined
+    const id = resolveState(chart, name, notes)
+    if (!id) throw new CommandError(`I don't know a state called "${name.trim()}".`, `States: ${stateList(chart)}`)
+    return id
+  }
+  const match = (re: RegExp) => text.match(re)
+
+  // clear the timeline
+  let m = match(/^(?:clear|empty|reset)\s+(?:the\s+)?(?:(.+?)\s+)?timeline(?:\s+(?:of|in|for)\s+(?:the\s+)?(.+))?$/i)
+  if (m) return [{ op: 'clearTimeline', state: needState(stateNamed(m[2] ?? m[1])) }]
+
+  // timeline length: "set intro length to 20 seconds", "make the intro timeline 20 seconds long"
+  m = match(new RegExp(`^(?:set|make)\\s+(?:the\\s+)?(?:(.+?)\\s+)?(?:timeline\\s+)?(?:length|duration)\\s+(?:to|=|of)\\s+(${TIME_SRC})(?:\\s+(?:in|for)\\s+(?:the\\s+)?(.+))?$`, 'i'))
+  if (m) {
+    const ms = parseTime(m[2])
+    if (ms === null) throw new CommandError(`I couldn't read the time "${m[2]}".`, 'Say a number: 20 seconds')
+    const named = (m[3] ?? m[1])?.trim()
+    return [{ op: 'setTimelineLength', state: needState(named && !/^(?:the\s+)?timeline$/i.test(named) ? stateNamed(named) : undefined), duration_ms: ms }]
+  }
+  m = match(new RegExp(`^make\\s+(?:the\\s+)?(.+?)\\s+timeline\\s+(${TIME_SRC})\\s+long$`, 'i'))
+  if (m) {
+    const ms = parseTime(m[2])
+    if (ms === null) throw new CommandError(`I couldn't read the time "${m[2]}".`, 'Say a number: 20 seconds')
+    return [{ op: 'setTimelineLength', state: needState(stateNamed(m[1])), duration_ms: ms }]
+  }
+
+  // lanes
+  m = match(/^(?:add|create|make|new)\s+(?:the\s+)?standard\s+lanes?(?:\s+(?:to|in|for)\s+(?:the\s+)?(.+))?$/i)
+  if (m) return [{ op: 'addLane', state: needState(stateNamed(m[1])), standard: true }]
+  m = match(/^(?:add|create|make|new)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?lane\s+(?:called|named)\s+(.+?)(?:\s+(?:to|in|for)\s+(?:the\s+)?([a-z0-9_ ]+))?$/i)
+  if (m) return [{ op: 'addLane', state: needState(stateNamed(m[2])), name: m[1].trim().replace(/^["'“”]+|["'“”]+$/g, '') }]
+  m = match(/^(?:add|create|make|new)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(\w+)\s+lane(?:\s+(?:to|in|for)\s+(?:the\s+)?(.+))?$/i)
+  if (m) {
+    const dept = deptFromWord(m[1])
+    return [{ op: 'addLane', state: needState(stateNamed(m[2])), ...(dept ? { dept } : { dept: 'other', name: m[1] }) }]
+  }
+  m = match(/^(?:remove|delete)\s+(?:the\s+)?(\w+)\s+lane(?:\s+(?:from|in|of)\s+(?:the\s+)?(.+))?$/i)
+  if (m) {
+    const dept = deptFromWord(m[1])
+    return [{ op: 'removeLane', state: needState(stateNamed(m[2])), ...(dept ? { dept } : { name: m[1] }) }]
+  }
+
+  // move a cue:  move the lighting cue at 2 seconds to 5 seconds [in intro]
+  if (/^move\b/i.test(text) && /\bcue\b/i.test(text)) {
+    const { state: st, rest } = takeState(text, chart, notes)
+    const mv = rest.match(new RegExp(`^move\\s+(?:the\\s+)?(?:(\\w+)\\s+)?cue\\s+(?:at|from)\\s+(${TIME_SRC})\\s+to\\s+(${TIME_SRC})$`, 'i'))
+    if (!mv) throw new CommandError(`I didn't understand "${text}".`, 'Try: move the lighting cue at 2 seconds to 5 seconds')
+    const from = parseTime(mv[2])
+    const to = parseTime(mv[3])
+    if (from === null || to === null) throw new CommandError('I could not read those times.', 'Say numbers: move the cue at 2 seconds to 5 seconds')
+    const dept = deptFromWord(mv[1])
+    return [{ op: 'moveCue', state: needState(st), from_ms: from, to_ms: to, ...(dept ? { dept } : mv[1] && !/^(?:the|a|an)$/i.test(mv[1]) ? { laneName: mv[1] } : {}) }]
+  }
+
+  // remove a cue:  remove the cue at 4 seconds [on lighting] [in intro]
+  if (/^(?:remove|delete)\b/i.test(text) && /\bcue\b/i.test(text)) {
+    const { state: st, rest: r1 } = takeState(text, chart, notes)
+    const [lm, r2] = take(r1, /\b(?:on|in|from)\s+(?:the\s+)?(\w+)\s+lane\b/i)
+    const mc = r2.match(new RegExp(`^(?:remove|delete)\\s+(?:the\\s+)?(?:(\\w+)\\s+)?cue\\s+(?:at|after)\\s+(${TIME_SRC})(?:\\s+(?:on|from)\\s+(?:the\\s+)?(\\w+))?$`, 'i'))
+    if (!mc) throw new CommandError(`I didn't understand "${text}".`, 'Try: remove the lighting cue at 4 seconds')
+    const at = parseTime(mc[2])
+    if (at === null) throw new CommandError(`I couldn't read the time "${mc[2]}".`, 'Say a number: 4 seconds')
+    const word = lm?.[1] ?? mc[3] ?? mc[1]
+    const dept = deptFromWord(word)
+    return [{ op: 'removeCue', state: needState(st), at_ms: at, ...(dept ? { dept } : word && !/^(?:the|a|an)$/i.test(word) ? { laneName: word } : {}) }]
+  }
+
+  // add a cue. Only claimed when the sentence says "cue" or starts with a time ("at 4 seconds ...").
+  const looksLikeCue = /\bcue\b/i.test(text)
+    ? /\b(?:at|after)\s/i.test(text)
+    : new RegExp(`^(?:(?:in|during)\\s+[a-z0-9_ ]+?,?\\s+)?at\\s+${TIME_SRC}`, 'i').test(text)
+  if (!looksLikeCue || /^(?:from|when|on|rename|label|set|start|chain)\b/i.test(text)) return null
+
+  let rest = text
+  const sp = takeState(rest, chart, notes)
+  rest = sp.rest
+  const [laneM, r1] = take(rest, /\b(?:on|in)\s+(?:the\s+)?(\w+)\s+lane\b/i)
+  rest = r1
+  const [lenM, r2] = take(rest, new RegExp(`\\b(?:for|lasting|lasts)\\s+(${TIME_SRC})`, 'i'))
+  rest = r2
+  const [atM, r3] = take(rest, new RegExp(`\\b(?:at|after)\\s+(${TIME_SRC})`, 'i'))
+  rest = r3
+  if (!atM) return null
+  const at = parseTime(atM[1])
+  if (at === null) throw new CommandError(`I couldn't read the time "${atM[1]}".`, 'Say a number: at 4 seconds')
+  const length = lenM ? parseTime(lenM[1]) : null
+
+  const lead = rest.match(/^(?:please\s+)?(?:(?:add|create|put|schedule|insert|place)\s+)?(?:a\s+|an\s+|the\s+)?(?:(visuals?|video|lighting|lights?|lasers?|audio|sound|other)\s+cue\b|cue\b|event\b)?\s*(.*)$/i)!
+  const phrase = lead[2].replace(/^(?:to|with|that|which)\s+/i, '').replace(/[,.]$/, '').trim()
+  let dept = deptFromWord(lead[1]) ?? deptFromWord(laneM?.[1])
+
+  let action = phrase ? parseAction(phrase) : null
+  if (!action) {
+    if (dept) action = deptAction(dept, phrase)
+    else if (!phrase) throw new CommandError('What should the cue do?', 'e.g. "add a cue at 4 seconds lighting look blue" or "add a laser cue at 4 seconds"')
+    else throw new CommandError(`I don't know the action "${phrase}".`, 'Say things like: scene X, lighting look X, laser cue X, audio snapshot X, playlist X, or name the lane: "a lighting cue … blue"')
+  }
+  dept = dept ?? deptFromKind(action.kind)
+  const laneName = laneM && !deptFromWord(laneM[1]) ? laneM[1] : undefined
+  return [
+    {
+      op: 'addCue',
+      state: needState(sp.state),
+      dept: laneName ? 'other' : dept,
+      ...(laneName ? { laneName } : {}),
+      at_ms: at,
+      ...(length ? { length_ms: length } : {}),
+      action,
+    },
+  ]
 }
