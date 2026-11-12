@@ -1,0 +1,17 @@
+[package]
+name = "pchi-strobe-adapter"
+version = "0.1.0"
+edition = "2021"
+description = "PCHI adapter for the Strobe VJ engine: PCHI events -> OSC, Strobe telemetry -> PCHI"
+
+[dependencies]
+pchi-schema = { path = "../pchi-schema" }
+rosc = "0.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.34", features = ["full"] }
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1.0"
+thiserror = "1.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"

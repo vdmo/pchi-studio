@@ -1,0 +1,11 @@
+[package]
+name = "pchi-eventstore"
+version = "0.1.0"
+edition = "2021"
+description = "SQLite event log for PCHI shows: record a run, replay it from the file alone."
+
+[dependencies]
+pchi-showchart = { path = "../pchi-showchart" }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde_json = "1.0"
+thiserror = "1.0"

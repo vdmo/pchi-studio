@@ -1,0 +1,34 @@
+{
+  "$schema": "https://pchi.life/schema/showchart-v0.1.json",
+  "id": "festival-demo",
+  "name": "Festival Demo",
+  "version": "0.2.0",
+  "initial": "PRESHOW",
+  "context": { "energy": 0.8, "audience_count": 120 },
+  "guards": { "energy_high": "energy > 0.7", "crowd_large": "audience_count >= 100" },
+  "states": [
+    { "id": "PRESHOW", "label": "Pre-show" },
+    {
+      "id": "INTRO",
+      "label": "Introduction",
+      "enter_actions": [{ "kind": "scene.activate", "payload": { "scene": "intro" } }],
+      "exit_actions": [{ "kind": "scene.deactivate", "payload": { "scene": "intro" } }]
+    },
+    {
+      "id": "PORTAL",
+      "label": "Portal",
+      "enter_actions": [{ "kind": "scene.activate", "payload": { "scene": "portal" } }]
+    },
+    {
+      "id": "CALM",
+      "label": "Calm interlude",
+      "enter_actions": [{ "kind": "scene.activate", "payload": { "scene": "calm" } }]
+    }
+  ],
+  "transitions": [
+    { "source": "PRESHOW", "target": "INTRO", "event": "START", "guard": "crowd_large" },
+    { "source": "INTRO", "target": "PORTAL", "event": "OPEN_PORTAL", "guard": "energy_high" },
+    { "source": "INTRO", "target": "CALM", "event": "OPEN_PORTAL" },
+    { "source": "INTRO", "target": "PORTAL", "after_ms": 10000, "guard": "energy_high" }
+  ]
+}

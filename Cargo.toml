@@ -3,4 +3,9 @@ resolver = "2"
 members = [
     "pchi-schema",
     "primeswarm-pchi",
+    "pchi-strobe-adapter",
+    "crates/pchi-showchart",
+    "crates/pchi-cli",
+    "crates/pchi-eventbus",
+    "crates/pchi-eventstore",
 ]

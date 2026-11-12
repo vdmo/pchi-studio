@@ -1,0 +1,36 @@
+{
+  "$schema": "https://pchi.life/schema/showchart-v0.1.json",
+  "id": "ghost-temple",
+  "name": "Ghost Temple Demo",
+  "version": "0.1.0",
+  "initial": "PRESHOW",
+  "states": [
+    {
+      "id": "PRESHOW",
+      "label": "Pre-show",
+      "enter_actions": [],
+      "exit_actions": []
+    },
+    {
+      "id": "INTRO",
+      "label": "Introduction",
+      "enter_actions": [
+        { "kind": "scene.activate", "payload": { "scene": "intro" } }
+      ],
+      "exit_actions": []
+    },
+    {
+      "id": "PORTAL",
+      "label": "Portal",
+      "enter_actions": [
+        { "kind": "scene.activate", "payload": { "scene": "portal" } },
+        { "kind": "output.activate", "payload": { "target": "ghost-main" } }
+      ],
+      "exit_actions": []
+    }
+  ],
+  "transitions": [
+    { "source": "PRESHOW", "target": "INTRO", "event": "START" },
+    { "source": "INTRO", "target": "PORTAL", "event": "PORTAL_OPEN" }
+  ]
+}
