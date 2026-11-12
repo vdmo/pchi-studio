@@ -7,15 +7,16 @@
 pub mod conductor;
 pub mod governance;
 pub mod only_lang;
-pub mod state;
 pub mod rules;
+pub mod show;
+pub mod state;
 pub mod transport;
 pub mod web_server;
 
 pub use conductor::PCHIConductor;
 pub use governance::GovernanceLog;
-pub use state::SceneState;
 pub use rules::RuleEngine;
+pub use state::SceneState;
 pub use transport::TransportLayer;
 pub use web_server::{create_router, WebServerState};
 
@@ -26,13 +27,13 @@ use thiserror::Error;
 pub enum ConductorError {
     #[error("Validation error: {0}")]
     ValidationError(#[from] pchi_schema::validation::ValidationError),
-    
+
     #[error("State error: {0}")]
     StateError(String),
-    
+
     #[error("Transport error: {0}")]
     TransportError(String),
-    
+
     #[error("Rule engine error: {0}")]
     RuleError(String),
 }

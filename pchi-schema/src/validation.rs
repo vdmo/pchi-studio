@@ -8,22 +8,22 @@ use thiserror::Error;
 pub enum ValidationError {
     #[error("Invalid version: {0}")]
     InvalidVersion(String),
-    
+
     #[error("Missing required field: {0}")]
     MissingField(String),
-    
+
     #[error("Equilibrium violation: residual {residual} exceeds threshold {threshold}")]
     EquilibriumViolation { residual: f64, threshold: f64 },
-    
+
     #[error("Coherence gap {gap} exceeds threshold {threshold}")]
     CoherenceGapViolation { gap: f64, threshold: f64 },
-    
+
     #[error("Invalid timestamp: {0}")]
     InvalidTimestamp(String),
-    
+
     #[error("Transform validation failed: {0}")]
     TransformError(String),
-    
+
     #[error("Payload validation failed: {0}")]
     PayloadError(String),
 }
@@ -33,10 +33,10 @@ pub enum ValidationError {
 pub struct ValidationConfig {
     /// Maximum allowed residual for equilibrium
     pub max_residual: f64,
-    
+
     /// Maximum allowed coherence gap
     pub max_coherence_gap: f64,
-    
+
     /// Whether to enforce strict timestamp validation
     pub strict_timestamp: bool,
 }
@@ -65,23 +65,23 @@ pub fn validate_message_with_config(
     if message.version != "2.0.0" {
         return Err(ValidationError::InvalidVersion(message.version.clone()));
     }
-    
+
     // Validate source_id
     if message.source_id.is_empty() {
         return Err(ValidationError::MissingField("source_id".to_string()));
     }
-    
+
     // Validate timestamp
     if config.strict_timestamp {
         validate_timestamp(message.timestamp)?;
     }
-    
+
     // Validate PIR invariants
     validate_invariants(message, config)?;
-    
+
     // Validate payload
     validate_payload(message)?;
-    
+
     Ok(())
 }
 
@@ -89,13 +89,14 @@ fn validate_timestamp(timestamp: f64) -> Result<(), ValidationError> {
     // Timestamp should be reasonable (between year 2000 and 2100)
     const MIN_TIMESTAMP: f64 = 946_684_800_000.0; // 2000-01-01
     const MAX_TIMESTAMP: f64 = 4_102_444_800_000.0; // 2100-01-01
-    
+
     if !(MIN_TIMESTAMP..=MAX_TIMESTAMP).contains(&timestamp) {
-        return Err(ValidationError::InvalidTimestamp(
-            format!("timestamp {} out of valid range", timestamp)
-        ));
+        return Err(ValidationError::InvalidTimestamp(format!(
+            "timestamp {} out of valid range",
+            timestamp
+        )));
     }
-    
+
     Ok(())
 }
 
@@ -158,19 +159,19 @@ fn validate_invariants(
 
 fn validate_payload(message: &PCHIMessage) -> Result<(), ValidationError> {
     use crate::Payload;
-    
+
     match &message.payload {
         Payload::SceneUpdate(data) => {
             if data.objects.is_empty() {
                 return Err(ValidationError::PayloadError(
-                    "Scene update must contain at least one object".to_string()
+                    "Scene update must contain at least one object".to_string(),
                 ));
             }
-            
+
             for obj in &data.objects {
                 if obj.id.is_empty() {
                     return Err(ValidationError::PayloadError(
-                        "Object must have a non-empty ID".to_string()
+                        "Object must have a non-empty ID".to_string(),
                     ));
                 }
             }
@@ -178,38 +179,61 @@ fn validate_payload(message: &PCHIMessage) -> Result<(), ValidationError> {
         Payload::ControlParameter(data) => {
             if data.target_id.is_empty() {
                 return Err(ValidationError::PayloadError(
-                    "Control parameter must have a target_id".to_string()
+                    "Control parameter must have a target_id".to_string(),
                 ));
             }
             if data.parameter.is_empty() {
                 return Err(ValidationError::PayloadError(
-                    "Control parameter must have a parameter name".to_string()
+                    "Control parameter must have a parameter name".to_string(),
                 ));
             }
         }
         Payload::MusicalContext(data) => {
             if data.bpm <= 0.0 || data.bpm > 300.0 {
-                return Err(ValidationError::PayloadError(
-                    format!("Invalid BPM: {}", data.bpm)
-                ));
+                return Err(ValidationError::PayloadError(format!(
+                    "Invalid BPM: {}",
+                    data.bpm
+                )));
             }
         }
         Payload::ArtistTracking(data) => {
             if data.artist_id.is_empty() {
                 return Err(ValidationError::PayloadError(
-                    "Artist tracking must have an artist_id".to_string()
+                    "Artist tracking must have an artist_id".to_string(),
                 ));
             }
         }
         Payload::GovernanceEvent(data) => {
             if data.agent_id.is_empty() || data.gate_state.is_empty() {
                 return Err(ValidationError::PayloadError(
-                    "Governance event must have an agent_id and gate_state".to_string()
+                    "Governance event must have an agent_id and gate_state".to_string(),
                 ));
             }
         }
+        Payload::ShowState(data) => {
+            use crate::ShowStateData;
+            let blank = |s: &str| s.trim().is_empty();
+            let problem = match data {
+                ShowStateData::Plan { states, .. } if states.is_empty() => {
+                    Some("Show plan must list at least one state")
+                }
+                ShowStateData::Plan { states, .. } if states.iter().any(|s| blank(s)) => {
+                    Some("Show plan states must be non-empty")
+                }
+                ShowStateData::Enter { state, .. } if blank(state) => {
+                    Some("Entered state must be non-empty")
+                }
+                ShowStateData::Readiness { department, .. } if blank(department) => {
+                    Some("Readiness report must name a department")
+                }
+                _ => None,
+            };
+            if let Some(p) = problem {
+                return Err(ValidationError::PayloadError(p.to_string()));
+            }
+        }
     }
-    
+
     Ok(())
 }
 
@@ -217,53 +241,50 @@ fn validate_payload(message: &PCHIMessage) -> Result<(), ValidationError> {
 mod tests {
     use super::*;
     use crate::{MessageType, Payload, SceneUpdateData};
-    
+
     #[test]
     fn test_valid_message() {
         let message = PCHIMessage::new(
             MessageType::SceneUpdate,
             "test_source".to_string(),
-            Payload::SceneUpdate(SceneUpdateData {
-                objects: vec![],
-            }),
+            Payload::SceneUpdate(SceneUpdateData { objects: vec![] }),
         );
-        
+
         let result = validate_message(&message);
         // Should fail because objects is empty
         assert!(result.is_err());
     }
-    
+
     #[test]
     fn test_equilibrium_violation() {
         let mut message = PCHIMessage::new(
             MessageType::SceneUpdate,
             "test_source".to_string(),
-            Payload::SceneUpdate(SceneUpdateData {
-                objects: vec![],
-            }),
+            Payload::SceneUpdate(SceneUpdateData { objects: vec![] }),
         );
-        
+
         message.pir_invariants.residual = 1.0;
-        
+
         let config = ValidationConfig {
             max_residual: 1e-12,
             ..Default::default()
         };
-        
+
         let result = validate_message_with_config(&message, &config);
-        assert!(matches!(result, Err(ValidationError::EquilibriumViolation { .. })));
+        assert!(matches!(
+            result,
+            Err(ValidationError::EquilibriumViolation { .. })
+        ));
     }
-    
+
     #[test]
     fn test_invalid_version() {
         let mut message = PCHIMessage::new(
             MessageType::SceneUpdate,
             "test_source".to_string(),
-            Payload::SceneUpdate(SceneUpdateData {
-                objects: vec![],
-            }),
+            Payload::SceneUpdate(SceneUpdateData { objects: vec![] }),
         );
-        
+
         message.version = "1.0.0".to_string();
 
         let result = validate_message(&message);
@@ -288,7 +309,10 @@ mod tests {
         );
         message.pir_invariants.residual = 1.0;
         let result = validate_message(&message);
-        assert!(matches!(result, Err(ValidationError::EquilibriumViolation { .. })));
+        assert!(matches!(
+            result,
+            Err(ValidationError::EquilibriumViolation { .. })
+        ));
     }
 
     #[test]

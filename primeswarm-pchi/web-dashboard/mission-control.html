@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PCHI Mission Control</title>
+<style>
+  :root {
+    --bg: #0b0d12; --panel: #131720; --line: #232a38; --text: #e8ecf3; --dim: #8691a6;
+    --ready: #3ddc97; --degraded: #f5b83d; --bad: #ff5c6c; --offline: #6b7385; --accent: #7aa2ff;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; justify-content: space-between; align-items: center;
+           padding: 14px 22px; border-bottom: 1px solid var(--line); }
+  header h1 { margin: 0; font-size: 13px; letter-spacing: .18em; font-weight: 600; color: var(--dim); }
+  header .show { font-size: 18px; font-weight: 600; }
+  .modes button { background: var(--panel); color: var(--dim); border: 1px solid var(--line);
+                  padding: 6px 12px; border-radius: 6px; cursor: pointer; font: inherit; font-size: 13px; }
+  .modes button.on { color: var(--text); border-color: var(--accent); }
+  main { padding: 22px; display: grid; gap: 18px; max-width: 1200px; margin: 0 auto; }
+  .hero { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 18px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; }
+  .label { font-size: 11px; letter-spacing: .16em; color: var(--dim); text-transform: uppercase; margin-bottom: 8px; }
+  .big { font-size: 54px; font-weight: 700; line-height: 1.05; word-break: break-word; }
+  .mid { font-size: 34px; font-weight: 650; }
+  .sub { color: var(--dim); margin-top: 6px; font-size: 13px; }
+  .conf-good { color: var(--ready); } .conf-warn { color: var(--degraded); } .conf-bad { color: var(--bad); }
+  .none { color: var(--dim); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; }
+  .dept { border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; border-left-width: 5px; }
+  .dept .n { font-weight: 600; text-transform: capitalize; }
+  .dept .s { font-size: 12px; letter-spacing: .1em; text-transform: uppercase; margin-top: 2px; }
+  .dept .d { color: var(--dim); font-size: 12px; margin-top: 4px; }
+  .dept.ready { border-left-color: var(--ready); } .dept.ready .s { color: var(--ready); }
+  .dept.degraded { border-left-color: var(--degraded); } .dept.degraded .s { color: var(--degraded); }
+  .dept.not_ready { border-left-color: var(--bad); } .dept.not_ready .s { color: var(--bad); }
+  .dept.offline { border-left-color: var(--offline); opacity: .75; } .dept.offline .s { color: var(--offline); }
+  .journey { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .step { padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line); color: var(--dim); font-size: 13px; }
+  .step.past { color: var(--text); background: #1a2030; }
+  .step.now { color: #0b0d12; background: var(--accent); border-color: var(--accent); font-weight: 700; }
+  .step.next { border-style: dashed; color: var(--text); }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  ul.feed { list-style: none; margin: 0; padding: 0; font: 13px/1.6 ui-monospace, Menlo, Consolas, monospace; }
+  ul.feed li { border-bottom: 1px solid var(--line); padding: 3px 0; }
+  ul.feed .t { color: var(--dim); margin-right: 10px; }
+  ul.feed .deny { color: var(--bad); }
+  .tech { display: none; }
+  body.tech .tech { display: block; }
+  body.commander .techonly { display: none; }
+  .banner { padding: 8px 22px; font-size: 13px; background: #3a1620; color: #ffb3bb; display: none; }
+  body.wall header, body.wall .cols, body.wall .journey-card, body.wall .modes { display: none; }
+  body.wall .hero { grid-template-columns: 1fr; text-align: center; }
+  body.wall .big { font-size: 20vw; } body.wall .mid { font-size: 9vw; }
+  @media (max-width: 800px) { .hero, .cols { grid-template-columns: 1fr; } .big { font-size: 40px; } }
+</style>
+</head>
+<body class="commander">
+<div class="banner" id="banner">Lost contact with the conductor. Showing nothing rather than stale data.</div>
+<header>
+  <div></div><h1>PCHI MISSION CONTROL</h1><div class="show" id="show">—</div></div>
+  <div class="modes">
+    <button data-mode="commander" class="on">Commander</button>
+    <button data-mode="tech">Technical</button>
+    <button data-mode="wall">Wall</button>
+  </div>
+</header>
+<main>
+  <section class="hero">
+    <div class="card"><div class="label">Current state</div>
+      <div class="big" id="current">—</div>
+      <div class="sub" id="since"></div></div>
+    <div class="card"><div class="label">Show confidence</div>
+      <div class="mid" id="conf">—</div>
+      <div class="sub" id="confwhy"></div></div>
+    <div class="card"><div class="label">Next</div>
+      <div class="mid" id="next">—</div>
+      <div class="sub" id="blockers"></div></div>
+  </section>
+
+  <section class="card"><div class="label">Shared readiness</div>
+    <div class="grid" id="depts"></div>
+    <div class="sub" id="nodepts"></div></section>
+
+  <section class="card journey-card"><div class="label">Show journey</div>
+    <div class="journey" id="journey"></div></section>
+
+  <section class="cols">
+    <div class="card"><div class="label">Recent states</div><ul class="feed" id="history"></ul></div>
+    <div class="card"><div class="label">Rule denials (last 60 s)</div><ul class="feed" id="denials"></ul></div>
+  </section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
+const clock = iso => new Date(iso).toLocaleTimeString([], { hour12: false });
+const mmss = s => { s = Math.max(0, Math.round(s)); return String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0'); };
+const LABEL = { ready: 'Ready', degraded: 'Degraded', not_ready: 'Not ready', offline: 'Offline' };
+
+function setMode(mode) {
+  document.body.classList.remove('commander', 'tech', 'wall');
+  document.body.classList.add(mode === 'wall' ? 'wall' : mode);
+  if (mode === 'tech') document.body.classList.add('tech');
+  document.querySelectorAll('.modes button').forEach(b => b.classList.toggle('on', b.dataset.mode === mode));
+  history.replaceState(null, '', mode === 'commander' ? location.pathname : '?mode=' + mode);
+}
+document.querySelectorAll('.modes button').forEach(b => b.onclick = () => setMode(b.dataset.mode));
+setMode(new URLSearchParams(location.search).get('mode') || 'commander');
+
+function render(s) {
+  $('banner').style.display = 'none';
+  $('show').textContent = s.show || 'No show loaded';
+  $('current').textContent = s.current || '—';
+  $('current').className = 'big' + (s.current ? '' : ' none');
+  $('since').textContent = s.current && s.seconds_in_state != null ? 'in this state for ' + mmss(s.seconds_in_state) : 'waiting for the first state';
+  $('next').textContent = s.next || '—';
+
+  const c = s.confidence;
+  if (!c) {
+    $('conf').textContent = 'No data'; $('conf').className = 'mid none';
+    $('confwhy').textContent = 'no department has reported yet';
+  } else {
+    $('conf').textContent = c.score + '%';
+    $('conf').className = 'mid ' + (c.score >= 90 ? 'conf-good' : c.score >= 60 ? 'conf-warn' : 'conf-bad');
+    let why = 'readiness ' + c.readiness_pct + '%';
+    if (c.denial_penalty_pct) why += ' − ' + c.denial_penalty_pct + '% for ' + c.recent_denials + ' recent rule denial' + (c.recent_denials === 1 ? '' : 's');
+    $('confwhy').textContent = why;
+  }
+  $('blockers').textContent = s.blockers.length ? 'At risk: ' + s.blockers.join(' · ') : (c ? 'Everyone ready' : '');
+
+  const depts = $('depts'); depts.replaceChildren();
+  $('nodepts').textContent = s.departments.length ? '' : 'No department has reported readiness.';
+  for (const d of s.departments) {
+    const card = el('div', 'dept ' + d.status);
+    card.append(el('div', 'n', d.name), el('div', 's', LABEL[d.status] || d.status));
+    if (d.detail) card.append(el('div', 'd', d.detail));
+    const t = el('div', 'd techonly tech', 'source ' + d.source_id + (d.seconds_since_seen != null ? ' · seen ' + d.seconds_since_seen.toFixed(0) + ' s ago' : ''));
+    card.append(t);
+    depts.append(card);
+  }
+
+  const j = $('journey'); j.replaceChildren();
+  const at = s.plan.indexOf(s.current);
+  s.plan.forEach((name, i) => {
+    const cls = name === s.current ? 'now' : name === s.next ? 'next' : (at >= 0 && i < at) ? 'past' : '';
+    j.append(el('span', 'step ' + cls, name));
+  });
+  if (!s.plan.length) j.append(el('span', 'sub', 'No plan loaded.'));
+
+  const h = $('history'); h.replaceChildren();
+  for (const t of s.history) {
+    const li = el('li'); li.append(el('span', 't', clock(t.entered_at)), document.createTextNode(t.state));
+    const src = el('span', 't techonly tech', ' via ' + t.source_id); li.append(src); h.append(li);
+  }
+  if (!s.history.length) h.append(el('li', 'sub', 'nothing yet'));
+
+  const dn = $('denials'); dn.replaceChildren();
+  for (const d of s.recent_denials) { const li = el('li', 'deny'); li.append(el('span', 't', clock(d.at)), document.createTextNode(d.message)); dn.append(li); }
+  if (!s.recent_denials.length) dn.append(el('li', 'sub', 'none'));
+}
+
+async function tick() {
+  try {
+    const r = await fetch('/state', { cache: 'no-store' });
+    if (!r.ok) throw new Error(r.status);
+    render(await r.json());
+  } catch (e) { $('banner').style.display = 'block'; }
+}
+tick(); setInterval(tick, 1000);
+</script>
+</body>
+</html>

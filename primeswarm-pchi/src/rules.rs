@@ -72,11 +72,39 @@ impl RuleEngine {
         state: &SceneState,
         gov: &GovernanceLog,
     ) -> Result<(Vec<PCHIMessage>, Option<String>), ConductorError> {
+        self.evaluate_filtered(state, gov, false)
+    }
+
+    /// Evaluate only the *transition* rules (those mentioning
+    /// `show.entering`), with `state.show.entering` set by the caller to the
+    /// state being requested. Same return shape as [`Self::evaluate`]; a
+    /// DENY means the transition must not happen.
+    ///
+    /// Transition rules are skipped by `evaluate`, so a condition such as
+    /// `show.entering == "FINALE" or readiness.lasers != "ready"` can never
+    /// fire on an unrelated control update.
+    pub fn evaluate_transition(
+        &self,
+        state: &SceneState,
+        gov: &GovernanceLog,
+    ) -> Result<(Vec<PCHIMessage>, Option<String>), ConductorError> {
+        self.evaluate_filtered(state, gov, true)
+    }
+
+    fn evaluate_filtered(
+        &self,
+        state: &SceneState,
+        gov: &GovernanceLog,
+        transitions: bool,
+    ) -> Result<(Vec<PCHIMessage>, Option<String>), ConductorError> {
         let state_snapshot_hash = snapshot_hash(state);
         let mut events = Vec::new();
         let mut deny: Option<String> = None;
 
         for rule in &self.rule_file.rules {
+            if only_lang::is_transition_rule(rule) != transitions {
+                continue;
+            }
             if !only_lang::eval_condition(&rule.condition, state) {
                 continue;
             }
@@ -134,12 +162,22 @@ impl Default for RuleEngine {
 /// evaluation.
 fn snapshot_hash(state: &SceneState) -> String {
     use sha2::{Digest, Sha256};
-    let canonical_input = serde_json::json!({
+    let mut canonical_input = serde_json::json!({
         "control_parameters": state.control_parameters,
         "equilibrium_status": state.equilibrium_status,
         "musical_context": state.musical_context,
         "artist_tracking": state.artist_tracking,
     });
+    // A transition receipt also commits to what the show looked like when
+    // the transition was judged. Added only then, so every other receipt
+    // hashes exactly as before.
+    if let Some(entering) = state.show.entering() {
+        canonical_input["show"] = serde_json::json!({
+            "entering": entering,
+            "current": state.show.current(),
+            "readiness": state.show.readiness_map(chrono::Utc::now()),
+        });
+    }
     let canonical =
         serde_jcs::to_string(&canonical_input).unwrap_or_else(|_| canonical_input.to_string());
     let mut hasher = Sha256::new();

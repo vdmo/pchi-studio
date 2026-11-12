@@ -198,7 +198,10 @@ pub fn parse(source: &str) -> Result<RuleFile, ParseError> {
             continue;
         }
 
-        return Err(perr(lineno, format!("unsupported top-level statement: {}", line)));
+        return Err(perr(
+            lineno,
+            format!("unsupported top-level statement: {}", line),
+        ));
     }
 
     Ok(RuleFile {
@@ -235,7 +238,12 @@ fn parse_condition(src: &str, lineno: usize) -> Result<Condition, ParseError> {
         let op = match tokens[k].as_str() {
             "and" => BoolOp::And,
             "or" => BoolOp::Or,
-            other => return Err(perr(lineno, format!("expected 'and'/'or', found '{}'", other))),
+            other => {
+                return Err(perr(
+                    lineno,
+                    format!("expected 'and'/'or', found '{}'", other),
+                ))
+            }
         };
         if k + 1 >= tokens.len() {
             return Err(perr(lineno, "dangling 'and'/'or' with no following term"));
@@ -297,10 +305,17 @@ fn parse_term(src: &str, lineno: usize) -> Result<Term, ParseError> {
             if path.is_empty() {
                 return Err(perr(lineno, format!("missing path before '{}'", sym)));
             }
-            return Ok(Term { path, op: *op, literal });
+            return Ok(Term {
+                path,
+                op: *op,
+                literal,
+            });
         }
     }
-    Err(perr(lineno, format!("no comparison operator found in condition term: {}", src)))
+    Err(perr(
+        lineno,
+        format!("no comparison operator found in condition term: {}", src),
+    ))
 }
 
 fn parse_literal(src: &str, lineno: usize) -> Result<Literal, ParseError> {
@@ -319,18 +334,27 @@ fn parse_literal(src: &str, lineno: usize) -> Result<Literal, ParseError> {
 }
 
 fn parse_action(src: &str, lineno: usize) -> Result<Action, ParseError> {
-    if let Some(rest) = src.strip_prefix("escalate(").and_then(|s| s.strip_suffix(')')) {
+    if let Some(rest) = src
+        .strip_prefix("escalate(")
+        .and_then(|s| s.strip_suffix(')'))
+    {
         return Ok(Action::Escalate(unquote(rest, lineno)?));
     }
     if let Some(rest) = src.strip_prefix("deny(").and_then(|s| s.strip_suffix(')')) {
         return Ok(Action::Deny(unquote(rest, lineno)?));
     }
-    if let Some(rest) = src.strip_prefix("evolve(").and_then(|s| s.strip_suffix(')')) {
+    if let Some(rest) = src
+        .strip_prefix("evolve(")
+        .and_then(|s| s.strip_suffix(')'))
+    {
         let parts: Vec<&str> = rest.splitn(2, ',').collect();
         if parts.len() != 2 {
             return Err(perr(lineno, "evolve(target, param) requires two arguments"));
         }
-        return Ok(Action::Evolve(parts[0].trim().to_string(), parts[1].trim().to_string()));
+        return Ok(Action::Evolve(
+            parts[0].trim().to_string(),
+            parts[1].trim().to_string(),
+        ));
     }
     if src == "residual()" {
         return Ok(Action::Residual);
@@ -343,7 +367,10 @@ fn unquote(src: &str, lineno: usize) -> Result<String, ParseError> {
     if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
         Ok(s[1..s.len() - 1].to_string())
     } else {
-        Err(perr(lineno, format!("expected a quoted string, found: {}", s)))
+        Err(perr(
+            lineno,
+            format!("expected a quoted string, found: {}", s),
+        ))
     }
 }
 
@@ -382,7 +409,36 @@ pub fn resolve_path(path: &str, state: &SceneState) -> Option<Literal> {
             _ => None,
         };
     }
+    // Show state (see show.rs). `show.entering` only resolves while a
+    // transition is being gated, so ordinary rule passes never fire on it.
+    match path {
+        "show.entering" => return state.show.entering().map(|s| Literal::Str(s.to_string())),
+        "show.current" => return state.show.current().map(|s| Literal::Str(s.to_string())),
+        "show.blockers" => {
+            return Some(Literal::Number(
+                state.show.blocker_count(chrono::Utc::now()) as f64,
+            ))
+        }
+        _ => {}
+    }
+    if let Some(department) = path.strip_prefix("readiness.") {
+        // A department that never reported is "unknown", not absent: a rule
+        // like `readiness.lasers != "ready"` must block on silence.
+        let status = state
+            .show
+            .effective_status(department, chrono::Utc::now())
+            .map(|s| s.as_rule_str())
+            .unwrap_or("unknown");
+        return Some(Literal::Str(status.to_string()));
+    }
     state.get_control_parameter(path).map(Literal::Number)
+}
+
+/// Whether a rule is a transition rule, i.e. mentions `show.entering`.
+pub fn is_transition_rule(rule: &Rule) -> bool {
+    std::iter::once(&rule.condition.first)
+        .chain(rule.condition.rest.iter().map(|(_, t)| t))
+        .any(|t| t.path == "show.entering")
 }
 
 fn compare(actual: &Literal, op: Op, expected: &Literal) -> bool {
@@ -447,6 +503,47 @@ then
     evolve(kraken_main, peak_state)
 end
 "#;
+
+    #[test]
+    fn show_paths_resolve_and_unknown_departments_are_unknown_not_missing() {
+        use pchi_schema::{ReadinessStatus, ShowStateData};
+        let mut state = SceneState::new();
+        assert_eq!(
+            resolve_path("show.entering", &state),
+            None,
+            "unset outside a transition"
+        );
+        assert_eq!(
+            resolve_path("readiness.lasers", &state),
+            Some(Literal::Str("unknown".into()))
+        );
+        let now = chrono::Utc::now();
+        state.show.note_seen("b", now);
+        state.show.apply(
+            &ShowStateData::Readiness {
+                department: "lasers".into(),
+                status: ReadinessStatus::Degraded,
+                detail: None,
+            },
+            "b",
+            now,
+        );
+        assert_eq!(
+            resolve_path("readiness.lasers", &state),
+            Some(Literal::Str("degraded".into()))
+        );
+        assert_eq!(
+            resolve_path("show.blockers", &state),
+            Some(Literal::Number(1.0))
+        );
+        state.show.set_entering(Some("FINALE".into()));
+        let f = parse(
+            "if show.entering == \"FINALE\" and readiness.lasers != \"ready\" then\n deny(\"no\")\nend\n",
+        )
+        .unwrap();
+        assert!(is_transition_rule(&f.rules[0]));
+        assert!(eval_condition(&f.rules[0].condition, &state));
+    }
 
     #[test]
     fn parses_sample_file() {

@@ -85,6 +85,13 @@ impl PCHIConductor {
 
         // Update state based on message type
         let mut state = self.state.write().await;
+        state
+            .show
+            .note_seen(&message.source_id, chrono::Utc::now());
+        let mut show_state_announcement: Option<Vec<u8>> = None;
+        let mut transition_events: Vec<PCHIMessage> = Vec::new();
+        // (reason, serialized `rejected` message) when a rule refused an enter.
+        let mut rejection: Option<(String, Vec<u8>)> = None;
 
         match message.message_type {
             MessageType::SceneUpdate => {
@@ -148,6 +155,44 @@ impl PCHIConductor {
                     );
                 }
             }
+            MessageType::ShowState => {
+                if let Payload::ShowState(data) = &message.payload {
+                    let now = chrono::Utc::now();
+
+                    // A state change is judged by the transition rules (those
+                    // mentioning `show.entering`) BEFORE it is applied. A DENY
+                    // leaves the show where it was.
+                    if let Some(target) = state.show.transition_target(data) {
+                        state.show.set_entering(Some(target.clone()));
+                        let verdict = self.rule_engine.evaluate_transition(&state, &self.governance);
+                        state.show.set_entering(None);
+                        let (events, deny) = verdict?;
+                        transition_events = events;
+                        if let Some(reason) = deny {
+                            warn!("Transition to {} refused: {}", target, reason);
+                            state.show.record_denial(now, reason.clone());
+                            let refusal = PCHIMessage::new(
+                                MessageType::ShowState,
+                                "pchi-conductor".to_string(),
+                                Payload::ShowState(pchi_schema::ShowStateData::Rejected {
+                                    state: target,
+                                    reason: reason.clone(),
+                                    current: state.show.current().map(str::to_string),
+                                }),
+                            );
+                            rejection = Some((reason, serde_json::to_vec(&refusal).unwrap_or_default()));
+                        }
+                    }
+
+                    if rejection.is_none() {
+                        let applied = state.show.apply(data, &message.source_id, now);
+                        info!("ShowState from {}: {:?} -> {:?}", message.source_id, data, applied);
+                        if applied == crate::show::Applied::Changed {
+                            show_state_announcement = serde_json::to_vec(&message).ok();
+                        }
+                    }
+                }
+            }
         }
 
         // Heartbeats carry no scene-state change — they exist purely so a
@@ -167,6 +212,35 @@ impl PCHIConductor {
             return Ok(());
         }
 
+        // Show-state messages change nothing a rule can see, so they are
+        // not evaluated (same reasoning as heartbeats above). They ARE
+        // announced to WebSocket listeners when they changed something, so
+        // bridges can drive their tools from the shared state. Unchanged
+        // repeats are not announced, which is what keeps two bridges from
+        // echoing a transition back and forth.
+        if matches!(message.message_type, MessageType::ShowState) {
+            drop(state);
+            for event in transition_events {
+                if let Ok(bytes) = serde_json::to_vec(&event) {
+                    if let Err(e) = self.transport.broadcast_websocket(&bytes).await {
+                        error!("Failed to broadcast governance event: {}", e);
+                    }
+                }
+            }
+            if let Some(bytes) = show_state_announcement {
+                if let Err(e) = self.transport.broadcast_websocket(&bytes).await {
+                    error!("Failed to broadcast show state: {}", e);
+                }
+            }
+            if let Some((reason, bytes)) = rejection {
+                if let Err(e) = self.transport.broadcast_websocket(&bytes).await {
+                    error!("Failed to broadcast transition refusal: {}", e);
+                }
+                return Err(ConductorError::RuleError(reason));
+            }
+            return Ok(());
+        }
+
         // Update equilibrium status
         state.update_equilibrium_status(self.equilibrium_threshold);
 
@@ -176,6 +250,9 @@ impl PCHIConductor {
         // learn a denial actually happened. Every fired rule is signed
         // into the governance log before this returns, denial or not.
         let (events, deny_reason) = self.rule_engine.evaluate(&state, &self.governance)?;
+        if let Some(reason) = &deny_reason {
+            state.show.record_denial(chrono::Utc::now(), reason.clone());
+        }
         drop(state);
 
         // Broadcast every event — including a DENY's — before turning a
@@ -486,6 +563,204 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn show_msg(source: &str, data: pchi_schema::ShowStateData) -> PCHIMessage {
+        PCHIMessage::new(
+            MessageType::ShowState,
+            source.to_string(),
+            Payload::ShowState(data),
+        )
+    }
+
+    #[tokio::test]
+    async fn show_state_messages_build_the_shared_picture_without_touching_governance() {
+        use pchi_schema::{ReadinessStatus, ShowStateData};
+        let (conductor, dir) = test_conductor().await;
+
+        // A real violation first, so we can prove show-state messages don't
+        // re-sign it the way an un-gated message would.
+        let violating = PCHIMessage::new(
+            MessageType::ControlParameter,
+            "test".to_string(),
+            Payload::ControlParameter(ControlParameterData {
+                target_id: "tentacle_system".to_string(),
+                parameter: "total_curl".to_string(),
+                value: serde_json::json!(10.0),
+            }),
+        );
+        assert!(conductor.process_message(violating).await.is_err());
+        let receipts = conductor.get_governance_arc().export()["count"].as_u64().unwrap();
+
+        for data in [
+            ShowStateData::Plan {
+                show: Some("FW27".into()),
+                states: vec!["PRESHOW".into(), "LOOK_1".into(), "FINALE".into()],
+            },
+            ShowStateData::Enter { state: "PRESHOW".into(), next_state: None },
+            ShowStateData::Readiness {
+                department: "visuals".into(),
+                status: ReadinessStatus::Ready,
+                detail: None,
+            },
+        ] {
+            assert!(conductor.process_message(show_msg("strobe_bridge", data)).await.is_ok());
+        }
+
+        let snap = conductor.get_state().await.show.snapshot(chrono::Utc::now());
+        assert_eq!(snap.current.as_deref(), Some("PRESHOW"));
+        assert_eq!(snap.next.as_deref(), Some("LOOK_1"));
+        assert_eq!(snap.departments.len(), 1);
+        // Confidence reflects the earlier DENY: 100% readiness - 10% penalty.
+        assert_eq!(snap.confidence.unwrap().score, 90);
+        assert_eq!(
+            conductor.get_governance_arc().export()["count"].as_u64().unwrap(),
+            receipts,
+            "show-state messages must not trigger rule evaluation"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    const GATE_RULES: &str = "harmony(1e-12)\n\n\
+        if show.entering == \"FINALE\" and readiness.lasers != \"ready\" then\n\
+        \x20   deny(\"FINALE requires lasers ready\")\nend\n";
+
+    fn gated_conductor() -> (PCHIConductor, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("pchi-gate-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let rules = dir.join("gate.only-pchi");
+        std::fs::write(&rules, GATE_RULES).unwrap();
+        let c = PCHIConductor::with_rules_file(
+            1e-12,
+            rules.to_str().unwrap(),
+            dir.join("key.hex").to_str().unwrap(),
+            dir.join("log.jsonl").to_str().unwrap(),
+        )
+        .unwrap();
+        (c, dir)
+    }
+
+    fn readiness(dept: &str, status: pchi_schema::ReadinessStatus) -> pchi_schema::ShowStateData {
+        pchi_schema::ShowStateData::Readiness { department: dept.into(), status, detail: None }
+    }
+
+    fn enter(state: &str) -> pchi_schema::ShowStateData {
+        pchi_schema::ShowStateData::Enter { state: state.into(), next_state: None }
+    }
+
+    #[tokio::test]
+    async fn a_transition_rule_refuses_entering_a_state_until_a_department_is_ready() {
+        use pchi_schema::ReadinessStatus::*;
+        let (c, dir) = gated_conductor();
+        assert!(c.process_message(show_msg("s", enter("PRESHOW"))).await.is_ok());
+
+        // Lasers have never reported: "unknown" must block, not pass.
+        let refused = c.process_message(show_msg("s", enter("FINALE"))).await;
+        assert!(refused.is_err(), "silence is not readiness");
+        let snap = c.get_state().await.show.snapshot(chrono::Utc::now());
+        assert_eq!(snap.current.as_deref(), Some("PRESHOW"), "the show did not move");
+        assert_eq!(snap.history.len(), 1);
+        assert_eq!(snap.recent_denials.len(), 1, "a refusal is visible to Mission Control");
+
+        // Not ready is still a no.
+        c.process_message(show_msg("l", readiness("lasers", NotReady))).await.unwrap();
+        assert!(c.process_message(show_msg("s", enter("FINALE"))).await.is_err());
+
+        // Other states are untouched by the rule.
+        assert!(c.process_message(show_msg("s", enter("LOOK_1"))).await.is_ok());
+
+        // Ready: allowed.
+        c.process_message(show_msg("l", readiness("lasers", Ready))).await.unwrap();
+        assert!(c.process_message(show_msg("s", enter("FINALE"))).await.is_ok());
+        let snap = c.get_state().await.show.snapshot(chrono::Utc::now());
+        assert_eq!(snap.current.as_deref(), Some("FINALE"));
+
+        // Each refusal is a signed, verifiable receipt.
+        let export = c.get_governance_arc().export();
+        assert_eq!(export["count"].as_u64().unwrap(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn transition_rules_never_fire_on_ordinary_messages() {
+        use pchi_schema::ReadinessStatus::*;
+        let dir = std::env::temp_dir().join(format!("pchi-gate-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // An `or`: with lasers unknown this condition is TRUE for any
+        // evaluation, so it only stays quiet if transition rules are really
+        // kept out of ordinary passes.
+        let rules = dir.join("r.only-pchi");
+        std::fs::write(
+            &rules,
+            "harmony(1e-12)\n\nif show.entering == \"X\" or readiness.lasers != \"ready\" then\n    deny(\"would fire\")\nend\n",
+        )
+        .unwrap();
+        let c = PCHIConductor::with_rules_file(
+            1e-12,
+            rules.to_str().unwrap(),
+            dir.join("key.hex").to_str().unwrap(),
+            dir.join("log.jsonl").to_str().unwrap(),
+        )
+        .unwrap();
+        let ctl = PCHIMessage::new(
+            MessageType::ControlParameter,
+            "t".to_string(),
+            Payload::ControlParameter(ControlParameterData {
+                target_id: "x".to_string(),
+                parameter: "y".to_string(),
+                value: serde_json::json!(0.1),
+            }),
+        );
+        assert!(c.process_message(ctl).await.is_ok());
+        c.process_message(show_msg("l", readiness("lasers", Ready))).await.unwrap();
+        assert_eq!(c.get_governance_arc().export()["count"].as_u64().unwrap(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn re_entering_the_current_state_is_not_gated() {
+        let (c, dir) = gated_conductor();
+        // Get into FINALE legitimately first.
+        c.process_message(show_msg("l", readiness("lasers", pchi_schema::ReadinessStatus::Ready)))
+            .await
+            .unwrap();
+        c.process_message(show_msg("s", enter("FINALE"))).await.unwrap();
+        // Lasers drop out; a bridge repeating the same enter must not be
+        // refused (nothing is transitioning).
+        c.process_message(show_msg("l", readiness("lasers", pchi_schema::ReadinessStatus::NotReady)))
+            .await
+            .unwrap();
+        assert!(c.process_message(show_msg("s", enter("FINALE"))).await.is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn blank_show_state_fields_are_rejected_at_validation() {
+        use pchi_schema::ShowStateData;
+        let (conductor, dir) = test_conductor().await;
+        let bad = show_msg("x", ShowStateData::Enter { state: "  ".into(), next_state: None });
+        assert!(conductor.process_message(bad).await.is_err());
+        let bad = show_msg("x", ShowStateData::Plan { show: None, states: vec![] });
+        assert!(conductor.process_message(bad).await.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn show_state_wire_format_is_stable() {
+        // This is the exact JSON the bridges send; pin it.
+        let raw = r#"{"version":"2.0.0","type":"show_state","source_id":"b","timestamp":1.0,
+            "pir_invariants":{"equilibrium_check":{"residual":0.0,"precision":1e-12,"sign_sequence":[]},
+            "coherence_gap":0.0,"curvature_signature":"0.0, 0.0, 0.0","residual":0.0},
+            "payload":{"payloadType":"show_state","data":{"kind":"readiness","department":"visuals","status":"not_ready","detail":"waiting for Strobe"}}}"#;
+        let m: PCHIMessage = serde_json::from_str(raw).expect("wire JSON must parse");
+        match m.payload {
+            Payload::ShowState(pchi_schema::ShowStateData::Readiness { department, status, detail }) => {
+                assert_eq!(department, "visuals");
+                assert_eq!(status, pchi_schema::ReadinessStatus::NotReady);
+                assert_eq!(detail.as_deref(), Some("waiting for Strobe"));
+            }
+            other => panic!("wrong payload: {other:?}"),
+        }
     }
 
     #[tokio::test]

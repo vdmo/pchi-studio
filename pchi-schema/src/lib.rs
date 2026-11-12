@@ -4,10 +4,10 @@
 //! with embedded PIR (Prime Integer Relations) mathematical invariants for equilibrium and coherence.
 
 pub mod invariants;
-pub mod validation;
 pub mod transform;
+pub mod validation;
 
-pub use invariants::{PIRInvariants, EquilibriumCheck};
+pub use invariants::{EquilibriumCheck, PIRInvariants};
 pub use transform::Transform;
 
 use serde::{Deserialize, Serialize};
@@ -18,20 +18,20 @@ use std::collections::HashMap;
 pub struct PCHIMessage {
     /// Schema version
     pub version: String,
-    
+
     /// Message type
     #[serde(rename = "type")]
     pub message_type: MessageType,
-    
+
     /// Source identifier
     pub source_id: String,
-    
+
     /// Timestamp in milliseconds
     pub timestamp: f64,
-    
+
     /// PIR mathematical invariants
     pub pir_invariants: invariants::PIRInvariants,
-    
+
     /// Message payload
     pub payload: Payload,
 }
@@ -42,21 +42,25 @@ pub struct PCHIMessage {
 pub enum MessageType {
     /// Scene update with object transforms
     SceneUpdate,
-    
+
     /// Control parameter change
     ControlParameter,
-    
+
     /// Musical context (BPM, beat, etc.)
     MusicalContext,
-    
+
     /// Artist tracking data
     ArtistTracking,
-    
+
     /// System heartbeat
     Heartbeat,
 
     /// A real DGV governance decision, recorded onto the stage.
     GovernanceEvent,
+
+    /// Show-level state: the plan, the state being entered, or a
+    /// department reporting readiness.
+    ShowState,
 }
 
 /// Message payload
@@ -66,15 +70,15 @@ pub enum Payload {
     /// Scene update with objects
     #[serde(rename = "scene_update")]
     SceneUpdate(SceneUpdateData),
-    
+
     /// Control parameter
     #[serde(rename = "control_parameter")]
     ControlParameter(ControlParameterData),
-    
+
     /// Musical context
     #[serde(rename = "musical_context")]
     MusicalContext(MusicalContextData),
-    
+
     /// Artist tracking
     #[serde(rename = "artist_tracking")]
     ArtistTracking(ArtistTrackingData),
@@ -82,6 +86,10 @@ pub enum Payload {
     /// DGV governance decision
     #[serde(rename = "governance_event")]
     GovernanceEvent(GovernanceEventData),
+
+    /// Show-level state (plan / enter / readiness)
+    #[serde(rename = "show_state")]
+    ShowState(ShowStateData),
 }
 
 /// Scene update data
@@ -144,13 +152,58 @@ pub struct GovernanceEventData {
     pub receipt_id: String,
 }
 
+/// How ready one department of a show is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadinessStatus {
+    Ready,
+    /// Working, but with a known problem the operator should see.
+    Degraded,
+    NotReady,
+}
+
+/// Show-level state, as opposed to per-parameter control. Discriminated by
+/// `kind` inside the payload's `data`:
+///
+/// ```json
+/// {"kind": "plan", "show": "FW27", "states": ["PRESHOW", "LOOK_1", "FINALE"]}
+/// {"kind": "enter", "state": "LOOK_1", "next_state": "LOOK_2"}
+/// {"kind": "readiness", "department": "visuals", "status": "ready"}
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ShowStateData {
+    /// The ordered journey of named states the show moves through.
+    Plan {
+        show: Option<String>,
+        states: Vec<String>,
+    },
+    /// The show has entered `state`. `next_state` overrides the plan's
+    /// successor when the sender knows better (e.g. a branch).
+    Enter {
+        state: String,
+        next_state: Option<String>,
+    },
+    /// A department reports whether it is ready for what comes next.
+    Readiness {
+        department: String,
+        status: ReadinessStatus,
+        detail: Option<String>,
+    },
+    /// Sent BY THE CONDUCTOR (never by tools) when a rule refused an
+    /// `enter`. `current` is the state the show is still in, so a tool that
+    /// already moved on its own (e.g. a VJ app advancing its playlist) can
+    /// put itself back.
+    Rejected {
+        state: String,
+        reason: String,
+        current: Option<String>,
+    },
+}
+
 impl PCHIMessage {
     /// Create a new PCHI message
-    pub fn new(
-        message_type: MessageType,
-        source_id: String,
-        payload: Payload,
-    ) -> Self {
+    pub fn new(message_type: MessageType, source_id: String, payload: Payload) -> Self {
         Self {
             version: "2.0.0".to_string(),
             message_type,
@@ -160,12 +213,12 @@ impl PCHIMessage {
             payload,
         }
     }
-    
+
     /// Validate the message using PIR invariants
     pub fn validate(&self) -> Result<(), validation::ValidationError> {
         validation::validate_message(self)
     }
-    
+
     /// Check if the message maintains equilibrium
     pub fn is_equilibrium(&self) -> bool {
         self.pir_invariants.residual < 1e-12
@@ -175,34 +228,30 @@ impl PCHIMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_pchi_message_creation() {
         let message = PCHIMessage::new(
             MessageType::SceneUpdate,
             "test_source".to_string(),
-            Payload::SceneUpdate(SceneUpdateData {
-                objects: vec![],
-            }),
+            Payload::SceneUpdate(SceneUpdateData { objects: vec![] }),
         );
-        
+
         assert_eq!(message.version, "2.0.0");
         assert_eq!(message.source_id, "test_source");
     }
-    
+
     #[test]
     fn test_equilibrium_check() {
         let mut message = PCHIMessage::new(
             MessageType::SceneUpdate,
             "test_source".to_string(),
-            Payload::SceneUpdate(SceneUpdateData {
-                objects: vec![],
-            }),
+            Payload::SceneUpdate(SceneUpdateData { objects: vec![] }),
         );
-        
+
         // Default should be in equilibrium
         assert!(message.is_equilibrium());
-        
+
         // Break equilibrium
         message.pir_invariants.residual = 1.0;
         assert!(!message.is_equilibrium());

@@ -57,6 +57,8 @@ pub fn create_router(state: WebServerState) -> Router {
     Router::new()
         .route("/", get(dashboard_handler))
         .route("/ws", get(websocket_handler))
+        .route("/mission-control", get(mission_control_handler))
+        .route("/state", get(show_state_handler))
         .route("/governance/export", get(governance_export_handler))
         .layer(middleware::from_fn_with_state(state.clone(), require_dashboard_auth))
         .with_state(state)
@@ -122,6 +124,19 @@ async fn governance_export_handler(State(state): State<WebServerState>) -> impl 
             .into_response();
     };
     (StatusCode::OK, Json(gov.export())).into_response()
+}
+
+/// GET /state — the shared show state: current/next state, department
+/// readiness, and the confidence the conductor can honestly claim. Covered
+/// by the same Basic Auth layer as every other route.
+async fn show_state_handler(State(state): State<WebServerState>) -> impl IntoResponse {
+    let scene = state.scene_state.read().await;
+    Json(scene.show.snapshot(chrono::Utc::now()))
+}
+
+/// Serve the Mission Control page
+async fn mission_control_handler() -> Html<&'static str> {
+    Html(include_str!("../web-dashboard/mission-control.html"))
 }
 
 /// Serve the dashboard HTML
@@ -326,6 +341,44 @@ mod tests {
             StatusCode::UNAUTHORIZED,
             "the auth layer must cover every route, not just the dashboard page"
         );
+    }
+
+    #[tokio::test]
+    async fn state_endpoint_reports_unknown_confidence_on_an_empty_show() {
+        let router = create_router(test_state(None));
+        let res = router
+            .oneshot(HttpRequest::get("/state").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(v["confidence"].is_null(), "no reports must not read as 100%");
+        assert!(v["current"].is_null());
+    }
+
+    #[tokio::test]
+    async fn mission_control_page_is_served() {
+        let router = create_router(test_state(None));
+        let res = router
+            .oneshot(HttpRequest::get("/mission-control").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("PCHI MISSION CONTROL"));
+    }
+
+    #[tokio::test]
+    async fn state_and_mission_control_are_behind_auth_too() {
+        for path in ["/state", "/mission-control"] {
+            let router = create_router(test_state(Some("secret")));
+            let res = router
+                .oneshot(HttpRequest::get(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "{path}");
+        }
     }
 
     #[tokio::test]
