@@ -124,6 +124,15 @@ class BridgeTests(unittest.TestCase):
         self.b.on_pchi_message(self.rejected("DROP", None))
         self.assertEqual(self.osc, [])
 
+    def test_refresh_reannounces_plan_and_readiness_but_never_enter(self):
+        self.b.on_strobe_osc("/strobe/state/cue", 2)
+        self.pchi.clear()
+        msgs = self.b.refresh_messages()
+        kinds = [data(m)["kind"] for m in msgs]
+        self.assertEqual(kinds, ["plan", "readiness"])
+        self.assertEqual(data(msgs[1])["status"], "ready")
+        self.assertNotIn("enter", kinds, "a stale enter would drag the show back")
+
     def test_wire_shape_matches_what_the_conductor_parses(self):
         m = self.b.startup_messages()[0]
         self.assertEqual(m["version"], "2.0.0")

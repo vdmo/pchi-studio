@@ -42,4 +42,10 @@ No invented numbers (`primeswarm-pchi/src/show.rs`):
 
 ## Display modes
 
+![Mission Control, commander mode](../../docs/images/mission-control-commander.png)
+
+![Mission Control, technical mode](../../docs/images/mission-control-technical.png)
+
+Both were captured from this demo, with Strobe simulated; "Wall" is `docs/images/mission-control-wall.png`. Escape returns to commander mode.
+
 `?mode=commander` (default: state, confidence, readiness), `?mode=tech` (adds sources and last-seen times), `?mode=wall` (state and confidence only, for a screen across the room).

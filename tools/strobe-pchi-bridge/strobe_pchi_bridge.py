@@ -137,6 +137,23 @@ class StrobeBridge:
         msgs.extend(self._readiness_if_changed())
         return msgs
 
+    def refresh_messages(self) -> List[Dict[str, Any]]:
+        """Re-announce the plan and current readiness, so a Conductor that was
+        restarted (it keeps state in memory) relearns them.
+
+        Deliberately does NOT re-send `enter`: by now another tool may have
+        moved the show on, and repeating our stale state would drag it back.
+        The Conductor treats an unchanged plan/readiness as a no-op, so this is
+        free when nothing has changed.
+        """
+        status, detail = self._readiness()
+        self._last_readiness = (status, detail)
+        return [
+            self._show_state({"kind": "plan", "show": self.show, "states": self.states}),
+            self._show_state({"kind": "readiness", "department": self.department,
+                              "status": status, "detail": detail}),
+        ]
+
     def heartbeat(self) -> Dict[str, Any]:
         return wire_message("heartbeat", "control_parameter",
                             {"target_id": self.source_id, "parameter": "heartbeat", "value": 1.0},
@@ -279,8 +296,13 @@ def run(args) -> None:
     running.set()
 
     def heartbeats():
+        beat = 0
         while running.is_set():
             send_pchi(bridge.heartbeat())
+            beat += 1
+            if beat % 3 == 0:  # every ~15 s
+                for msg in bridge.refresh_messages():
+                    send_pchi(msg)
             time.sleep(5)
 
     def watch_conductor():

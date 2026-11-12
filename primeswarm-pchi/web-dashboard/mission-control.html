@@ -47,17 +47,22 @@
   ul.feed li { border-bottom: 1px solid var(--line); padding: 3px 0; }
   ul.feed .t { color: var(--dim); margin-right: 10px; }
   ul.feed .deny { color: var(--bad); }
-  .tech { display: none; }
-  body.tech .tech { display: block; }
-  body.commander .techonly { display: none; }
+  .techonly { display: none; }
+  body.mode-tech .techonly { display: revert; }
   .banner { padding: 8px 22px; font-size: 13px; background: #3a1620; color: #ffb3bb; display: none; }
-  body.wall header, body.wall .cols, body.wall .journey-card, body.wall .modes { display: none; }
-  body.wall .hero { grid-template-columns: 1fr; text-align: center; }
-  body.wall .big { font-size: 20vw; } body.wall .mid { font-size: 9vw; }
+  /* Wall: one screen, no scrolling, readable across a room. Esc returns. */
+  body.mode-wall header, body.mode-wall .cols, body.mode-wall .journey-card { display: none; }
+  body.mode-wall main { max-width: none; padding: 2vw; gap: 1.5vw; }
+  body.mode-wall .hero { grid-template-columns: 1fr; text-align: center; gap: 1vw; }
+  body.mode-wall .hero .card { border: none; background: none; padding: 0; }
+  body.mode-wall .big { font-size: 13vw; } body.mode-wall .mid { font-size: 5.5vw; }
+  body.mode-wall .sub { font-size: 1.6vw; }
+  body.mode-wall .grid { grid-template-columns: repeat(auto-fit, minmax(14vw, 1fr)); }
+  body.mode-wall .dept .n { font-size: 1.8vw; } body.mode-wall .dept .s { font-size: 1.2vw; }
   @media (max-width: 800px) { .hero, .cols { grid-template-columns: 1fr; } .big { font-size: 40px; } }
 </style>
 </head>
-<body class="commander">
+<body class="mode-commander">
 <div class="banner" id="banner">Lost contact with the conductor. Showing nothing rather than stale data.</div>
 <header>
   <div></div><h1>PCHI MISSION CONTROL</h1><div class="show" id="show">—</div></div>
@@ -100,14 +105,14 @@ const mmss = s => { s = Math.max(0, Math.round(s)); return String(Math.floor(s /
 const LABEL = { ready: 'Ready', degraded: 'Degraded', not_ready: 'Not ready', offline: 'Offline' };
 
 function setMode(mode) {
-  document.body.classList.remove('commander', 'tech', 'wall');
-  document.body.classList.add(mode === 'wall' ? 'wall' : mode);
-  if (mode === 'tech') document.body.classList.add('tech');
+  if (!['commander', 'tech', 'wall'].includes(mode)) mode = 'commander';
+  document.body.className = 'mode-' + mode;
   document.querySelectorAll('.modes button').forEach(b => b.classList.toggle('on', b.dataset.mode === mode));
   history.replaceState(null, '', mode === 'commander' ? location.pathname : '?mode=' + mode);
 }
 document.querySelectorAll('.modes button').forEach(b => b.onclick = () => setMode(b.dataset.mode));
 setMode(new URLSearchParams(location.search).get('mode') || 'commander');
+addEventListener('keydown', e => { if (e.key === 'Escape') setMode('commander'); });
 
 function render(s) {
   $('banner').style.display = 'none';
@@ -136,7 +141,7 @@ function render(s) {
     const card = el('div', 'dept ' + d.status);
     card.append(el('div', 'n', d.name), el('div', 's', LABEL[d.status] || d.status));
     if (d.detail) card.append(el('div', 'd', d.detail));
-    const t = el('div', 'd techonly tech', 'source ' + d.source_id + (d.seconds_since_seen != null ? ' · seen ' + d.seconds_since_seen.toFixed(0) + ' s ago' : ''));
+    const t = el('div', 'd techonly', 'source ' + d.source_id + (d.seconds_since_seen != null ? ' · seen ' + d.seconds_since_seen.toFixed(0) + ' s ago' : ''));
     card.append(t);
     depts.append(card);
   }
@@ -152,7 +157,7 @@ function render(s) {
   const h = $('history'); h.replaceChildren();
   for (const t of s.history) {
     const li = el('li'); li.append(el('span', 't', clock(t.entered_at)), document.createTextNode(t.state));
-    const src = el('span', 't techonly tech', ' via ' + t.source_id); li.append(src); h.append(li);
+    const src = el('span', 't techonly', ' via ' + t.source_id); li.append(src); h.append(li);
   }
   if (!s.history.length) h.append(el('li', 'sub', 'nothing yet'));
 
