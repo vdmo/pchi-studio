@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
-import { ReactFlow, Background, Controls, type Edge, type Node } from '@xyflow/react'
+import { ReactFlow, Background, Controls } from '@xyflow/react'
+import { buildEdges, buildNodes, edgeTypes } from './showchartGraph'
+import CommandBar from './CommandBar'
 import {
   actionToEvent,
   enterActions,
-  layoutShowchart,
   step,
   transitionLabel,
   transitionTrigger,
@@ -75,30 +76,8 @@ export default function ShowchartPanel({ chart, onChange, emit, note }: Props) {
   const available = chart.transitions.filter((t) => t.source === current)
   const patchT = (i: number, patch: Partial<Showchart['transitions'][number]>) =>
     onChange({ ...chart, transitions: chart.transitions.map((x, j) => (j === i ? { ...x, ...patch } : x)) })
-  const pos = useMemo(() => layoutShowchart(chart), [chart])
-
-  const nodes: Node[] = chart.states.map((s) => ({
-    id: s.id,
-    position: pos[s.id] ?? { x: 0, y: 0 },
-    data: { label: s.label ? `${s.id}\n${s.label}` : s.id },
-    style: {
-      whiteSpace: 'pre-line',
-      border: `2px solid ${s.id === current ? '#fbbf24' : s.id === chart.initial ? '#34d399' : '#3b82f6'}`,
-      background: s.id === current ? '#fbbf24' : '#16181d',
-      color: s.id === current ? '#000' : '#e6e6e6',
-      borderRadius: 8,
-      minWidth: 110,
-    },
-  }))
-  const edges: Edge[] = chart.transitions.map((t, i) => ({
-    id: `${t.source}-${t.event}-${i}`,
-    source: t.source,
-    target: t.target,
-    label: t.event,
-    animated: t.source === current,
-    style: { stroke: t.source === current ? '#fbbf24' : '#60a5fa' },
-    labelStyle: { fill: '#e6e6e6', fontSize: 11 },
-  }))
+  const nodes = useMemo(() => buildNodes(chart, current, true), [chart, current])
+  const edges = useMemo(() => buildEdges(chart, current), [chart, current])
 
   const patchState = (id: string, patch: Partial<Showchart['states'][number]>) =>
     onChange({ ...chart, states: chart.states.map((s) => (s.id === id ? { ...s, ...patch } : s)) })
@@ -157,11 +136,14 @@ export default function ShowchartPanel({ chart, onChange, emit, note }: Props) {
         </button>
       </aside>
 
-      <main>
-        <ReactFlow nodes={nodes} edges={edges} nodesConnectable={false} onNodeClick={(_, n) => setSelected(n.id)} colorMode="dark" fitView>
+      <main className="cmdmain">
+        <CommandBar chart={chart} onApply={onChange} />
+        <div className="flowwrap">
+        <ReactFlow nodes={nodes} edges={edges} edgeTypes={edgeTypes} nodesConnectable={false} onNodeClick={(_, n) => setSelected(n.id)} colorMode="dark" fitView>
           <Background />
           <Controls />
         </ReactFlow>
+        </div>
       </main>
 
       <aside className="inspector">

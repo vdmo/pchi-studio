@@ -43,6 +43,9 @@ struct Inner {
     store: EventStore,
     /// Bumped on every state change so timers armed for an older state are ignored.
     generation: u64,
+    /// When the current state was entered (ms since epoch). Lets a client that
+    /// connects mid-state draw the right timer countdown.
+    entered_at: i64,
 }
 
 pub struct Show {
@@ -60,7 +63,7 @@ impl Show {
         recorder::record_start(&store, &engine, ts).map_err(|e| e.to_string())?;
         let timers = engine.pending_timers();
         let show = Arc::new(Self {
-            inner: Mutex::new(Inner { engine, store, generation: 0 }),
+            inner: Mutex::new(Inner { engine, store, generation: 0, entered_at: ts }),
             tx: broadcast::channel(1024).0,
         });
         show.arm(0, timers);
@@ -82,6 +85,8 @@ impl Show {
             "state": g.engine.current_state,
             "context": g.engine.context,
             "timers": g.engine.pending_timers(),
+            // elapsed, not a timestamp: the client counts from its own clock
+            "elapsed_ms": (now_ms() - g.entered_at).max(0),
         })
     }
 
@@ -119,6 +124,7 @@ impl Show {
                     }
                     if applied {
                         g.generation += 1;
+                        g.entered_at = ts;
                         armed = Some((g.generation, g.engine.pending_timers()));
                     }
                 }
@@ -159,6 +165,7 @@ impl Show {
             let _ = recorder::record_start(&g.store, &engine, ts);
             g.engine = engine;
             g.generation += 1;
+            g.entered_at = ts;
             (g.generation, g.engine.pending_timers())
         };
         self.publish(self.snapshot());
@@ -337,6 +344,22 @@ mod tests {
         let r = pchi_eventstore::replay_latest(&g.store).unwrap();
         assert!(r.matches_recording(), "{:?}", r.divergences);
         assert_eq!(r.final_state, "CALM");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hello_reports_how_long_the_current_state_has_been_active() {
+        let show = Show::start(festival(), EventStore::open_in_memory().unwrap()).unwrap();
+        show.apply("studio", "START");
+        // the system clock is not paused by tokio, so compare loosely: just entered
+        let fresh = show.snapshot()["elapsed_ms"].as_i64().unwrap();
+        assert!((0..2_000).contains(&fresh), "elapsed_ms was {fresh}");
+        // a state that has been active for a while reports it
+        show.inner.lock().unwrap().entered_at -= 4_000;
+        let later = show.snapshot()["elapsed_ms"].as_i64().unwrap();
+        assert!((4_000..6_000).contains(&later), "elapsed_ms was {later}");
+        // entering a new state restarts the clock
+        show.apply("studio", "OPEN_PORTAL");
+        assert!(show.snapshot()["elapsed_ms"].as_i64().unwrap() < 2_000);
     }
 
     #[tokio::test]

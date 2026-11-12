@@ -526,7 +526,15 @@ export function layoutShowchart(c: Showchart): Record<string, { x: number; y: nu
     const d = depth.get(s.id) ?? extra++
     const r = rows.get(d) ?? 0
     rows.set(d, r + 1)
-    out[s.id] = { x: d * 230, y: r * 110 }
+    out[s.id] = { x: d * 320, y: r * 130 }
   }
   return out
 }
+
+/** null if the guard expression parses, otherwise why not. */
+export function guardError(expr: string): string | null {
+  const g = parseGuard(expr)
+  return typeof g === 'string' ? g : null
+}
+
+export * from './commands'

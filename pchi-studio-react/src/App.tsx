@@ -78,6 +78,7 @@ export default function App() {
   const [selNode, setSelNode] = useState<string | null>(null)
   const [selEdge, setSelEdge] = useState<string | null>(null)
   const [status, setStatus] = useState<Status>('connecting')
+  const [liveStatus, setLiveStatus] = useState<Status>('connecting')
   const [log, setLog] = useState<LogEntry[]>([])
   const client = useRef<CoreClient>()
   const seq = useRef(1)
@@ -209,7 +210,11 @@ export default function App() {
         </div>
         <input value={meta.project} onChange={(e) => setMeta({ ...meta, project: e.target.value })} title="project" />
         <input value={meta.name} onChange={(e) => setMeta({ ...meta, name: e.target.value })} title="show" />
-        <span className={`pill ${status}`}>core: {status}</span>
+        {mode === 'live' ? (
+          <span className={`pill ${liveStatus}`} title="Live feed from pchi-studio-api (port 3100)">runtime: {liveStatus}</span>
+        ) : (
+          <span className={`pill ${status}`} title="PCHI conductor (port 3000), used by Publish graph">core: {status}</span>
+        )}
         <span className="spacer" />
         <button onClick={() => emit({ type: 'graph.update', graph: buildShow() })}>Publish graph</button>
         <button onClick={save}>Save .pchi</button>
@@ -219,7 +224,7 @@ export default function App() {
         </label>
       </header>
 
-      {mode === 'live' && <LivePanel onFeed={(e) => pushLog('in', e)} />}
+      {mode === 'live' && <LivePanel onFeed={(e) => pushLog('in', e)} onStatus={setLiveStatus} />}
 
       {mode === 'show' && (
         <ShowchartPanel chart={showchart} onChange={setShowchart} emit={emit} note={(e) => pushLog('sim', e)} />

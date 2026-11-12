@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:sdk": "esbuild ../pchi-sdk/src/index.ts --bundle --format=cjs --platform=node --outfile=.sdk-test/sdk.cjs --log-level=error && node --test test/*.test.mjs"
   },
   "dependencies": {
     "@xyflow/react": "^12.3.5",

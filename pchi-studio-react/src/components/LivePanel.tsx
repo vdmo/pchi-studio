@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { ReactFlow, Background, Controls, type Edge, type Node } from '@xyflow/react'
+import { ReactFlow, Background, Controls } from '@xyflow/react'
+import { buildEdges, buildNodes, edgeTypes } from './showchartGraph'
 import {
-  layoutShowchart,
   step,
+  timerEvent,
   transitionLabel,
   transitionTrigger,
   type PchiEvent,
@@ -15,6 +16,8 @@ type Status = 'connecting' | 'online' | 'offline'
 interface Props {
   /** Mirrors every feed message into Studio's main event stream. */
   onFeed: (e: PchiEvent) => void
+  /** Reports the feed's connection status, so the header can show the right one. */
+  onStatus: (s: Status) => void
 }
 
 const feedUrl = () => `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/ws`
@@ -25,12 +28,19 @@ const feedUrl = () => `${location.protocol === 'https:' ? 'wss' : 'ws'}://${loca
  * engine itself, apart from asking "which events could fire from here" to
  * enable the right buttons.
  */
-export default function LivePanel({ onFeed }: Props) {
+export default function LivePanel({ onFeed, onStatus }: Props) {
   const [status, setStatus] = useState<Status>('connecting')
   const [def, setDef] = useState<Showchart | null>(null)
   const [state, setState] = useState('')
   const [ctx, setCtx] = useState<ShowContext>({})
-  const [timers, setTimers] = useState<number[]>([])
+  // When the current state was entered, on THIS machine's clock. The server
+  // sends elapsed time (not a timestamp), so clock skew between the two
+  // machines cannot throw the countdown off.
+  const [enteredAt, setEnteredAt] = useState(() => Date.now())
+  const [now, setNow] = useState(() => Date.now())
+  const onStatusRef = useRef(onStatus)
+  onStatusRef.current = onStatus
+  useEffect(() => onStatusRef.current(status), [status])
   const [trail, setTrail] = useState<{ ts: number; text: string }[]>([])
   const [key, setKey] = useState('energy')
   const [val, setVal] = useState('0.3')
@@ -59,11 +69,12 @@ export default function LivePanel({ onFeed }: Props) {
             setDef(msg.definition as Showchart)
             setState(String(msg.state))
             setCtx((msg.context as ShowContext) ?? {})
-            setTimers((msg.timers as number[]) ?? [])
+            setEnteredAt(Date.now() - Number(msg.elapsed_ms ?? 0))
             break
           case 'transition':
             if (msg.applied) {
               setState(String(msg.to))
+              setEnteredAt(Date.now())
               setTrail((t) => [...t.slice(-49), { ts: Number(msg.ts), text: `${msg.event}  ${msg.from} → ${msg.to}  (${msg.source})` }])
             } else {
               setTrail((t) => [...t.slice(-49), { ts: Number(msg.ts), text: `${msg.event} ignored in ${msg.from}  (${msg.source})` }])
@@ -87,38 +98,33 @@ export default function LivePanel({ onFeed }: Props) {
     }
   }, [])
 
-  // timers shown on the current state come from the chart, so they stay right after each transition
-  const pendingTimers = useMemo(
-    () => (def ? def.transitions.filter((t) => t.source === state && t.after_ms !== undefined).map((t) => t.after_ms!) : timers),
-    [def, state, timers],
+  // timed transitions leaving the current state, with whether each would fire right now
+  const timerRows = useMemo(
+    () =>
+      (def?.transitions ?? [])
+        .filter((t) => t.source === state && t.after_ms !== undefined)
+        .map((t) => ({
+          ms: t.after_ms!,
+          target: t.target,
+          guard: t.guard,
+          open: !!def && step(def, ctx, state, timerEvent(t.after_ms!))?.target === t.target,
+        })),
+    [def, state, ctx],
   )
+
+  // tick only while there is something to count down
+  const counting = timerRows.some((r) => now - enteredAt <= r.ms + 500)
+  useEffect(() => {
+    if (!counting) return
+    setNow(Date.now())
+    const id = window.setInterval(() => setNow(Date.now()), 100)
+    return () => window.clearInterval(id)
+  }, [counting, enteredAt])
 
   const send = (m: PchiEvent) => ws.current?.readyState === WebSocket.OPEN && ws.current.send(JSON.stringify(m))
 
-  const pos = useMemo(() => (def ? layoutShowchart(def) : {}), [def])
-  const nodes: Node[] = (def?.states ?? []).map((s) => ({
-    id: s.id,
-    position: pos[s.id] ?? { x: 0, y: 0 },
-    data: { label: s.label ? `${s.id}\n${s.label}` : s.id },
-    draggable: false,
-    style: {
-      whiteSpace: 'pre-line',
-      border: `2px solid ${s.id === state ? '#fbbf24' : '#3b82f6'}`,
-      background: s.id === state ? '#fbbf24' : '#16181d',
-      color: s.id === state ? '#000' : '#e6e6e6',
-      borderRadius: 8,
-      minWidth: 110,
-    },
-  }))
-  const edges: Edge[] = (def?.transitions ?? []).map((t, i) => ({
-    id: `${t.source}-${i}`,
-    source: t.source,
-    target: t.target,
-    label: transitionLabel(t),
-    animated: t.source === state,
-    style: { stroke: t.source === state ? '#fbbf24' : '#60a5fa' },
-    labelStyle: { fill: '#e6e6e6', fontSize: 11 },
-  }))
+  const nodes = useMemo(() => (def ? buildNodes(def, state, false) : []), [def, state])
+  const edges = useMemo(() => (def ? buildEdges(def, state) : []), [def, state])
 
   const available = (def?.transitions ?? []).filter((t) => t.source === state)
 
@@ -162,7 +168,7 @@ export default function LivePanel({ onFeed }: Props) {
 
       <main>
         {def ? (
-          <ReactFlow nodes={nodes} edges={edges} nodesConnectable={false} nodesDraggable={false} colorMode="dark" fitView key={def.id ?? 'show'}>
+          <ReactFlow nodes={nodes} edges={edges} edgeTypes={edgeTypes} nodesConnectable={false} nodesDraggable={false} colorMode="dark" fitView key={def.id ?? 'show'}>
             <Background />
             <Controls showInteractive={false} />
           </ReactFlow>
@@ -178,7 +184,23 @@ export default function LivePanel({ onFeed }: Props) {
       <aside className="inspector">
         <h4>State</h4>
         <p className="bigstate">{state || '—'}</p>
-        {pendingTimers.length > 0 && <p className="muted">⏱ timer pending: {pendingTimers.map((m) => `${m} ms`).join(', ')}</p>}
+        {timerRows.map((r, i) => {
+          const elapsed = Math.max(0, now - enteredAt)
+          const left = Math.max(0, r.ms - elapsed)
+          const note = left > 0 ? `${(left / 1000).toFixed(1)} s` : r.open ? 'due' : 'skipped'
+          return (
+            <div key={i} className={`timer ${r.open ? '' : 'blocked'}`} title={r.open ? '' : `guard '${r.guard}' is not satisfied: this timer will not move the show`}>
+              <div className="timer-head">
+                <span>⏱ after {r.ms / 1000} s → {r.target}</span>
+                <b>{note}</b>
+              </div>
+              <div className="timer-bar">
+                <div className="timer-fill" style={{ width: `${Math.min(100, (elapsed / r.ms) * 100)}%` }} />
+              </div>
+              {!r.open && <span className="muted">guard {r.guard} blocks it</span>}
+            </div>
+          )
+        })}
         <h5>Send event</h5>
         {available.length === 0 && <p className="muted">No events leave this state.</p>}
         {available.map((t, i) => {
