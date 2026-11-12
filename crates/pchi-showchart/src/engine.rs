@@ -88,6 +88,12 @@ impl ShowEngine {
         v
     }
 
+    /// Cues of the current state in firing order. The scheduler measures them
+    /// from state entry and drops the ones that have not fired when the state is left.
+    pub fn pending_cues(&self) -> Vec<crate::ScheduledCue> {
+        self.chart.state(&self.current_state).and_then(|s| s.timeline.as_ref()).map(|t| t.scheduled()).unwrap_or_default()
+    }
+
     /// Like `try_dispatch` but reports the states as well as the actions.
     pub fn fire(&mut self, event: &str) -> Option<TransitionResult> {
         let previous_state = self.current_state.clone();
@@ -271,6 +277,25 @@ mod tests {
     }
 
     #[test]
+    fn timeline_example_loads_and_exposes_the_current_states_cues() {
+        let c = Showchart::from_json(include_str!("../examples/timelines.pchi.json")).unwrap();
+        assert!(c.validate().is_empty());
+        let mut e = ShowEngine::new(c).unwrap();
+        assert!(e.pending_cues().is_empty(), "PRESHOW has no timeline");
+        e.dispatch("START");
+        let cues: Vec<_> = e.pending_cues().iter().map(|c| (c.at_ms, c.lane.clone(), c.action.kind.clone())).collect();
+        assert_eq!(cues, [(0, "visual".to_string(), "scene.activate".to_string()), (2000, "lighting".to_string(), "lighting.look".to_string()), (4000, "laser".to_string(), "laser.cue".to_string())]);
+        e.dispatch("DROP");
+        assert_eq!(e.pending_cues().len(), 1, "leaving INTRO drops its cues; DROP has its own");
+    }
+
+    #[test]
+    fn timelines_survive_a_json_roundtrip() {
+        let c = Showchart::from_json(include_str!("../examples/timelines.pchi.json")).unwrap();
+        assert_eq!(c, Showchart::from_json(&serde_json::to_string(&c).unwrap()).unwrap());
+    }
+
+    #[test]
     fn transition_without_a_trigger_is_rejected() {
         let mut c = portal();
         c.transitions[0] = Transition { event: None, ..Transition::on("PRESHOW", "INTRO", "x") };
@@ -299,7 +324,7 @@ mod tests {
     #[test]
     fn unreachable_states_are_reported_by_validate() {
         let mut c = portal();
-        c.states.push(crate::State { id: "ORPHAN".into(), label: String::new(), enter_actions: vec![], exit_actions: vec![] });
+        c.states.push(crate::State { id: "ORPHAN".into(), label: String::new(), enter_actions: vec![], exit_actions: vec![], timeline: None });
         assert_eq!(c.validate(), vec![ValidationError::Unreachable("ORPHAN".into())]);
         assert!(ShowEngine::new(c).is_ok());
     }

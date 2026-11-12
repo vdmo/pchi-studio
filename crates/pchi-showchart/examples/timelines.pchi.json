@@ -1,0 +1,42 @@
+{
+  "id": "timelines-demo",
+  "name": "Timelines Demo",
+  "version": "0.1.0",
+  "initial": "PRESHOW",
+  "states": [
+    { "id": "PRESHOW", "label": "Doors open" },
+    {
+      "id": "INTRO",
+      "label": "Introduction",
+      "timeline": {
+        "duration_ms": 8000,
+        "lanes": [
+          { "id": "visual", "name": "Visuals", "dept": "visual", "cues": [
+            { "id": "v1", "at_ms": 0, "length_ms": 4000, "label": "Intro scene", "action": { "kind": "scene.activate", "payload": { "scene": "intro" } } }
+          ] },
+          { "id": "lighting", "name": "Lighting", "dept": "lighting", "cues": [
+            { "id": "l1", "at_ms": 2000, "action": { "kind": "lighting.look", "payload": { "look": "warm" } } }
+          ] },
+          { "id": "laser", "name": "Lasers", "dept": "laser", "cues": [
+            { "id": "z1", "at_ms": 4000, "length_ms": 2000, "action": { "kind": "laser.cue", "payload": { "cue": "l_intro" } } }
+          ] }
+        ]
+      }
+    },
+    {
+      "id": "DROP",
+      "label": "The drop",
+      "timeline": {
+        "lanes": [
+          { "id": "visual", "name": "Visuals", "dept": "visual", "cues": [
+            { "id": "v2", "at_ms": 0, "action": { "kind": "scene.activate", "payload": { "scene": "drop" } } }
+          ] }
+        ]
+      }
+    }
+  ],
+  "transitions": [
+    { "source": "PRESHOW", "target": "INTRO", "event": "START" },
+    { "source": "INTRO", "target": "DROP", "event": "DROP" }
+  ]
+}

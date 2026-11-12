@@ -25,7 +25,7 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use pchi_eventstore::{recorder, EventStore};
-use pchi_showchart::{timer_event, ShowEngine, Showchart};
+use pchi_showchart::{timer_event, ScheduledCue, ShowEngine, Showchart};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -61,12 +61,11 @@ impl Show {
         let ts = now_ms();
         recorder::begin_run(&store, &engine, ts).map_err(|e| e.to_string())?;
         recorder::record_start(&store, &engine, ts).map_err(|e| e.to_string())?;
-        let timers = engine.pending_timers();
         let show = Arc::new(Self {
             inner: Mutex::new(Inner { engine, store, generation: 0, entered_at: ts }),
             tx: broadcast::channel(1024).0,
         });
-        show.arm(0, timers);
+        show.arm(0);
         Ok(show)
     }
 
@@ -125,7 +124,7 @@ impl Show {
                     if applied {
                         g.generation += 1;
                         g.entered_at = ts;
-                        armed = Some((g.generation, g.engine.pending_timers()));
+                        armed = Some(g.generation);
                     }
                 }
                 Err(e) => {
@@ -135,8 +134,8 @@ impl Show {
             }
         }
         out.into_iter().for_each(|m| self.publish(m));
-        if let Some((generation, timers)) = armed {
-            self.arm(generation, timers);
+        if let Some(generation) = armed {
+            self.arm(generation);
         }
         applied
     }
@@ -156,7 +155,7 @@ impl Show {
 
     /// Start a fresh recorded run from the initial state.
     pub fn reset(self: &Arc<Self>) {
-        let (generation, timers) = {
+        let generation = {
             let mut g = self.inner.lock().unwrap();
             let chart = g.engine.chart.clone();
             let ts = now_ms();
@@ -166,25 +165,50 @@ impl Show {
             g.engine = engine;
             g.generation += 1;
             g.entered_at = ts;
-            (g.generation, g.engine.pending_timers())
+            g.generation
         };
         self.publish(self.snapshot());
-        self.arm(generation, timers);
+        self.arm(generation);
     }
 
-    /// One task per timed transition: after the delay, fire the timer event
-    /// unless the show has left the state it was armed for.
-    fn arm(self: &Arc<Self>, generation: u64, timers: Vec<u64>) {
+    /// Schedules everything the current state does over time, measured from now
+    /// (its entry): one task per timed transition and one per timeline cue. Each
+    /// task does nothing if the show has left the state it was armed for.
+    fn arm(self: &Arc<Self>, generation: u64) {
+        let (timers, cues) = {
+            let g = self.inner.lock().unwrap();
+            (g.engine.pending_timers(), g.engine.pending_cues())
+        };
         for ms in timers {
             let show = Arc::clone(self);
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_millis(ms)).await;
-                let current = show.inner.lock().unwrap().generation;
-                if current == generation {
+                if show.inner.lock().unwrap().generation == generation {
                     show.apply("timer", &timer_event(ms));
                 }
             });
         }
+        for cue in cues {
+            let show = Arc::clone(self);
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(cue.at_ms)).await;
+                if show.inner.lock().unwrap().generation == generation {
+                    show.fire_cue(&cue);
+                }
+            });
+        }
+    }
+
+    /// Publish (and record) the action of a timeline cue that has come due.
+    fn fire_cue(&self, cue: &ScheduledCue) {
+        let ts = now_ms();
+        let event = cue.action.to_event();
+        {
+            let g = self.inner.lock().unwrap();
+            let show_id = g.engine.chart.id.clone().unwrap_or_else(|| "show".into());
+            let _ = g.store.append(ts, &show_id, None, &cue.action.kind, &event);
+        }
+        self.publish(json!({"type": "action", "ts": ts, "event": event, "lane": cue.lane, "cue": cue.cue}));
     }
 }
 
@@ -360,6 +384,58 @@ mod tests {
         // entering a new state restarts the clock
         show.apply("studio", "OPEN_PORTAL");
         assert!(show.snapshot()["elapsed_ms"].as_i64().unwrap() < 2_000);
+    }
+
+    fn timelines() -> Showchart {
+        Showchart::from_json(include_str!("../../pchi-showchart/examples/timelines.pchi.json")).unwrap()
+    }
+
+    fn actions(rx: &mut broadcast::Receiver<Value>) -> Vec<(String, Option<String>)> {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter(|m| m["type"] == "action")
+            .map(|m| (m["event"]["type"].as_str().unwrap().to_string(), m["lane"].as_str().map(String::from)))
+            .collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timeline_cues_fire_at_their_offsets_in_their_lanes() {
+        let show = Show::start(timelines(), EventStore::open_in_memory().unwrap()).unwrap();
+        let mut rx = show.subscribe();
+        show.apply("studio", "START"); // INTRO: cues at 0s, 2s, 4s
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        assert_eq!(actions(&mut rx), [("scene.activate".to_string(), Some("visual".to_string()))]);
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+        assert_eq!(actions(&mut rx), [("lighting.look".to_string(), Some("lighting".to_string()))]);
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+        assert_eq!(actions(&mut rx), [("laser.cue".to_string(), Some("laser".to_string()))]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn leaving_a_state_cancels_its_unfired_cues() {
+        let show = Show::start(timelines(), EventStore::open_in_memory().unwrap()).unwrap();
+        let mut rx = show.subscribe();
+        show.apply("studio", "START");
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        let _ = actions(&mut rx); // the cue at 0s
+        show.apply("studio", "DROP"); // leave INTRO before its 2s and 4s cues
+        tokio::time::sleep(Duration::from_millis(10_000)).await;
+        let kinds: Vec<_> = actions(&mut rx).into_iter().map(|a| a.0).collect();
+        // DROP's own enter-less state fires only its own visual cue at 0s
+        assert_eq!(kinds, ["scene.activate"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cue_actions_are_recorded_in_the_event_log() {
+        let show = Show::start(timelines(), EventStore::open_in_memory().unwrap()).unwrap();
+        show.apply("studio", "START");
+        tokio::time::sleep(Duration::from_millis(5_000)).await;
+        let kinds: Vec<_> = show.events().iter().map(|e| e["type"].as_str().unwrap().to_string()).collect();
+        for k in ["lighting.look", "laser.cue"] {
+            assert!(kinds.contains(&k.to_string()), "{k} should be in the log: {kinds:?}");
+        }
+        // and the recorded run still replays identically
+        let g = show.inner.lock().unwrap();
+        assert!(pchi_eventstore::replay_latest(&g.store).unwrap().matches_recording());
     }
 
     #[tokio::test]

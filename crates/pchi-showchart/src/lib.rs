@@ -14,6 +14,7 @@ pub mod guard;
 pub mod runtime;
 pub mod showchart;
 pub mod simulate;
+pub mod timeline;
 pub mod state;
 pub mod transition;
 
@@ -23,4 +24,5 @@ pub use guard::Context;
 pub use runtime::{RecordingRuntime, Runtime};
 pub use showchart::{Showchart, ValidationError};
 pub use state::State;
+pub use timeline::{Cue, Lane, ScheduledCue, Timeline};
 pub use transition::{timer_event, Transition};

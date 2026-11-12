@@ -294,11 +294,36 @@ export interface ShowAction {
   payload?: Record<string, unknown>
 }
 
+/** A cue on a lane: an action that fires `at_ms` after the state is entered. */
+export interface ShowCue {
+  id: string
+  at_ms: number
+  /** Display length only; the action fires once, at at_ms. */
+  length_ms?: number
+  label?: string
+  action: ShowAction
+}
+
+export interface ShowLane {
+  id: string
+  name?: string
+  /** 'visual' | 'lighting' | 'laser' | 'audio' | 'other' (see DEPTS) */
+  dept?: string
+  cues: ShowCue[]
+}
+
+/** Lanes of cues that play while a state is active (executed by the runtime). */
+export interface ShowTimeline {
+  duration_ms?: number
+  lanes: ShowLane[]
+}
+
 export interface ShowState {
   id: string
   label?: string
   enter_actions?: ShowAction[]
   exit_actions?: ShowAction[]
+  timeline?: ShowTimeline
 }
 
 export interface ShowTransition {
@@ -540,3 +565,35 @@ export function guardError(expr: string): string | null {
 }
 
 export * from './commands'
+
+// ───────────────────────── Timelines (mirrors crates/pchi-showchart/src/timeline.rs) ─────────────────────────
+
+export const DEPTS = [
+  { id: 'visual', label: 'Visuals', color: '#a855f7', kind: 'scene.activate', field: 'scene' },
+  { id: 'lighting', label: 'Lighting', color: '#f59e0b', kind: 'lighting.look', field: 'look' },
+  { id: 'laser', label: 'Lasers', color: '#ef4444', kind: 'laser.cue', field: 'cue' },
+  { id: 'audio', label: 'Audio', color: '#10b981', kind: 'audio.snapshot', field: 'snapshot' },
+  { id: 'other', label: 'Other', color: '#7a7f92', kind: 'cue.trigger', field: 'cue' },
+] as const
+
+export const deptOf = (id?: string) => DEPTS.find((d) => d.id === id) ?? DEPTS[4]
+
+/** The standard set of lanes a new timeline starts with. */
+export const standardLanes = (): ShowLane[] =>
+  DEPTS.slice(0, 4).map((d) => ({ id: d.id, name: d.label, dept: d.id, cues: [] }))
+
+/** When the last cue ends (or the declared duration), for sizing the ruler. */
+export function timelineEnd(t?: ShowTimeline): number {
+  if (!t) return 0
+  const cues = t.lanes.flatMap((l) => l.cues)
+  const last = cues.reduce((m, c) => Math.max(m, c.at_ms + (c.length_ms ?? 0)), 0)
+  return Math.max(t.duration_ms ?? 0, last)
+}
+
+/** Every cue in firing order, like ShowEngine::pending_cues in Rust. */
+export function scheduledCues(t?: ShowTimeline): { at_ms: number; lane: string; cue: string; action: ShowAction }[] {
+  if (!t) return []
+  return t.lanes
+    .flatMap((l) => l.cues.map((c) => ({ at_ms: c.at_ms, lane: l.id, cue: c.id, action: c.action })))
+    .sort((a, b) => a.at_ms - b.at_ms) // stable sort: ties keep lane order
+}

@@ -57,5 +57,14 @@ export function useHistory(chart: Showchart, onChange: (c: Showchart) => void) {
     return true
   }, [onChange])
 
-  return { commit, undo, redo, canUndo: stacks.current.past.length > 0, canRedo: stacks.current.future.length > 0 }
+  /** Forget all history (after opening a different show). */
+  const reset = useCallback(() => {
+    stacks.current = { past: [], future: [] }
+    last.current = { t: 0 }
+    bump((n) => n + 1)
+  }, [])
+
+  return { commit, undo, redo, reset, canUndo: stacks.current.past.length > 0, canRedo: stacks.current.future.length > 0 }
 }
+
+export type History = ReturnType<typeof useHistory>

@@ -23,7 +23,7 @@ import {
 import CommandBar from './CommandBar'
 import Card from './Card'
 import ActionList from './ActionList'
-import { useHistory } from './useHistory'
+import type { History } from './useHistory'
 import {
   CommandError,
   actionToEvent,
@@ -41,10 +41,9 @@ import {
 
 interface Props {
   chart: Showchart
-  onChange: (c: Showchart) => void
-  /** Sends an event to PCHI Core and logs it. */
-  emit: (e: PchiEvent) => void
-  /** Logs a local (simulated) event without sending it. */
+  /** The app-wide undo history (shared with the Timeline tab). */
+  history: History
+  /** Logs a simulated event to the event stream. */
   note: (e: PchiEvent) => void
 }
 
@@ -62,13 +61,11 @@ export default function ShowchartPanel(props: Props) {
   )
 }
 
-function Editor({ chart, onChange, emit, note }: Props) {
+function Editor({ chart, history, note }: Props) {
   const rf = useReactFlow()
-  const history = useHistory(chart, onChange)
   const { commit } = history
 
   const [current, setCurrent] = useState(chart.initial)
-  const [live, setLive] = useState(false) // false = simulate only, true = also send to Core
   const [trail, setTrail] = useState<string[]>([chart.initial])
   const [selected, setSelected] = useState<string | null>(null)
   const [selectedT, setSelectedT] = useState<number | null>(null)
@@ -228,12 +225,7 @@ function Editor({ chart, onChange, emit, note }: Props) {
   }, [selected, selectedT, chart, history.undo, history.redo])
 
   // ── simulation ──
-  const run = (actions: ShowAction[]) =>
-    actions.forEach((a) => {
-      const ev = actionToEvent(a)
-      if (live) emit(ev)
-      else note({ ...ev, simulated: true })
-    })
+  const run = (actions: ShowAction[]) => actions.forEach((a) => note({ ...actionToEvent(a), simulated: true }))
 
   const reset = () => {
     setCtx(chart.context ?? {})
@@ -401,10 +393,6 @@ function Editor({ chart, onChange, emit, note }: Props) {
             {right === 'simulate' ? (
               <>
                 <p className="bigstate">{current || '—'}</p>
-                <label className="row">
-                  <input type="checkbox" checked={live} onChange={(e) => setLive(e.target.checked)} />
-                  Send actions to Core
-                </label>
                 {blocked && <p className="warn">Fix the problems below before running.</p>}
                 {available.length === 0 && <p className="muted">No events leave this state.</p>}
                 {available.map((t, i) => {
