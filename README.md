@@ -12,16 +12,38 @@ This repository contains all the core libraries, tools, and documentation needed
   - `resolume-pchi-bridge/`: Python OSC bridge for Resolume Arena.
   - `touchdesigner-pchi-chop/`: Python CHOP for TouchDesigner.
   - `ableton-pchi-max/`: Max for Live device for Ableton Live.
-- `docs/`: The full documentation and presentation website. 
+  - `strobe-pchi-bridge/`: OSC bridge for [Strobe](https://github.com/lnorton89/strobe); drives *and* follows the shared show state.
+  - `pchi-show/`: tiny operator/simulator CLI for show state (plan, enter, readiness).
+- `demos/`: end-to-end demos (`multi-tool-live-show`, `strobe-show`).
+- `docs/`: The full documentation and presentation website; `docs/STRATEGY.md` is positioning and roadmap.
 
 ## Building
 
 ```bash
 cargo build   # workspace root — builds pchi-schema and primeswarm-pchi
-cargo test    # 40 tests: schema validation, the Only-Lang parser/evaluator,
+cargo test    # 53 tests: schema validation, the Only-Lang parser/evaluator,
               # signed-receipt chaining and tamper detection, end-to-end
-              # rule denial through the conductor, dashboard auth
+              # rule denial through the conductor, dashboard auth,
+              # shared show state and confidence
 ```
+
+## Shared show state and Mission Control
+
+Beyond per-parameter control, the conductor tracks the *show*: an ordered
+plan of named states, the state currently entered, and each department's
+readiness. Tools report it with `show_state` messages (`plan`, `enter`,
+`readiness`); the conductor serves the picture at `GET /state` and a live
+page at **`/mission-control`**:
+
+```bash
+cargo run -p primeswarm-pchi          # then open http://127.0.0.1:3000/mission-control
+./demos/strobe-show/run_demo.sh       # scripted demo (Strobe simulated)
+```
+
+"Show confidence" is computed, not decorative: mean department readiness
+minus a penalty for recent rule denials; a department whose source goes
+silent for 15 s turns offline; and with nothing reported it reads "No data",
+never 100%. Details in `demos/strobe-show/README.md`.
 
 ## Governance — what's real
 

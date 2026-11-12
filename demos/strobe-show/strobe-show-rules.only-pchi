@@ -1,0 +1,22 @@
+# Strobe x PCHI demo — Only-Lang rules
+#
+# The Strobe bridge forwards Strobe's "strobe_intensity" control (a 0..1
+# value, exactly as Strobe's OSC feedback reports it) as control parameter
+# strobe.strobe_intensity. A denial here lowers Show Confidence in Mission
+# Control for 60 s and is signed into the governance log.
+#
+# The 0.8 threshold is the same placeholder as demos/multi-tool-live-show,
+# not a vetted safety limit — see PRICING.md on certified rule packs.
+
+harmony(1e-12)
+
+if strobe.strobe_intensity > 0.8 then
+    deny("Strobe intensity exceeds venue safety limit")
+end
+
+# Transition rule (mentions show.entering, so it is judged when a state is
+# about to be entered and never on ordinary updates). A department that has
+# never reported reads "unknown", which is not "ready".
+if show.entering == "FINALE" and readiness.lasers != "ready" then
+    deny("FINALE requires lasers to be ready")
+end

@@ -157,3 +157,38 @@ that guarantee has to do it itself today.
 
 **Not yet built:** an automatic cross-conductor receipt-verification
 fetch.
+
+## 9. Shared Show State Reports Claims, Not Verified Facts
+
+Mission Control's readiness and confidence (`primeswarm-pchi/src/show.rs`)
+are built from what tools *say*. A bridge that reports `ready` while its
+application is broken produces a confident-looking screen.
+
+- Liveness is per **source**: a department turns `offline` when its source
+  has sent nothing for 15 s. For the Strobe bridge that source is the bridge
+  itself (Strobe has no heartbeat), so "ready" means "Strobe has talked to
+  us", not "the projector is lit".
+- Readiness is sticky: it stays until the department reports again. It is
+  not automatically re-asked when a new state is entered.
+- Confidence is a simple formula (mean readiness minus a capped penalty for
+  denials in the last 60 s). It is explainable, not predictive: it does not
+  estimate the probability a show goes well.
+- Transition rules (`show.entering == "X" and readiness.<dept> != "ready"`)
+  gate a state change, but only on what is *reported*: they inherit every
+  limit above. Readiness is read at the moment of the request; it is not
+  re-checked afterwards, so a department can drop out the instant after the
+  gate opens. A refused transition leaves the conductor's state unchanged,
+  but a tool that already moved on its own (a VJ app advancing its playlist)
+  stays moved unless its bridge handles the `rejected` message. The Strobe
+  bridge does; no other bridge does yet. Transition rules are only judged
+  on `enter` messages, not on ordinary control updates, and the grammar's
+  limits still apply (no parentheses, strict left-to-right `and`/`or`).
+- A rule `DENY` is not attributed to a specific control, so bridges cannot
+  yet pull back the offending value: denials are visible and signed, not
+  enforced at the tool.
+- State is in memory. A conductor restart forgets the plan, current state
+  and readiness until tools report again.
+- `GET /state` and `/mission-control` are open unless
+  `PCHI_DASHBOARD_PASSWORD` is set (same as every other route).
+- The Strobe bridge has been tested against a simulation of Strobe's
+  documented OSC addresses, not a running Strobe.

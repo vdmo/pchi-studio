@@ -1,0 +1,12 @@
+{
+  "show": "Strobe x PCHI demo",
+  "department": "visuals",
+  "forward_controls": ["strobe_intensity"],
+  "states": [
+    { "state": "PRESHOW", "cue": 1 },
+    { "state": "INTRO",   "cue": 2 },
+    { "state": "BUILD",   "cue": 3 },
+    { "state": "DROP",    "cue": 4 },
+    { "state": "FINALE",  "cue": 5 }
+  ]
+}
