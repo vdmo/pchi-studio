@@ -17,8 +17,11 @@
 
 use crate::rig::{dept_of_kind, resolve, Device};
 use pchi_showchart::Action;
+use crate::profiles;
 use rosc::{encoder, OscMessage, OscPacket, OscType};
 use serde_json::Value;
+use std::collections::BTreeSet;
+use std::sync::Mutex;
 use std::time::Duration;
 use tokio::net::{lookup_host, UdpSocket};
 
@@ -27,6 +30,9 @@ const SEND_TIMEOUT: Duration = Duration::from_millis(1500);
 pub struct Output {
     devices: Vec<Device>,
     send: bool,
+    /// Laser devices the operator has armed. A laser gets nothing from the show until it is armed,
+    /// and every runtime start begins disarmed.
+    armed: Mutex<BTreeSet<String>>,
 }
 
 /// What routing decided for one action.
@@ -41,7 +47,33 @@ pub enum Plan {
 
 impl Output {
     pub fn new(devices: Vec<Device>, send: bool) -> Self {
-        Self { devices, send }
+        Self { devices, send, armed: Mutex::new(BTreeSet::new()) }
+    }
+
+    /// The same output with a new device list (after a live edit), keeping the armed state of lasers that are still there.
+    pub fn with_devices(&self, devices: Vec<Device>) -> Self {
+        let keep: BTreeSet<String> = self.armed.lock().unwrap().iter().filter(|id| devices.iter().any(|d| &d.id == *id && d.dept == "laser")).cloned().collect();
+        Self { devices, send: self.send, armed: Mutex::new(keep) }
+    }
+
+    pub fn is_armed(&self, id: &str) -> bool {
+        self.armed.lock().unwrap().contains(id)
+    }
+    /// Arm or disarm a laser device. Returns false if there is no such laser in the rig.
+    pub fn set_armed(&self, id: &str, armed: bool) -> bool {
+        if !self.devices.iter().any(|d| d.id == id && d.dept == "laser") {
+            return false;
+        }
+        let mut a = self.armed.lock().unwrap();
+        if armed {
+            a.insert(id.to_string());
+        } else {
+            a.remove(id);
+        }
+        true
+    }
+    pub fn lasers(&self) -> Vec<Device> {
+        self.devices.iter().filter(|d| d.dept == "laser").cloned().collect()
     }
     pub fn devices(&self) -> &[Device] {
         &self.devices
@@ -86,15 +118,26 @@ pub fn encode(action: &Action) -> Result<Vec<u8>, String> {
     encoder::encode(&OscPacket::Message(OscMessage { addr: format!("/pchi/{clean}"), args })).map_err(|e| format!("{e:?}"))
 }
 
-/// Send one action to a device. Returns the `host:port` it went to.
+/// Send one action to a device. Returns the `host:port` it went to. A device of a profiled type
+/// (see the `profiles` module) gets that tool's own messages; anything else gets the generic ones.
 pub async fn deliver(dev: &Device, action: &Action) -> Result<String, String> {
+    let packets = match (action.kind.as_str(), profiles::encode(&dev.kind, action)) {
+        ("test", _) | (_, None) => vec![encode(action)?],
+        (_, Some(r)) => r?,
+    };
+    send_packets(dev, packets).await
+}
+
+/// Send ready-made OSC packets to a device.
+pub async fn send_packets(dev: &Device, packets: Vec<Vec<u8>>) -> Result<String, String> {
     let addr = dev.address().ok_or_else(|| format!("{} has no host and port in the rig", dev.label))?;
-    let bytes = encode(action)?;
     let go = async {
         let target = lookup_host(&addr).await.map_err(|e| format!("cannot resolve {addr}: {e}"))?.next().ok_or_else(|| format!("cannot resolve {addr}"))?;
         let bind = if target.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
         let sock = UdpSocket::bind(bind).await.map_err(|e| format!("cannot open a socket: {e}"))?;
-        sock.send_to(&bytes, target).await.map_err(|e| format!("send to {addr} failed: {e}"))?;
+        for bytes in &packets {
+            sock.send_to(bytes, target).await.map_err(|e| format!("send to {addr} failed: {e}"))?;
+        }
         Ok::<_, String>(addr.clone())
     };
     tokio::time::timeout(SEND_TIMEOUT, go).await.map_err(|_| format!("sending to {addr} timed out"))?
@@ -124,6 +167,39 @@ mod tests {
             }
             p => panic!("{p:?}"),
         }
+    }
+
+    #[test]
+    fn lasers_start_disarmed_and_keep_their_state_across_a_live_edit() {
+        let out = Output::new(vec![dev("l1", "laser", 1), dev("b1", "beyond", 2), dev("d1", "lighting-desk", 3)], false);
+        assert!(!out.is_armed("l1") && !out.is_armed("b1"));
+        assert!(out.set_armed("b1", true));
+        assert!(!out.set_armed("d1", true), "only lasers can be armed");
+        assert!(!out.set_armed("nope", true));
+        assert_eq!(out.lasers().len(), 2);
+        // a new device list: b1 is still there (stays armed), l1 is gone
+        let next = out.with_devices(vec![dev("b1", "beyond", 2), dev("d1", "lighting-desk", 3)]);
+        assert!(next.is_armed("b1"));
+        assert!(out.set_armed("b1", false));
+        assert!(!out.is_armed("b1"));
+    }
+
+    #[tokio::test]
+    async fn a_profiled_device_gets_the_tools_own_message() {
+        let rx = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = rx.local_addr().unwrap().port();
+        deliver(&dev("e1", "eos", port), &Action::new("lighting.look", json!({"look": "3/9"}))).await.unwrap();
+        let mut buf = [0u8; 256];
+        let (n, _) = tokio::time::timeout(Duration::from_secs(2), rx.recv_from(&mut buf)).await.unwrap().unwrap();
+        let OscPacket::Message(m) = rosc::decoder::decode_udp(&buf[..n]).unwrap().1 else { panic!() };
+        assert_eq!(m.addr, "/eos/cue/3/9/fire");
+        // a value the tool cannot use is an error, not a guess
+        assert!(deliver(&dev("e1", "eos", port), &Action::new("lighting.look", json!({"look": "warm"}))).await.is_err());
+        // the test message stays generic, so it is harmless on any tool
+        deliver(&dev("e1", "eos", port), &Action::new("test", json!({}))).await.unwrap();
+        let (n, _) = tokio::time::timeout(Duration::from_secs(2), rx.recv_from(&mut buf)).await.unwrap().unwrap();
+        let OscPacket::Message(m) = rosc::decoder::decode_udp(&buf[..n]).unwrap().1 else { panic!() };
+        assert_eq!(m.addr, "/pchi/test");
     }
 
     #[test]

@@ -56,6 +56,38 @@ pchi-studio-api my-show.pchi --send     # really sends
 - Sending is off unless `--send` is given, so opening a show file can never fire a laser by accident.
   Use a dry run first and test each device before doors.
 
+### Tool profiles (Resolume, grandMA3, Eos, X32, BEYOND)
+
+Add one of these in the Rig tab and the runtime speaks that tool's own OSC instead of the generic `/pchi/...`
+messages. Set the device's **host and port to match the tool's own OSC settings**: only Resolume's default
+(7000) is documented by the vendor; the others' ports are whatever you configure. What goes in the cue's value:
+
+| Device | Cue kind | Value | Sends | Source of the address |
+|---|---|---|---|---|
+| Resolume Arena | Visuals (scene) | `3` = column, `2/5` = layer/clip, or a full address from Resolume's OSC Shortcut mode | `/composition/columns/3/connect`, `/composition/layers/2/clips/5/connect` (int 1), or your address | clip form: third-party tutorial; column form: **from memory, not confirmed** |
+| grandMA3 | Lighting (look) | `402` = executor, or a playback command such as `Goto Cue 5` | `/cmd` string `Go+ Exec 402` | MA3 manual (checked). Only playback commands (`Go`, `Go+`, `Go-`, `GoBack`, `Goto`, `Pause`, `Off`, `On`, `Flash`) are allowed: a show file can never send `Delete`, `Store` and the like |
+| ETC Eos | Lighting (look) | `2` or `2.5` = cue, `3/9` = cuelist/cue | `/eos/cue/2/fire`, `/eos/cue/3/9/fire` | ETC support article (checked) |
+| Behringer X32 / M32 | Audio (snapshot) | scene number 0 to 99 | `/-action/goscene` (int) | **from memory, not confirmed against a desk** |
+| Pangolin BEYOND | Laser (cue) | the cue name | `/beyond/general/StartCue` (string); kinds `laser.stop` and `laser.blackout` map to `StopCue` and `BlackOut` | Pangolin wiki (checked) |
+
+A value the tool cannot use is reported as a failed delivery with the reason; it is never guessed.
+Try each profile against the real tool (or its software/offline version) before a show relies on it.
+The five dialects live in `crates/pchi-studio-api/src/profiles.rs`, each with tests that decode the exact bytes.
+
+### Laser safety
+
+- **Lasers start disarmed on every runtime start.** A laser device gets no cues, and no test-fire, until the
+  operator arms it on the Live tab (a confirmation explains what arming does). A held cue is reported as
+  "held: not armed".
+- **Arming never switches a laser's output on.** That stays in the laser software. It only lets PCHI's cues through.
+- **STOP LASERS** (always visible when the rig has a laser) disarms every laser and, for BEYOND, sends
+  `BlackOut` and `DisableLaserOutput`. For a laser tool with no known safe stop message it only disarms
+  here and says so: use that tool's own stop. It needs the feed token (if any) but **not** the operator key:
+  anyone on the crew can stop.
+- Arming needs the operator key when the runtime has one; disarming never does.
+- This is a software convenience, not a certified safety system: keep the laser's own interlocks, shutter and
+  e-stop in the operator's hands, as the law and your laser safety officer require.
+
 ### Department pages, live edits, report, test fire
 
 - **Department page.** Open `http://<studio host>/?dept=lighting` (or a device id, `?dept=laser-1`) on a

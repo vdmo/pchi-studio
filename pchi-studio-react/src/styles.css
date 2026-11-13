@@ -519,3 +519,11 @@ button.go:disabled { background: #1b1d25; color: #7a7f92; border-color: #2f323e;
 .rt-key { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
 .rt-key p { flex: 1 1 100%; margin: 0; }
 .rt-key .primary { background: #3b82f6; border-color: #3b82f6; color: #fff; }
+
+/* --- laser safety --- */
+.laser-bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 8px 0; padding: 8px; border: 1px solid #7f1d1d; border-radius: 10px; background: #2a1215; }
+.stop-lasers { background: #dc2626; border-color: #dc2626; color: #fff; font-weight: 800; letter-spacing: .04em; padding: 8px 14px; }
+.stop-lasers:active { background: #991b1b; }
+.dev-arm { font-size: 12px; padding: 4px 9px; }
+.dev-arm.on { background: #78350f; border-color: #f59e0b; color: #fde68a; }
+.ready-chip.armed { border-color: #f59e0b; }

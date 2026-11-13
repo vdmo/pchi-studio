@@ -11,7 +11,7 @@ const TYPE_DEPT: Record<string, string> = {
   projector: 'visual', 'led-wall': 'visual',
   lighting: 'lighting', 'lighting-desk': 'lighting',
   laser: 'laser',
-  'audio-zone': 'audio', 'audio-console': 'audio', 'audio-agent': 'audio',
+  resolume: 'visual', grandma3: 'lighting', eos: 'lighting', x32: 'audio', beyond: 'laser',  'audio-zone': 'audio', 'audio-console': 'audio', 'audio-agent': 'audio',
 }
 
 /** The department a device serves: the one set on it, else inferred from its type, else none. */

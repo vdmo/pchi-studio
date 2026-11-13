@@ -236,6 +236,31 @@ export default function RuntimeTools({ getFile, locked = false, undoDepth = 0 }:
   )
 }
 
+/** Arm or disarm a laser. Arming needs the operator key when the runtime has one; it is asked for once per tab. */
+export async function armLaser(id: string, armed: boolean): Promise<{ ok: boolean; error?: string }> {
+  const go = () => api(`/devices/${encodeURIComponent(id)}/arm?armed=${armed ? 1 : 0}`, { method: 'POST' }).catch(() => null)
+  let r = await go()
+  if (r?.status === 403) {
+    const k = window.prompt('This runtime needs the operator key to arm a laser:')
+    if (!k) return { ok: false, error: 'Not armed: the operator key is needed.' }
+    setEditKey(k.trim())
+    r = await go()
+  }
+  if (!r) return { ok: false, error: 'The runtime did not answer.' }
+  if (r.status === 403) {
+    setEditKey('')
+    return { ok: false, error: 'That key was not accepted.' }
+  }
+  return r.ok ? { ok: true } : { ok: false, error: String(r.body?.error ?? `refused (${r.status})`) }
+}
+
+/** The hard stop: disarm every laser and tell tools that have a safe message to go dark. No key needed. */
+export async function stopLasers(): Promise<{ ok: boolean; notes: string[]; error?: string }> {
+  const r = await api('/laser/stop', { method: 'POST' }).catch(() => null)
+  if (!r?.ok) return { ok: false, notes: [], error: 'The runtime did not answer: use the laser software\'s own stop NOW.' }
+  return { ok: true, notes: (r.body?.notes as string[]) ?? [] }
+}
+
 /** One harmless message to a rig device, to check the link before doors. */
 export async function testFire(id: string): Promise<{ status: string; error?: string }> {
   const r = await api(`/devices/${encodeURIComponent(id)}/test`, { method: 'POST' }).catch(() => null)

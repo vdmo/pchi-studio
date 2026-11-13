@@ -10,6 +10,7 @@
 //!   {"type":"readiness", "ts", "dept", "ready", "note", "source"}
 //!   {"type":"delivery", "ts", "kind", "lane", "cue", "status", "device", "label", "dept", "target", "error"}
 //!       status: "sent" | "dry-run" | "no-device" | "failed" (see the `output` module)
+//!   {"type":"arming", "ts", "device", "armed"}: a laser was armed or disarmed (lasers get no cues until armed)
 //!   {"type":"show", "definition", "devices", "diff"}: the show was replaced while running
 //!   {"type":"error", "message"}
 //! client -> server:
@@ -17,7 +18,7 @@
 //!   {"type":"ready","dept":"lighting","ready":true,"note":"cue 12 loaded","source":"dept-page"}
 //!       (a client that repeats the same report every few seconds is a heartbeat: it is not logged)
 //!
-//! HTTP: `POST /show` (send an edited show; `?dry=1` previews the changes), `POST /show/undo` (back to before the last send; with `--edit-key` both need `X-Pchi-Edit-Key`), `GET /report` (planned vs actual cue times, delivery problems),
+//! HTTP: `POST /show` (send an edited show; `?dry=1` previews the changes), `POST /laser/stop` (hard stop), `POST /devices/<id>/arm?armed=1|0`, `POST /show/undo` (back to before the last send; with `--edit-key` both need `X-Pchi-Edit-Key`), `GET /report` (planned vs actual cue times, delivery problems),
 //! `POST /devices/<id>/test` (one harmless test message to a device), `GET /state` (the hello snapshot), `GET /events` (the event log),
 //! `GET /ready`, `POST /ready/<dept>` {"ready":true,"note":"..."} and
 //! `POST /input` {"event":"GO"}: plain HTTP so any desk, script or button box can take part.
@@ -40,6 +41,7 @@ use axum::{
 };
 pub mod diff;
 pub mod output;
+pub mod profiles;
 pub mod rig;
 
 use futures_util::{SinkExt, StreamExt};
@@ -142,7 +144,7 @@ impl Show {
             "context": g.engine.context,
             "timers": g.engine.pending_timers(),
             "readiness": self.readiness_map(),
-            "devices": out.as_ref().map(|o| json!(o.devices())).unwrap_or(Value::Null),
+            "devices": out.as_ref().map(|o| Self::devices_json(o)).unwrap_or(Value::Null),
             "output": out.as_ref().map(|o| if o.sending() { "live" } else { "dry-run" }),
             // the server's clock now, so a client can tell how old each readiness report is without trusting its own clock
             "server_ts": now_ms(),
@@ -151,6 +153,17 @@ impl Show {
             // elapsed, not a timestamp: the client counts from its own clock
             "elapsed_ms": (now_ms() - g.entered_at).max(0),
         })
+    }
+
+    /// The rig for clients: each device, and for lasers whether they are armed.
+    fn devices_json(out: &Output) -> Value {
+        json!(out.devices().iter().map(|d| {
+            let mut v = json!(d);
+            if d.dept == "laser" {
+                v["armed"] = json!(out.is_armed(&d.id));
+            }
+            v
+        }).collect::<Vec<_>>())
     }
 
     fn readiness_map(&self) -> Value {
@@ -391,7 +404,12 @@ impl Show {
         };
         if devices.is_some() {
             let sending = self.output.lock().unwrap().as_ref().is_some_and(|o| o.sending());
-            *self.output.lock().unwrap() = Some(Arc::new(Output::new(new_dev, sending)));
+            let mut o = self.output.lock().unwrap();
+            let next = match o.as_ref() {
+                Some(old) => old.with_devices(new_dev),
+                None => Output::new(new_dev, sending),
+            };
+            *o = Some(Arc::new(next));
         }
         let hello = self.snapshot();
         self.publish(json!({"type": "show", "ts": now_ms(), "definition": hello["definition"], "devices": hello["devices"], "output": hello["output"], "undo_depth": hello["undo_depth"], "diff": d}));
@@ -406,7 +424,10 @@ impl Show {
         let dev = out.devices().iter().find(|d| d.id == id).cloned().ok_or_else(|| format!("no device '{id}' in the rig"))?;
         let mut m = json!({"type": "delivery", "ts": now_ms(), "kind": "test", "lane": null, "cue": null,
                            "device": dev.id, "label": dev.label, "dept": dev.dept, "target": dev.address()});
-        if !out.sending() {
+        if dev.dept == "laser" && !out.is_armed(&dev.id) {
+            m["status"] = json!("held");
+            m["error"] = json!(format!("{} is not armed: arm it first", dev.label));
+        } else if !out.sending() {
             m["status"] = json!("dry-run");
             m["note"] = json!("sending is off: start the runtime with --send");
         } else {
@@ -420,6 +441,56 @@ impl Show {
         }
         self.report(m.clone());
         Ok(m)
+    }
+
+    /// Arm or disarm a laser device. Disarming is always allowed; arming is the operator's decision (the
+    /// HTTP route needs the operator key). A laser gets no cues until armed. Arming never switches the
+    /// laser's own output on: that stays at the laser software.
+    pub fn set_armed(&self, id: &str, armed: bool) -> Result<(), String> {
+        let out = self.output.lock().unwrap().clone().ok_or("this show has no rig")?;
+        if !out.set_armed(id, armed) {
+            return Err(format!("no laser device '{id}' in the rig"));
+        }
+        self.publish(json!({"type": "arming", "ts": now_ms(), "device": id, "armed": armed}));
+        Ok(())
+    }
+
+    /// The hard stop: disarm every laser (so nothing more is sent) and, for tools with a known safe
+    /// message (BEYOND: blackout and disable output), tell them to go dark. Anyone with the feed token may use it.
+    pub fn laser_stop(self: &Arc<Self>) -> Value {
+        let Some(out) = self.output.lock().unwrap().clone() else { return json!({"stopped": [], "notes": ["this show has no rig"]}) };
+        let ts = now_ms();
+        let mut stopped = Vec::new();
+        let mut notes = Vec::new();
+        for dev in out.lasers() {
+            out.set_armed(&dev.id, false);
+            self.publish(json!({"type": "arming", "ts": ts, "device": dev.id, "armed": false}));
+            stopped.push(dev.id.clone());
+            let msgs = profiles::stop_messages(&dev.kind);
+            let base = json!({"type": "delivery", "ts": ts, "kind": "laser.stop", "lane": null, "cue": null, "device": dev.id, "label": dev.label, "dept": dev.dept, "target": dev.address()});
+            if msgs.is_empty() {
+                notes.push(format!("{}: disarmed here, but no stop message is known for this tool: use its own stop", dev.label));
+            } else if !out.sending() {
+                let mut m = base;
+                m["status"] = json!("dry-run");
+                m["note"] = json!("hard stop: would send blackout and disable output");
+                self.report(m);
+            } else {
+                let show = Arc::clone(self);
+                tokio::spawn(async move {
+                    let mut m = base;
+                    match output::send_packets(&dev, msgs).await {
+                        Ok(_) => m["status"] = json!("sent"),
+                        Err(e) => {
+                            m["status"] = json!("failed");
+                            m["error"] = json!(e);
+                        }
+                    }
+                    show.report(m);
+                });
+            }
+        }
+        json!({"stopped": stopped, "notes": notes})
     }
 
     /// The run so far: every cue's planned and actual time, deliveries that went wrong, and edits made mid-show.
@@ -477,6 +548,12 @@ impl Show {
             Plan::NoDevice { dept, reason } => self.report(with(&base, json!({"status": "no-device", "dept": dept, "error": reason}))),
             Plan::To(dev) => {
                 let ident = json!({"device": dev.id, "label": dev.label, "dept": dev.dept, "target": dev.address()});
+                if dev.dept == "laser" && !out.is_armed(&dev.id) {
+                    let mut m = ident;
+                    m["status"] = json!("held");
+                    m["error"] = json!(format!("{} is not armed: arm it on the Live tab to let cues through", dev.label));
+                    return self.report(with(&base, m));
+                }
                 if !out.sending() {
                     let mut m = ident;
                     m["status"] = json!("dry-run");
@@ -544,6 +621,8 @@ pub fn router_with_token(show: Arc<Show>, token: Option<String>) -> Router {
         }))
         .route("/show", post(post_show))
         .route("/show/undo", post(post_undo))
+        .route("/laser/stop", post(post_laser_stop))
+        .route("/devices/:id/arm", post(post_arm))
         .route("/devices/:id/test", post(post_test))
         .route("/ready/:dept", post(post_ready))
         .route("/input", post(post_input))
@@ -598,6 +677,29 @@ async fn post_undo(State(a): State<App>, q: Query<HashMap<String, String>>, h: H
     match a.show.undo(!dry) {
         Ok(v) => (StatusCode::OK, Json(v)),
         Err((code, v)) => (StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST), Json(v)),
+    }
+}
+
+/// `POST /laser/stop`: the hard stop. Needs the feed token (if any) but NOT the operator key: anyone on the crew can stop.
+async fn post_laser_stop(State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap) -> impl IntoResponse {
+    if !authorized(&a.token, &q, &h) {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "token required"})));
+    }
+    (StatusCode::OK, Json(a.show.laser_stop()))
+}
+
+/// `POST /devices/<id>/arm?armed=1|0`: arming needs the operator key; disarming never does.
+async fn post_arm(State(a): State<App>, Path(id): Path<String>, q: Query<HashMap<String, String>>, h: HeaderMap) -> impl IntoResponse {
+    if !authorized(&a.token, &q, &h) {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "token required"})));
+    }
+    let armed = q.get("armed").is_some_and(|v| v == "1" || v == "true");
+    if armed && !a.show.edit_ok(edit_key_of(&q, &h)) {
+        return locked();
+    }
+    match a.show.set_armed(&id, armed) {
+        Ok(()) => (StatusCode::OK, Json(json!({"ok": true, "armed": armed}))),
+        Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e}))),
     }
 }
 
@@ -1013,10 +1115,13 @@ mod tests {
         let port = rx_sock.local_addr().unwrap().port();
         // dry run: reported, nothing sent
         let dry = Show::start_with(quick(), EventStore::open_in_memory().unwrap(), Some(Output::new(vec![device("l1", "laser", port)], false))).unwrap();
+        assert_eq!(dry.test_fire("l1").await.unwrap()["status"], "held", "a laser is held until armed");
+        dry.set_armed("l1", true).unwrap();
         assert_eq!(dry.test_fire("l1").await.unwrap()["status"], "dry-run");
         assert!(tokio::time::timeout(Duration::from_millis(200), rx_sock.recv_from(&mut [0u8; 64])).await.is_err(), "nothing may leave in a dry run");
         // live: the packet arrives
         let live = Show::start_with(quick(), EventStore::open_in_memory().unwrap(), Some(Output::new(vec![device("l1", "laser", port)], true))).unwrap();
+        live.set_armed("l1", true).unwrap();
         let r = live.test_fire("l1").await.unwrap();
         assert_eq!(r["status"], "sent");
         let mut buf = [0u8; 64];
@@ -1139,6 +1244,85 @@ mod tests {
         let logged = show.events().iter().filter(|e| e["type"] == "show.ready").count();
         assert_eq!(logged, 2, "the heartbeat is not recorded");
         assert!(show.snapshot()["server_ts"].as_i64().unwrap() > 0);
+    }
+
+    async fn recv_osc(sock: &tokio::net::UdpSocket) -> String {
+        let mut buf = [0u8; 256];
+        let (n, _) = tokio::time::timeout(Duration::from_secs(2), sock.recv_from(&mut buf)).await.expect("a packet").unwrap();
+        let rosc::OscPacket::Message(m) = rosc::decoder::decode_udp(&buf[..n]).unwrap().1 else { panic!() };
+        m.addr
+    }
+
+    #[tokio::test]
+    async fn lasers_get_nothing_until_armed_and_the_hard_stop_goes_dark() {
+        let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = sock.local_addr().unwrap().port();
+        let out = Output::new(vec![device("b1", "beyond", port)], true);
+        let show = Show::start_with(quick(), EventStore::open_in_memory().unwrap(), Some(out)).unwrap();
+        let mut rx = show.subscribe();
+        let dev = |show: &Arc<Show>| show.snapshot()["devices"][0].clone();
+        assert_eq!(dev(&show)["armed"], false, "a laser starts disarmed");
+
+        // the scene's laser cue (0.8 s) is held, not sent
+        show.apply("studio", "START");
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        let held: Vec<Value> = deliveries(&mut rx).into_iter().filter(|d| d["kind"] == "laser.cue").collect();
+        assert_eq!(held[0]["status"], "held");
+        assert!(held[0]["error"].as_str().unwrap().contains("not armed"));
+        assert!(tokio::time::timeout(Duration::from_millis(200), recv_osc(&sock)).await.is_err(), "nothing reached the laser");
+        assert_eq!(show.test_fire("b1").await.unwrap()["status"], "held");
+
+        // armed: a message goes through
+        show.set_armed("b1", true).unwrap();
+        assert_eq!(dev(&show)["armed"], true);
+        assert_eq!(show.test_fire("b1").await.unwrap()["status"], "sent");
+        assert_eq!(recv_osc(&sock).await, "/pchi/test");
+
+        // hard stop: disarmed, and BEYOND is told to black out and disable output
+        let r = show.laser_stop();
+        assert_eq!(r["stopped"], json!(["b1"]));
+        assert_eq!(recv_osc(&sock).await, "/beyond/general/BlackOut");
+        assert_eq!(recv_osc(&sock).await, "/beyond/general/DisableLaserOutput");
+        assert_eq!(dev(&show)["armed"], false);
+        assert_eq!(show.test_fire("b1").await.unwrap()["status"], "held");
+        assert!(show.set_armed("nope", true).is_err());
+    }
+
+    #[tokio::test]
+    async fn arming_keeps_across_a_live_edit_and_a_tool_with_no_stop_message_is_said_so() {
+        let out = Output::new(vec![device("l1", "laser", 9), device("b1", "beyond", 9)], false);
+        let show = Show::start_with(quick(), EventStore::open_in_memory().unwrap(), Some(out)).unwrap();
+        show.set_armed("b1", true).unwrap();
+        let mut edited = quick();
+        move_cue(&mut edited, "INTRO", "lighting", 500);
+        let devices = vec![device("l1", "laser", 9), device("b1", "beyond", 9)];
+        show.replace(edited, Some(devices), true).unwrap();
+        assert_eq!(show.snapshot()["devices"][1]["armed"], true, "a send must not quietly disarm or arm anything");
+        let r = show.laser_stop();
+        assert_eq!(r["stopped"].as_array().unwrap().len(), 2);
+        assert!(r["notes"][0].as_str().unwrap().contains("no stop message is known"), "{r}");
+    }
+
+    #[tokio::test]
+    async fn arming_needs_the_key_but_stopping_never_does() {
+        let out = Output::new(vec![device("b1", "beyond", 9)], false);
+        let show = Show::start_with(quick(), EventStore::open_in_memory().unwrap(), Some(out)).unwrap();
+        show.set_edit_key(Some("k".into()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = router_with_token(Arc::clone(&show), None);
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        assert_eq!(http(addr, "POST", "/devices/b1/arm?armed=1", "", "").await.0, 403);
+        assert_eq!(http(addr, "POST", "/devices/b1/arm?armed=1", "", "X-Pchi-Edit-Key: k\r\n").await.0, 200);
+        assert_eq!(show.snapshot()["devices"][0]["armed"], true);
+        // disarming and the hard stop are open to anyone with the feed token
+        assert_eq!(http(addr, "POST", "/devices/b1/arm?armed=0", "", "").await.0, 200);
+        assert_eq!(show.snapshot()["devices"][0]["armed"], false);
+        show.set_armed("b1", true).unwrap();
+        let (st, v) = http(addr, "POST", "/laser/stop", "", "").await;
+        assert_eq!((st, v["stopped"].clone()), (200, json!(["b1"])));
+        assert_eq!(show.snapshot()["devices"][0]["armed"], false);
+        assert_eq!(http(addr, "POST", "/devices/zz/arm?armed=1", "", "X-Pchi-Edit-Key: k\r\n").await.0, 404);
     }
 
     #[tokio::test]

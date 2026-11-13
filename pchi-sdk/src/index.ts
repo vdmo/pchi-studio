@@ -47,6 +47,8 @@ export type NodeType =
   | 'ndi' | 'osc' | 'webrtc' | 'rtsp'
   // venue
   | 'ghost-arcade' | 'projector' | 'led-wall' | 'audio-zone' | 'laser' | 'lighting-desk' | 'audio-console'
+  // tool profiles (the exact OSC dialect of a popular tool)
+  | 'resolume' | 'grandma3' | 'eos' | 'x32' | 'beyond'
   // intelligence
   | 'director-agent' | 'vision-agent' | 'audio-agent'
 
@@ -100,6 +102,12 @@ export const NODE_CATALOG: NodeSpec[] = [
   spec('venue', 'laser', 'Laser', { host: '127.0.0.1', port: 8000 }),
   spec('venue', 'lighting-desk', 'Lighting Desk', { host: '127.0.0.1', port: 7700 }),
   spec('venue', 'audio-console', 'Audio Console', { host: '127.0.0.1', port: 10023 }),
+  // Ports are the tools' usual ones or placeholders: set them to match the tool's own OSC settings.
+  spec('venue', 'resolume', 'Resolume Arena', { host: '127.0.0.1', port: 7000 }),
+  spec('venue', 'grandma3', 'grandMA3', { host: '127.0.0.1', port: 8000 }),
+  spec('venue', 'eos', 'ETC Eos', { host: '127.0.0.1', port: 8000 }),
+  spec('venue', 'x32', 'Behringer X32 / M32', { host: '127.0.0.1', port: 10023 }),
+  spec('venue', 'beyond', 'Pangolin BEYOND', { host: '127.0.0.1', port: 12000 }),
   spec('intelligence', 'director-agent', 'Director Agent', {}),
   spec('intelligence', 'vision-agent', 'Vision Agent', {}),
   spec('intelligence', 'audio-agent', 'Audio Agent', {}),

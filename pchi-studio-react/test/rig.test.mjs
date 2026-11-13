@@ -82,3 +82,13 @@ test('requiredFor lists the departments and devices that have cues in a scene', 
   assert.equal(requiredFor(c, undefined, rig).size, 0)
   assert.equal(requiredFor(withCue(show(), 'other'), 'INTRO', rig).size, 0)
 })
+
+test('the tool profiles serve the departments they are for', () => {
+  assert.equal(rigDept(node('r', 'resolume')), 'visual')
+  assert.equal(rigDept(node('m', 'grandma3')), 'lighting')
+  assert.equal(rigDept(node('e', 'eos')), 'lighting')
+  assert.equal(rigDept(node('x', 'x32')), 'audio')
+  assert.equal(rigDept(node('b', 'beyond')), 'laser')
+  assert.equal(specOf('beyond').label, 'Pangolin BEYOND')
+  assert.equal(specOf('resolume').defaults.port, 7000)
+})

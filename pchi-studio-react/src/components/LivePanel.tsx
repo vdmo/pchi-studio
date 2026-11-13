@@ -6,7 +6,7 @@ import CommandBar from './CommandBar'
 import TimelineStrip, { useStripLayout } from './TimelineStrip'
 import { sceneInfo } from './sceneInfo'
 import LiveCallSheet from './LiveCallSheet'
-import RuntimeTools, { testFire } from './RuntimeTools'
+import RuntimeTools, { armLaser, stopLasers, testFire } from './RuntimeTools'
 import { STALE_MS, feedUrl, type Ready } from './liveFeed'
 import { fmt } from './TimelineStrip'
 import {
@@ -51,9 +51,9 @@ interface Props {
 }
 
 /** A rig device as the running show knows it. */
-type RunDevice = { id: string; label: string; dept: string }
+type RunDevice = { id: string; label: string; dept: string; armed?: boolean }
 /** What the runtime did with one cue: sent, dry-run, no-device or failed. */
-type Delivery = { ts: number; kind: string; status: 'sent' | 'dry-run' | 'no-device' | 'failed'; device?: string; label?: string; dept?: string; target?: string; error?: string; lane?: string }
+type Delivery = { ts: number; kind: string; status: 'sent' | 'dry-run' | 'no-device' | 'failed' | 'held'; device?: string; label?: string; dept?: string; target?: string; error?: string; lane?: string }
 
 /**
  * Live view of a show running in pchi-studio-api. The server is the source of
@@ -90,6 +90,7 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
   }, [])
   const [view, setView] = useState<'operate' | 'calls'>('operate')
   const [testing, setTesting] = useState<string | null>(null)
+  const [laserNote, setLaserNote] = useState('')
   const [locked, setLocked] = useState(false) // the runtime wants an operator key for edits
   const [undoDepth, setUndoDepth] = useState(0) // sends that can still be undone
   const [armed, setArmed] = useState(false) // GO pressed once while a department is on hold
@@ -160,6 +161,10 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
             else if (d.status === 'no-device') setGaps((g) => [...g.filter((x) => !(x.dept === d.dept && x.kind === d.kind)), d].slice(-8))
             break
           }
+          case 'arming':
+            setRunDevices((ds) => ds && ds.map((x) => (x.id === msg.device ? { ...x, armed: !!msg.armed } : x)))
+            setLast((l) => (l[String(msg.device)]?.status === 'held' ? Object.fromEntries(Object.entries(l).filter(([k]) => k !== String(msg.device))) : l)) // a stale "held" no longer applies
+            break
           case 'show':
             setDef(msg.definition as Showchart)
             setUndoDepth(Number(msg.undo_depth ?? 0))
@@ -393,14 +398,14 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
             return (
               <button
                 key={key}
-                className={`ready-chip ${st} ${nodev ? 'nodev' : ''} ${dv?.status === 'failed' ? 'failed' : ''} ${needed.has(key) ? 'needed' : ''}`}
+                className={`ready-chip ${st} ${device?.armed ? 'armed' : ''} ${nodev ? 'nodev' : ''} ${dv?.status === 'failed' ? 'failed' : ''} ${needed.has(key) ? 'needed' : ''}`}
                 onClick={() => setReady(key, !r || !r.ready ? true : false)}
                 title={`${device ? `${label} (${d.label})` : d.label}${nodev ? ' (no device in the rig)' : ''}: ${st === 'nolink' ? 'has not reported' : st === 'ready' ? 'standing by' : 'on hold'}${r?.note ? ' – ' + r.note : ''}${r?.source ? ` (via ${r.source})` : ''}${dv ? `. Last cue: ${dv.status}${dv.error ? ' – ' + dv.error : ''}` : ''}. Click to ${r?.ready ? 'hold' : 'mark ready'}.`}
               >
                 <i style={{ background: d.color }} aria-hidden />
                 <span>
                   {label}
-                  {device && <small className="dev">{d.label}{dv ? ` · ${dv.status === 'failed' ? '⚠ failed' : dv.status}` : ''}</small>}
+                  {device && <small className="dev">{d.label}{device.dept === 'laser' ? (device.armed ? ' · ARMED' : ' · disarmed') : ''}{dv ? ` · ${dv.status === 'failed' ? '⚠ failed' : dv.status}` : ''}</small>}
                   {nodev && <small className="dev">⚠ no device</small>}
                   {needed.has(key) && nextScene && <small className="dev need">needed in {nextScene}</small>}
                 </span>
@@ -418,6 +423,39 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
               <li key={l.device}>⚠ {l.label ?? l.device}: {l.error}</li>
             ))}
           </ul>
+        )}
+        {devices.some((x) => x.dept === 'laser') && (
+          <div className="laser-bar" role="group" aria-label="Laser safety">
+            <button
+              className="stop-lasers"
+              onClick={async () => {
+                const r = await stopLasers()
+                setLaserNote(r.ok ? `Lasers stopped and disarmed.${r.notes.length ? ' ' + r.notes.join(' ') : ''}` : r.error ?? 'Stop failed')
+              }}
+              title="Disarm every laser and tell the laser software to black out and disable output"
+            >
+              STOP LASERS
+            </button>
+            {devices.filter((x) => x.dept === 'laser').map((x) => (
+              <button
+                key={x.id}
+                className={`dev-arm ${x.armed ? 'on' : ''}`}
+                onClick={async () => {
+                  if (x.armed) {
+                    const r = await armLaser(x.id, false)
+                    setLaserNote(r.ok ? `${x.label} disarmed.` : r.error ?? 'Failed')
+                    return
+                  }
+                  if (!confirm(`Arm ${x.label}?\n\nCues in the show will be sent to this laser. Arming does NOT switch the laser's output on: that stays in the laser software.\nCheck the area is clear.`)) return
+                  const r = await armLaser(x.id, true)
+                  setLaserNote(r.ok ? `${x.label} armed.` : r.error ?? 'Failed')
+                }}
+              >
+                {x.armed ? `Disarm ${x.label}` : `Arm ${x.label}`}
+              </button>
+            ))}
+            {laserNote && <span className="muted" role="status">{laserNote}</span>}
+          </div>
         )}
         {devices.length > 0 && (
           <div className="dev-tests">

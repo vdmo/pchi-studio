@@ -29,10 +29,10 @@ impl Device {
 /// The department a device type serves (same table as the SDK's `rigDept`).
 pub fn dept_of_type(t: &str) -> Option<&'static str> {
     Some(match t {
-        "vork" | "unreal" | "touchdesigner" | "notch" | "projector" | "led-wall" => "visual",
-        "lighting" | "lighting-desk" => "lighting",
-        "laser" => "laser",
-        "audio-zone" | "audio-console" | "audio-agent" => "audio",
+        "vork" | "unreal" | "touchdesigner" | "notch" | "projector" | "led-wall" | "resolume" => "visual",
+        "lighting" | "lighting-desk" | "grandma3" | "eos" => "lighting",
+        "laser" | "beyond" => "laser",
+        "audio-zone" | "audio-console" | "audio-agent" | "x32" => "audio",
         _ => return None,
     })
 }
@@ -111,6 +111,11 @@ mod tests {
         assert_eq!(dept_of_type("notch"), Some("visual"));
         assert_eq!(dept_of_type("audio-console"), Some("audio"));
         assert_eq!(dept_of_type("lighting-desk"), Some("lighting"));
+        assert_eq!(dept_of_type("resolume"), Some("visual"));
+        assert_eq!(dept_of_type("grandma3"), Some("lighting"));
+        assert_eq!(dept_of_type("eos"), Some("lighting"));
+        assert_eq!(dept_of_type("x32"), Some("audio"));
+        assert_eq!(dept_of_type("beyond"), Some("laser"));
         assert_eq!(dept_of_type("ndi"), None);
         assert_eq!(dept_of_type("cue"), None);
         assert_eq!(dept_of_kind("lighting.look"), "lighting");
