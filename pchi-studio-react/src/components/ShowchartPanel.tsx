@@ -22,6 +22,8 @@ import {
 } from './showchartGraph'
 import CommandBar from './CommandBar'
 import StartScreen from './StartScreen'
+import TimelineStrip, { stripHeight } from './TimelineStrip'
+import { sceneInfo } from './sceneInfo'
 import Card from './Card'
 import ActionList from './ActionList'
 import type { History } from './useHistory'
@@ -46,6 +48,11 @@ interface Props {
   history: History
   /** Logs a simulated event to the event stream. */
   note: (e: PchiEvent) => void
+  /** The scene being looked at, shared with the Timeline tab. */
+  scene: string | null
+  onScene: (id: string | null) => void
+  /** Jump to the Timeline tab to edit the selected scene. */
+  onOpenTimeline: () => void
 }
 
 type Tool = 'select' | 'pan'
@@ -62,13 +69,14 @@ export default function ShowchartPanel(props: Props) {
   )
 }
 
-function Editor({ chart, history, note }: Props) {
+function Editor({ chart, history, note, scene, onScene, onOpenTimeline }: Props) {
   const rf = useReactFlow()
   const { commit } = history
 
   const [current, setCurrent] = useState(chart.initial)
   const [trail, setTrail] = useState<string[]>([chart.initial])
-  const [selected, setSelected] = useState<string | null>(null)
+  const selected = scene
+  const setSelected = onScene
   const [selectedT, setSelectedT] = useState<number | null>(null)
   const [renaming, setRenaming] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
@@ -276,11 +284,15 @@ function Editor({ chart, history, note }: Props) {
     [selectedT, renaming, chart, selected, current],
   )
 
+  // the selected scene's timeline sits under the canvas, so the chart and what happens inside each scene are seen together
+  const selState = chart.states.find((s) => s.id === selected)
+  const stripOn = !!selState && chart.states.length > 0
+  const stripH = stripOn ? stripHeight(selState!.timeline?.lanes.length ?? 0) : 0
   const stateOptions = chart.states.map((s) => <option key={s.id}>{s.id}</option>)
 
   return (
     <EditorCtx.Provider value={editor}>
-      <div className={`cv ${outline ? 'has-left' : ''} ${right ? 'has-right' : ''}`}>
+      <div className={`cv ${outline ? 'has-left' : ''} ${right ? 'has-right' : ''} ${stripOn ? 'has-tl' : ''}`} style={{ ['--tl-h' as string]: `${stripH}px` }}>
         <div className="cv-canvas" onDoubleClick={addStateAt}>
           <ReactFlow
             nodes={nodes}
@@ -311,7 +323,7 @@ function Editor({ chart, history, note }: Props) {
             fitView
             fitViewOptions={{ padding: 0.18 }}
             // remount when the canvas is resized by a docked panel or states are added, so it re-fits
-            key={`${chart.states.length}-${outline}-${right !== null}`}
+            key={`${chart.states.length}-${outline}-${right !== null}-${stripH}`}
           >
             <Background variant={BackgroundVariant.Dots} gap={22} size={1.2} color="#2b2e3a" />
 
@@ -352,6 +364,8 @@ function Editor({ chart, history, note }: Props) {
           </ReactFlow>
           {chart.states.length === 0 && <StartScreen chart={chart} onApply={commit} />}
         </div>
+
+        {stripOn && <TimelineStrip state={selState!.id} tl={selState!.timeline} exit={sceneInfo(chart, selState!.id).exit} onOpen={onOpenTimeline} />}
 
         {outline && (
           <Card title="Outline" className="left" onClose={() => setOutline(false)}>

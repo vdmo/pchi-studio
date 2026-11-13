@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type MouseEvent, type PointerEven
 import Card from './Card'
 import ActionList from './ActionList'
 import CommandBar from './CommandBar'
+import { sceneInfo } from './sceneInfo'
 import type { History } from './useHistory'
 import {
   DEPTS,
@@ -42,6 +43,9 @@ interface Props {
   history: History
   /** Logs a simulated event (playing the timeline here sends nothing to the runtime). */
   note: (e: PchiEvent) => void
+  /** The scene being looked at, shared with the Show tab. */
+  scene: string | null
+  onScene: (id: string | null) => void
 }
 
 interface Drag {
@@ -59,23 +63,20 @@ const cueText = (c: ShowCue) => {
   return `${c.action.kind}${first !== undefined && first !== '' ? ` · ${String(first)}` : ''}`
 }
 
-export default function TimelinePanel({ chart, history, note }: Props) {
+export default function TimelinePanel({ chart, history, note, scene, onScene }: Props) {
   const { commit } = history
-  const [stateId, setStateId] = useState(chart.initial || chart.states[0]?.id || '')
+  const stateId = chart.states.some((s) => s.id === scene) ? scene! : chart.initial || chart.states[0]?.id || ''
+  const setStateId = (id: string) => onScene(id)
   const [pps, setPps] = useState(90) // pixels per second
   const [sel, setSel] = useState<{ lane: string; cue: string } | null>(null)
   const [playing, setPlaying] = useState(false)
   const [t, setT] = useState(0)
   const [drag, setDrag] = useState<Drag | null>(null)
 
-  // keep the chosen state valid when states are renamed, deleted or undone
-  useEffect(() => {
-    if (!chart.states.some((s) => s.id === stateId)) setStateId(chart.initial || chart.states[0]?.id || '')
-  }, [chart, stateId])
-
   const state = chart.states.find((s) => s.id === stateId)
   const tl: ShowTimeline = state?.timeline ?? { lanes: [] }
-  const total = Math.max(timelineEnd(tl) + 2000, 10000)
+  const info = sceneInfo(chart, stateId)
+  const total = Math.max(timelineEnd(tl) + 2000, 10000, info.exit ? info.exit.ms + 1500 : 0)
   const widthPx = (total / 1000) * pps
 
   const setTimeline = (next: ShowTimeline, key?: string) =>
@@ -308,6 +309,21 @@ export default function TimelinePanel({ chart, history, note }: Props) {
           <button onClick={addLane}>+ Lane</button>
         </div>
 
+        <div className="tl-scene" aria-label={`How the show enters and leaves ${stateId}`}>
+          <span className="muted">Scene</span>
+          <b>{stateId}</b>
+          <span className="muted">comes from</span>
+          {info.into.length === 0 ? <i className="muted">{stateId === chart.initial ? 'the start' : 'nowhere yet'}</i> : [...new Set(info.into.map((t) => t.source))].map((id) => (
+            <button key={id} className="chip" onClick={() => (setStateId(id), setSel(null), stop())}>{id}</button>
+          ))}
+          <span className="muted">leaves to</span>
+          {info.out.length === 0 ? <i className="muted">nothing: the show ends here</i> : info.out.map((t, i) => (
+            <button key={i} className="chip" onClick={() => (setStateId(t.target), setSel(null), stop())} title={info.describe(t)}>
+              {t.after_ms !== undefined ? `after ${t.after_ms / 1000} s` : info.describe(t)} → {t.target}
+            </button>
+          ))}
+        </div>
+
         {tl.lanes.length === 0 ? (
           <div className="tl-empty">
             <h3>No timeline for {stateId} yet</h3>
@@ -328,8 +344,14 @@ export default function TimelinePanel({ chart, history, note }: Props) {
                       {s % 60 === 0 ? `${s / 60}:00` : `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`}
                     </span>
                   ))}
+                  {info.exit && (
+                    <span className="tl-exit" style={{ left: (info.exit.ms / 1000) * pps }} title={`The show leaves ${stateId} here`}>
+                      → {info.exit.target}
+                    </span>
+                  )}
                 </div>
               </div>
+              {info.exit && <div className="tl-exitline" style={{ left: HEAD_W + (info.exit.ms / 1000) * pps }} aria-hidden />}
 
               {tl.lanes.map((lane) => {
                 const d = deptOf(lane.dept)

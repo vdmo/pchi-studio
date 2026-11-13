@@ -25,6 +25,8 @@ const TABS: { id: Mode; label: string; hint: string }[] = [
 export default function App() {
   const initial = useMemo(() => newShow(), [])
   const [mode, setMode] = useState<Mode>('show')
+  // the scene (state) being looked at: shared by Show and Timeline so they always show the same one
+  const [scene, setScene] = useState<string | null>(null)
   const [meta, setMeta] = useState({ project: initial.project, name: initial.name })
   const [showchart, setShowchart] = useState(initial.showchart ?? newShowchart())
   const [rig, setRig] = useState<Rig>({ nodes: initial.nodes, edges: initial.edges })
@@ -95,8 +97,8 @@ export default function App() {
         </label>
       </header>
 
-      {mode === 'show' && <ShowchartPanel chart={showchart} history={history} note={note} />}
-      {mode === 'timeline' && <TimelinePanel chart={showchart} history={history} note={note} />}
+      {mode === 'show' && <ShowchartPanel chart={showchart} history={history} note={note} scene={scene} onScene={setScene} onOpenTimeline={() => setMode('timeline')} />}
+      {mode === 'timeline' && <TimelinePanel chart={showchart} history={history} note={note} scene={scene} onScene={setScene} />}
       {mode === 'rig' && <RigPanel rig={rig} onChange={setRig} />}
       {mode === 'live' && <LivePanel onFeed={onFeed} onStatus={setLiveStatus} />}
 

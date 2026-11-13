@@ -3,9 +3,10 @@ import { Background, BackgroundVariant, Panel, ReactFlow } from '@xyflow/react'
 import { ZoomControls, buildEdges, buildNodes, edgeTypes, nodeTypes } from './showchartGraph'
 import Card from './Card'
 import CommandBar from './CommandBar'
+import TimelineStrip, { stripHeight } from './TimelineStrip'
+import { sceneInfo } from './sceneInfo'
 import {
   LIVE_EXAMPLES,
-  deptOf,
   parseLiveCommand,
   step,
   timelineEnd,
@@ -15,14 +16,8 @@ import {
   type LiveAction,
   type PchiEvent,
   type ShowContext,
-  type ShowTimeline,
   type Showchart,
 } from '@pchi/sdk'
-
-const fmt = (ms: number) => {
-  const s = Math.max(0, ms) / 1000
-  return `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, '0')}`
-}
 
 /** Cues already due after `elapsed` ms in `state` (used when joining mid-state). */
 const dueCues = (def: Showchart, state: string, elapsed: number) =>
@@ -32,54 +27,6 @@ const dueCues = (def: Showchart, state: string, elapsed: number) =>
       .filter((c) => c.at_ms <= elapsed)
       .map((c) => c.id),
   )
-
-/** Read-only view of the running state's timeline: lanes, cues, and a playhead. */
-function LiveTimeline({ state, tl, elapsed, fired }: { state: string; tl: ShowTimeline; elapsed: number; fired: Set<string> }) {
-  const total = Math.max(timelineEnd(tl) + 1000, 5000)
-  const pct = (ms: number) => `${Math.min(100, (ms / total) * 100)}%`
-  const p = Math.min(1, Math.max(0, elapsed / total))
-  return (
-    <section className="live-tl" aria-label={`Timeline for ${state}`}>
-      <header>
-        <b>{state}</b>
-        <span className="muted">timeline</span>
-        <span className="spacer" />
-        <span className="time">{fmt(elapsed)}</span>
-        <span className="muted">/ {fmt(total)}</span>
-      </header>
-      <div className="live-tl-body">
-        {tl.lanes.map((l) => {
-          const d = deptOf(l.dept)
-          return (
-            <div className="live-lane" key={l.id}>
-              <span className="lname" style={{ borderLeftColor: d.color }} title={l.name || l.id}>
-                {l.name || l.id}
-              </span>
-              <div className="ltrack">
-                {l.cues.map((c) => {
-                  const done = fired.has(c.id)
-                  const first = c.action.payload ? Object.values(c.action.payload)[0] : undefined
-                  const text = c.label ?? `${c.action.kind}${first !== undefined && first !== '' ? ` · ${String(first)}` : ''}`
-                  return (
-                    <div
-                      key={c.id}
-                      className={`lcue ${done ? 'fired' : elapsed < c.at_ms ? 'upcoming' : 'due'}`}
-                      style={{ left: pct(c.at_ms), width: pct(c.length_ms ?? 0), background: `${d.color}${done ? '55' : '22'}`, borderColor: d.color }}
-                      title={`${text} at ${fmt(c.at_ms)}${done ? ' (fired)' : ''}`}
-                    >
-                      <span>{done ? '✓ ' : ''}{text}</span>
-                    </div>
-                  )
-                })}
-              </div>
-            </div>
-          )
-        })}
-        <div className="live-playhead" style={{ left: `calc(var(--lname-w) + (100% - var(--lname-w)) * ${p})` }} aria-hidden />
-      </div>
-    </section>
-  )
-}
 
 type Status = 'connecting' | 'online' | 'offline'
 
@@ -194,8 +141,9 @@ export default function LivePanel({ onFeed, onStatus }: Props) {
   const tl = def?.states.find((s) => s.id === state)?.timeline
   const lanes = tl?.lanes ?? []
   const elapsed = Math.max(0, now - enteredAt)
-  const tlTotal = Math.max(timelineEnd(tl) + 1000, 5000)
-  const tlHeight = lanes.length > 0 ? Math.min(240, 46 + lanes.length * 32) : 0
+  const exit = def && state ? sceneInfo(def, state).exit : undefined
+  const tlTotal = Math.max(timelineEnd(tl) + 1000, 5000, exit ? exit.ms + 500 : 0)
+  const tlHeight = def && state ? stripHeight(lanes.length) : 0
 
   // tick only while there is something to count down or a timeline is still playing
   const counting = timerRows.some((r) => now - enteredAt <= r.ms + 500) || (lanes.length > 0 && elapsed <= tlTotal + 500)
@@ -225,7 +173,7 @@ export default function LivePanel({ onFeed, onStatus }: Props) {
 
   return (
     <div className={`cv has-right ${tlHeight ? 'has-tl' : ''}`} style={{ ['--tl-h' as string]: `${tlHeight}px` }}>
-      {def && tl && tlHeight > 0 && <LiveTimeline state={state} tl={tl} elapsed={elapsed} fired={fired} />}
+      {def && tlHeight > 0 && <TimelineStrip state={state} tl={tl} elapsed={elapsed} fired={fired} exit={exit} />}
       {def ? (
         <div className="cv-canvas">
         <ReactFlow
