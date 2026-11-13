@@ -2,12 +2,13 @@ use anyhow::Context;
 use clap::Parser;
 use pchi_eventstore::EventStore;
 use pchi_showchart::Showchart;
-use pchi_studio_api::{router, Show};
+use pchi_studio_api::{router_with_token, Show};
 
 /// Run a showchart and serve its live state to PCHI Studio.
 ///
-/// No authentication: it binds to localhost by default. Do not expose it
-/// beyond a trusted network, since any client can send inputs.
+/// It binds to localhost by default. To let other machines at the venue take
+/// part (a lighting desk reporting ready, a button box sending GO), bind to a
+/// network address AND set --token: without one, any client can send inputs.
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
@@ -18,6 +19,9 @@ struct Cli {
     db: Option<String>,
     #[arg(long, default_value = "127.0.0.1:3100")]
     bind: String,
+    /// Require this token (`?token=` or `Authorization: Bearer`) on every request. Strongly recommended with a non-local --bind.
+    #[arg(long, env = "PCHI_TOKEN")]
+    token: Option<String>,
 }
 
 #[tokio::main]
@@ -33,6 +37,9 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&cli.bind).await.with_context(|| format!("binding {}", cli.bind))?;
     println!("pchi-studio-api: {} on http://{} (ws://{}/ws), recording to {}",
         show.snapshot()["chart"]["id"], cli.bind, cli.bind, cli.db.as_deref().unwrap_or("memory"));
-    axum::serve(listener, router(show)).await?;
+    if cli.token.is_none() && !cli.bind.starts_with("127.0.0.1") && !cli.bind.starts_with("localhost") && !cli.bind.starts_with("[::1]") {
+        eprintln!("warning: listening on {} with no --token: anyone on the network can send inputs to the show", cli.bind);
+    }
+    axum::serve(listener, router_with_token(show, cli.token)).await?;
     Ok(())
 }

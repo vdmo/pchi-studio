@@ -5,7 +5,10 @@ import Card from './Card'
 import CommandBar from './CommandBar'
 import TimelineStrip, { stripHeight } from './TimelineStrip'
 import { sceneInfo } from './sceneInfo'
+import { fmt } from './TimelineStrip'
 import {
+  DEPTS,
+  deptOf,
   LIVE_EXAMPLES,
   parseLiveCommand,
   step,
@@ -37,7 +40,20 @@ interface Props {
   onStatus: (s: Status) => void
 }
 
-const feedUrl = () => `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/ws`
+/** The runtime may require a token when it is shared over the network: Studio reads it from this browser's storage. */
+const feedToken = () => {
+  try {
+    return localStorage.getItem('pchi.token') ?? ''
+  } catch {
+    return ''
+  }
+}
+const feedUrl = () => {
+  const t = feedToken()
+  return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/ws${t ? `?token=${encodeURIComponent(t)}` : ''}`
+}
+
+type Ready = { ready: boolean; note?: string; ts: number; source?: string }
 
 /**
  * Live view of a show running in pchi-studio-api. The server is the source of
@@ -60,6 +76,9 @@ export default function LivePanel({ onFeed, onStatus }: Props) {
   const onStatusRef = useRef(onStatus)
   onStatusRef.current = onStatus
   useEffect(() => onStatusRef.current(status), [status])
+  // what each department has said: standing by, on hold, or nothing yet
+  const [readiness, setReadiness] = useState<Record<string, Ready>>({})
+  const [armed, setArmed] = useState(false) // GO pressed once while a department is on hold
   const [trail, setTrail] = useState<{ ts: number; text: string }[]>([])
   const [key, setKey] = useState('energy')
   const [val, setVal] = useState('0.3')
@@ -85,6 +104,7 @@ export default function LivePanel({ onFeed, onStatus }: Props) {
         onFeedRef.current(msg)
         switch (msg.type) {
           case 'hello':
+            setReadiness((msg.readiness as Record<string, Ready>) ?? {})
             setDef(msg.definition as Showchart)
             setState(String(msg.state))
             setCtx((msg.context as ShowContext) ?? {})
@@ -104,6 +124,9 @@ export default function LivePanel({ onFeed, onStatus }: Props) {
             } else {
               setTrail((t) => [...t.slice(-49), { ts: Number(msg.ts), text: `${msg.event} ignored in ${msg.from}  (${msg.source})` }])
             }
+            break
+          case 'readiness':
+            setReadiness((r) => ({ ...r, [String(msg.dept)]: { ready: !!msg.ready, note: String(msg.note ?? ''), ts: Number(msg.ts), source: String(msg.source ?? '') } }))
             break
           case 'context':
             setCtx((c) => ({ ...c, [String(msg.key)]: msg.value }))
@@ -146,7 +169,7 @@ export default function LivePanel({ onFeed, onStatus }: Props) {
   const tlHeight = def && state ? stripHeight(lanes.length) : 0
 
   // tick only while there is something to count down or a timeline is still playing
-  const counting = timerRows.some((r) => now - enteredAt <= r.ms + 500) || (lanes.length > 0 && elapsed <= tlTotal + 500)
+  const counting = lanes.some((l) => l.cues.some((c) => !fired.has(c.id))) || timerRows.some((r) => now - enteredAt <= r.ms + 500) || (lanes.length > 0 && elapsed <= tlTotal + 500)
   useEffect(() => {
     if (!counting) return
     setNow(Date.now())
@@ -159,7 +182,16 @@ export default function LivePanel({ onFeed, onStatus }: Props) {
   const liveApi = useMemo(
     () => ({
       run: (text: string) => parseLiveCommand(text, def, state, ctx),
-      apply: (a: LiveAction) => send(a.kind === 'event' ? { type: 'input', event: a.event } : a.kind === 'reset' ? { type: 'reset' } : { type: 'context', key: a.key, value: a.value }),
+      apply: (a: LiveAction) =>
+        send(
+          a.kind === 'event'
+            ? { type: 'input', event: a.event }
+            : a.kind === 'reset'
+              ? { type: 'reset' }
+              : a.kind === 'ready'
+                ? { type: 'ready', dept: a.dept, ready: a.ready, note: 'said in Studio' }
+                : { type: 'context', key: a.key, value: a.value },
+        ),
       examples: LIVE_EXAMPLES,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -170,6 +202,45 @@ export default function LivePanel({ onFeed, onStatus }: Props) {
   const edges = useMemo(() => (def ? buildEdges(def, state) : []), [def, state])
 
   const available = (def?.transitions ?? []).filter((t) => t.source === state)
+
+  // ---- what happens next, and the GO button that does it ----
+  // GO takes the first way out that would actually fire now; the others stay available as smaller buttons.
+  const goOptions = available.filter((t) => t.event !== undefined && !!def && step(def, ctx, state, t.event)?.target === t.target)
+  const go = goOptions[0]
+  const autoNext = timerRows.filter((r) => r.open).sort((a, b) => a.ms - b.ms)[0]
+  const autoLeft = autoNext ? Math.max(0, autoNext.ms - elapsed) : undefined
+  const nextCue = lanes
+    .flatMap((l) => l.cues.map((c) => ({ ...c, lane: l.name || l.id, dept: l.dept })))
+    .filter((c) => !fired.has(c.id))
+    .sort((a, b) => a.at_ms - b.at_ms)[0]
+  const onHold = Object.entries(readiness).filter(([, v]) => !v.ready).map(([k]) => k)
+
+  const pressGo = () => {
+    if (!go) return
+    if (onHold.length > 0 && !armed) {
+      setArmed(true) // a second press within a few seconds goes anyway
+      window.setTimeout(() => setArmed(false), 4000)
+      return
+    }
+    setArmed(false)
+    send({ type: 'input', event: go.event! })
+  }
+  const goRef = useRef(pressGo)
+  goRef.current = pressGo
+  // Space is GO, unless the cursor is in a box or on a button (where Space already means something)
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement | null
+      if (e.code !== 'Space' || e.repeat || (el && /^(INPUT|TEXTAREA|SELECT|BUTTON)$/.test(el.tagName)) || el?.isContentEditable) return
+      e.preventDefault()
+      goRef.current()
+    }
+    window.addEventListener('keydown', h)
+    return () => window.removeEventListener('keydown', h)
+  }, [])
+
+  const setReady = (dept: string, ready: boolean) => send({ type: 'ready', dept, ready, note: ready ? 'set in Studio' : 'held in Studio' })
+  const boardDepts = [...new Set([...DEPTS.filter((d) => d.id !== 'other').map((d) => d.id as string), ...Object.keys(readiness)])]
 
   return (
     <div className={`cv has-right ${tlHeight ? 'has-tl' : ''}`} style={{ ['--tl-h' as string]: `${tlHeight}px` }}>
@@ -215,6 +286,49 @@ export default function LivePanel({ onFeed, onStatus }: Props) {
 
       <Card title="Show" className="right">
         <p className="bigstate">{state || '—'}</p>
+
+        <div className="nextup" aria-live="off">
+          <span className="muted">Next up</span>
+          {go ? (
+            <b>{go.target}</b>
+          ) : autoNext ? (
+            <b>{autoNext.target}</b>
+          ) : (
+            <b className="muted">nothing: the show ends here</b>
+          )}
+          {autoLeft !== undefined && !go && <span className="nu-time">{autoLeft > 0 ? fmt(autoLeft) : 'now'}</span>}
+          {autoLeft !== undefined && go && <span className="muted">or automatically in {fmt(autoLeft)}</span>}
+          {nextCue && (
+            <span className="muted nu-cue">
+              next cue: {nextCue.label ?? nextCue.action.kind} · {nextCue.lane} · {nextCue.at_ms > elapsed ? `in ${fmt(nextCue.at_ms - elapsed)}` : 'due'}
+            </span>
+          )}
+        </div>
+        <button className={`go ${armed ? 'armed' : onHold.length ? 'warn' : ''}`} disabled={!go} onClick={pressGo} title="Send the next event (Space)">
+          {!go ? (autoNext ? 'WAITING' : 'GO') : armed ? `GO ANYWAY → ${go.target}` : `GO → ${go.target}`}
+          <small>{!go ? (autoNext ? `moves on by itself in ${fmt(autoLeft ?? 0)}` : 'nothing to send') : onHold.length ? `${onHold.join(', ')} on hold${armed ? ': press again to go' : ''}` : 'Space'}</small>
+        </button>
+
+        <h5>Departments</h5>
+        <div className="ready-board">
+          {boardDepts.map((id) => {
+            const d = deptOf(id)
+            const r = readiness[id]
+            const st = !r ? 'nolink' : r.ready ? 'ready' : 'hold'
+            return (
+              <button
+                key={id}
+                className={`ready-chip ${st}`}
+                onClick={() => setReady(id, !r || !r.ready ? true : false)}
+                title={`${d.label}: ${st === 'nolink' ? 'has not reported' : st === 'ready' ? 'standing by' : 'on hold'}${r?.note ? ' – ' + r.note : ''}${r?.source ? ` (via ${r.source})` : ''}. Click to ${r?.ready ? 'hold' : 'mark ready'}.`}
+              >
+                <i style={{ background: d.color }} aria-hidden />
+                <span>{d.label}</span>
+                <b>{st === 'nolink' ? 'no link' : st === 'ready' ? 'READY' : 'HOLD'}</b>
+              </button>
+            )
+          })}
+        </div>
         {timerRows.map((r, i) => {
           const elapsed = Math.max(0, now - enteredAt)
           const left = Math.max(0, r.ms - elapsed)
@@ -232,9 +346,9 @@ export default function LivePanel({ onFeed, onStatus }: Props) {
             </div>
           )
         })}
-        <h5>Send event</h5>
+        {available.filter((t) => t !== go).length > 0 && <h5>Other ways on</h5>}
         {available.length === 0 && <p className="muted">No events leave this state.</p>}
-        {available.map((t, i) => {
+        {available.filter((t) => t !== go).map((t, i) => {
           const trig = transitionTrigger(t)
           const ok = def && trig !== undefined && step(def, ctx, state, trig)?.target === t.target
           return (

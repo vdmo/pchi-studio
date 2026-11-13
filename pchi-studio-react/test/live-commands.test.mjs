@@ -66,3 +66,13 @@ test('start-screen templates all build a valid chart', () => {
     assert.ok(r.chart.states.length >= 5 || cmd.includes('idle'))
   }
 })
+
+test('departments can be reported ready or held by voice or typing', () => {
+  assert.deepEqual(live('lasers ready').action, { kind: 'ready', dept: 'laser', ready: true })
+  assert.deepEqual(live('lighting is not ready').action, { kind: 'ready', dept: 'lighting', ready: false })
+  assert.deepEqual(live('hold audio').action, { kind: 'ready', dept: 'audio', ready: false })
+  assert.deepEqual(live('VJ standing by').action, { kind: 'ready', dept: 'visual', ready: true })
+  // not a department: falls through to the normal parser instead of being hijacked
+  assert.ok(!live('banana ready').ok)
+  assert.equal(live('go to drop').action.kind, 'event')
+})

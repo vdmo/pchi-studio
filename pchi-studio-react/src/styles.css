@@ -306,3 +306,25 @@ button.primary { background: #3b82f6; border-color: #3b82f6; color: #fff; }
 .tl-none { margin: 0; padding: 12px; font-size: 13px; }
 .live-tl > header button { padding: 2px 10px; font-size: 12px; }
 .live-tl > header { padding-right: 118px; } /* room for the folded Events chip */
+
+/* --- Live: next up, GO, and department readiness --- */
+.nextup { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; margin: 6px 0 10px; }
+.nextup b { font-size: 18px; }
+.nu-time { font: 700 22px ui-monospace, monospace; color: #fbbf24; margin-left: auto; }
+.nu-cue { flex-basis: 100%; font-size: 12px; }
+button.go { width: 100%; min-height: 68px; margin: 0 0 12px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; font-size: 24px; font-weight: 800; letter-spacing: .04em; color: #052e16; background: #34d399; border: 2px solid #6ee7b7; border-radius: 14px; box-shadow: 0 6px 22px rgba(52,211,153,.28); }
+button.go small { font-size: 12px; font-weight: 500; letter-spacing: 0; opacity: .8; }
+button.go:hover:not(:disabled) { background: #4ade80; }
+button.go:active:not(:disabled) { transform: translateY(1px); }
+button.go.warn { background: #fbbf24; border-color: #fde68a; color: #451a03; box-shadow: 0 6px 22px rgba(251,191,36,.28); }
+button.go.armed { background: #f87171; border-color: #fecaca; color: #450a0a; animation: pulse .7s ease-in-out infinite alternate; }
+button.go:disabled { background: #1b1d25; color: #7a7f92; border-color: #2f323e; box-shadow: none; }
+@keyframes pulse { to { box-shadow: 0 0 0 6px rgba(248,113,113,.25); } }
+.ready-board { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 8px; }
+.ready-chip { display: flex; align-items: center; gap: 6px; padding: 6px 8px; font-size: 12.5px; text-align: left; border-radius: 8px; }
+.ready-chip i { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.ready-chip span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ready-chip b { font-size: 11px; letter-spacing: .03em; }
+.ready-chip.ready { border-color: #34d39988; } .ready-chip.ready b { color: #34d399; }
+.ready-chip.hold { border-color: #fbbf2499; background: #fbbf2414; } .ready-chip.hold b { color: #fbbf24; }
+.ready-chip.nolink b { color: #7a7f92; font-weight: 500; }

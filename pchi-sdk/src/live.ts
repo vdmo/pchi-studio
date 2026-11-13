@@ -8,12 +8,22 @@ export type LiveAction =
   | { kind: 'event'; event: string }
   | { kind: 'reset' }
   | { kind: 'context'; key: string; value: unknown }
+  | { kind: 'ready'; dept: string; ready: boolean }
 
 export type LiveResult =
   | { ok: true; action: LiveAction; summary: string; notes: string[] }
   | { ok: false; error: string; hint?: string }
 
-export const LIVE_EXAMPLES = ['next', 'go to drop', 'restart the show', 'set energy to 0.8', 'send go']
+export const LIVE_EXAMPLES = ['next', 'go to drop', 'lasers ready', 'hold lighting', 'restart the show', 'set energy to 0.8']
+
+/** What people call the departments out loud. */
+const DEPT_WORDS: Record<string, string> = {
+  visual: 'visual', visuals: 'visual', vj: 'visual', video: 'visual',
+  lighting: 'lighting', lights: 'lighting', light: 'lighting',
+  laser: 'laser', lasers: 'laser',
+  audio: 'audio', sound: 'audio',
+  other: 'other',
+}
 
 const squash = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '')
 
@@ -62,6 +72,15 @@ export function parseLiveCommand(text: string, def: Showchart | null, state: str
   if (!t) return { ok: false, error: 'Type what the show should do.', hint: LIVE_EXAMPLES.join(' · ') }
 
   if (/^(restart|reset)( the)?( show)?$/i.test(t)) return { ok: true, action: { kind: 'reset' }, summary: 'Restart the show from the beginning', notes }
+
+  // "lasers ready", "lighting not ready", "hold audio": the operator reporting for a department that has no app of its own
+  const rdy = /^(\w+)\s+(?:is\s+|are\s+)?(ready|standing by|not ready|on hold)$/i.exec(t)
+  const hold = /^(?:hold|stop)\s+(\w+)$/i.exec(t)
+  const who = rdy ? DEPT_WORDS[rdy[1].toLowerCase()] : hold ? DEPT_WORDS[hold[1].toLowerCase()] : undefined
+  if (who) {
+    const isReady = rdy ? /^(ready|standing by)$/i.test(rdy[2]) : false
+    return { ok: true, action: { kind: 'ready', dept: who, ready: isReady }, summary: isReady ? `Mark ${who} ready` : `Put ${who} on hold`, notes }
+  }
 
   const set = /^(?:set|make)\s+([a-z_][\w.-]*)\s+(?:to|=|is)\s+(.+)$/i.exec(t)
   if (set) {
