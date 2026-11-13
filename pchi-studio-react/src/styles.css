@@ -511,3 +511,11 @@ button.go:disabled { background: #1b1d25; color: #7a7f92; border-color: #2f323e;
 .start-brief summary { cursor: pointer; color: #9aa0b4; font-size: 13px; }
 .start-brief textarea { width: 100%; box-sizing: border-box; margin: 8px 0; font: 13px ui-monospace, monospace; }
 .start-notes { margin: 6px 0; padding-left: 18px; font-size: 12px; color: #fbbf24; }
+
+/* --- required departments for the next scene --- */
+.ready-chip .dev.need { color: #fbbf24; opacity: 1; }
+.ready-chip.needed { box-shadow: inset 3px 0 0 #fbbf24; }
+
+.rt-key { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
+.rt-key p { flex: 1 1 100%; margin: 0; }
+.rt-key .primary { background: #3b82f6; border-color: #3b82f6; color: #fff; }

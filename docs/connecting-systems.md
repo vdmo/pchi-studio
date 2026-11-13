@@ -69,6 +69,18 @@ pchi-studio-api my-show.pchi --send     # really sends
   transitions, cues moved/added/removed, devices) and any effect on the scene running now (for example a
   cue moved to a time already past will not fire late). It is refused if the running scene was removed.
   The scene, its clock and the context are kept. `POST /show` (`?dry=1` to preview) does the same.
+- **Who must be ready.** GO warns only about the departments (or devices) the NEXT scene has cues for.
+  A department on hold that the next scene does not use is shown but does not warn
+  ("Audio on hold but not needed in INTRO"). Chips the next scene needs are marked.
+- **Operator key.** Start the runtime with `--edit-key <secret>` (or `PCHI_EDIT_KEY`) and sending a show,
+  undoing a send and test-fire need the key (`X-Pchi-Edit-Key` header or `?edit_key=`). Department pages and
+  viewers can still read the show and report READY. Studio asks for the key once per browser tab (kept in
+  that tab's session only). This is one shared key for the operator, not per-person roles. It is sent in
+  clear text unless you put the runtime behind HTTPS, so treat it like the token.
+- **Undo a send.** The runtime remembers the last 10 versions it replaced. "Undo last send" (or `POST /show/undo`,
+  `?dry=1` to preview) puts the running show back, scene and clock kept. Your Studio file is not touched.
+- **Heads-up before sending.** If an edited cue still to fire in the running scene goes to a device that is
+  on hold, or has not reported READY, the preview says so. It never blocks the send.
 - **Run report.** Live > "Run report" (or `GET /report`): each cue's planned and actual time, failed sends,
   cues with no device, and edits made mid-show.
 - **Test fire.** Live > "Test <device>" (or `POST /devices/<id>/test`) sends one harmless `/pchi/test`

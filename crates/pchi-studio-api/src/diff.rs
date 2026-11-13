@@ -14,6 +14,9 @@ pub struct Diff {
     pub blockers: Vec<String>,
     /// Effects on the scene that is running right now.
     pub notes: Vec<String>,
+    /// Cues the edit added, moved or re-pointed (scene, lane, cue id): used to check their devices are ready. Not sent to clients.
+    #[serde(skip)]
+    pub touched: Vec<(String, String, String)>,
 }
 
 type CueKey = (String, String, String); // scene, lane, cue
@@ -71,12 +74,16 @@ pub fn diff(old: &Showchart, new: &Showchart, old_dev: &[Device], new_dev: &[Dev
         let where_ = format!("{} / {}", k.0, lane);
         match oc.get(k) {
             None => {
+                d.touched.push(k.clone());
                 d.changes.push(format!("+ {where_}: {} at {}", name(q), secs(q.at_ms)));
                 if k.0 == current && q.at_ms <= elapsed_ms {
                     d.notes.push(format!("{} is at {}, already past: it will not fire this time", name(q), secs(q.at_ms)));
                 }
             }
             Some((o, _)) => {
+                if o.at_ms != q.at_ms || o.action != q.action {
+                    d.touched.push(k.clone());
+                }
                 if o.at_ms != q.at_ms {
                     d.changes.push(format!("~ {where_}: {} moved {} → {}", name(q), secs(o.at_ms), secs(q.at_ms)));
                     if k.0 == current && q.at_ms <= elapsed_ms && o.at_ms > elapsed_ms {

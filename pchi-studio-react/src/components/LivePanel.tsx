@@ -23,6 +23,7 @@ import {
   type PchiEvent,
   type ShowContext,
   type Showchart,
+  requiredFor,
   rigDept,
   type PchiNode,
 } from '@pchi/sdk'
@@ -89,6 +90,8 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
   }, [])
   const [view, setView] = useState<'operate' | 'calls'>('operate')
   const [testing, setTesting] = useState<string | null>(null)
+  const [locked, setLocked] = useState(false) // the runtime wants an operator key for edits
+  const [undoDepth, setUndoDepth] = useState(0) // sends that can still be undone
   const [armed, setArmed] = useState(false) // GO pressed once while a department is on hold
   const [trail, setTrail] = useState<{ ts: number; text: string }[]>([])
   const [key, setKey] = useState('energy')
@@ -126,6 +129,8 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
             setOutput(msg.output === 'live' || msg.output === 'dry-run' ? msg.output : null)
             setLast({})
             setGaps([])
+            setLocked(!!msg.edit_locked)
+            setUndoDepth(Number(msg.undo_depth ?? 0))
             setDef(msg.definition as Showchart)
             setState(String(msg.state))
             setCtx((msg.context as ShowContext) ?? {})
@@ -157,6 +162,7 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
           }
           case 'show':
             setDef(msg.definition as Showchart)
+            setUndoDepth(Number(msg.undo_depth ?? 0))
             setRunDevices(Array.isArray(msg.devices) ? (msg.devices as RunDevice[]) : null)
             break
           case 'context':
@@ -256,7 +262,11 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
     if (own.length === 0) return [{ key: dept, dept, label: deptOf(dept).label, device: undefined as RunDevice | undefined, r: live(readiness[dept]) }]
     return own.map((x) => ({ key: x.id, dept, label: x.label, device: x as RunDevice | undefined, r: live(readiness[x.id]) ?? live(readiness[dept]) }))
   })
-  const onHold = board.filter((b) => b.r && !b.r.ready).map((b) => b.label)
+  // Only the departments the NEXT scene has cues for can hold up the GO; the others are shown but do not warn.
+  const nextScene = (go ?? autoNext)?.target
+  const needed = def ? requiredFor(def, nextScene, devices.map((d) => ({ id: d.id, label: d.label, dept: d.dept, type: 'cue' as const, position: { x: 0, y: 0 }, params: {} }))) : new Set<string>()
+  const onHold = board.filter((b) => b.r && !b.r.ready && needed.has(b.key)).map((b) => b.label)
+  const heldElsewhere = board.filter((b) => b.r && !b.r.ready && !needed.has(b.key)).map((b) => b.label)
 
   const pressGo = () => {
     if (!go) return
@@ -322,7 +332,7 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
       ) : (
         <p className="muted pad">
           <span className={`pill ${status}`} role="status">feed: {status}</span>{' '}
-          {status === 'online' ? 'Waiting for the show…' : 'Not connected. Start the runtime:  pchi-studio-api <show.pchi.json>  (port 3100)'}
+          {status === 'online' ? 'Waiting for the show…' : 'Not connected. Save your show from Studio (Save), then start the runtime on that file:  pchi-studio-api my-show.pchi  (port 3100; add --send to really send cues to the rig). This page reconnects by itself.'}
         </p>
       )}
 
@@ -352,7 +362,7 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
         </div>
         <button className={`go ${armed ? 'armed' : onHold.length ? 'warn' : ''}`} disabled={!go} onClick={pressGo} title="Send the next event (Space)">
           {!go ? (autoNext ? 'WAITING' : 'GO') : armed ? `GO ANYWAY → ${go.target}` : `GO → ${go.target}`}
-          <small>{!go ? (autoNext ? `moves on by itself in ${fmt(autoLeft ?? 0)}` : 'nothing to send') : onHold.length ? `${onHold.join(', ')} on hold${armed ? ': press again to go' : ''}` : 'Space'}</small>
+          <small>{!go ? (autoNext ? `moves on by itself in ${fmt(autoLeft ?? 0)}` : 'nothing to send') : onHold.length ? `${onHold.join(', ')} on hold, needed in ${nextScene}${armed ? ': press again to go' : ''}` : heldElsewhere.length ? `Space · ${heldElsewhere.join(', ')} on hold but not needed in ${nextScene}` : 'Space'}</small>
         </button>
 
         {view === 'calls' && def && (
@@ -383,7 +393,7 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
             return (
               <button
                 key={key}
-                className={`ready-chip ${st} ${nodev ? 'nodev' : ''} ${dv?.status === 'failed' ? 'failed' : ''}`}
+                className={`ready-chip ${st} ${nodev ? 'nodev' : ''} ${dv?.status === 'failed' ? 'failed' : ''} ${needed.has(key) ? 'needed' : ''}`}
                 onClick={() => setReady(key, !r || !r.ready ? true : false)}
                 title={`${device ? `${label} (${d.label})` : d.label}${nodev ? ' (no device in the rig)' : ''}: ${st === 'nolink' ? 'has not reported' : st === 'ready' ? 'standing by' : 'on hold'}${r?.note ? ' – ' + r.note : ''}${r?.source ? ` (via ${r.source})` : ''}${dv ? `. Last cue: ${dv.status}${dv.error ? ' – ' + dv.error : ''}` : ''}. Click to ${r?.ready ? 'hold' : 'mark ready'}.`}
               >
@@ -392,6 +402,7 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
                   {label}
                   {device && <small className="dev">{d.label}{dv ? ` · ${dv.status === 'failed' ? '⚠ failed' : dv.status}` : ''}</small>}
                   {nodev && <small className="dev">⚠ no device</small>}
+                  {needed.has(key) && nextScene && <small className="dev need">needed in {nextScene}</small>}
                 </span>
                 <b>{st === 'nolink' ? 'no link' : st === 'ready' ? 'READY' : 'HOLD'}</b>
               </button>
@@ -429,7 +440,7 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
             ))}
           </div>
         )}
-        {getFile && <RuntimeTools getFile={getFile} />}
+        {getFile && <RuntimeTools getFile={getFile} locked={locked} undoDepth={undoDepth} />}
         {timerRows.map((r, i) => {
           const elapsed = Math.max(0, now - enteredAt)
           const left = Math.max(0, r.ms - elapsed)

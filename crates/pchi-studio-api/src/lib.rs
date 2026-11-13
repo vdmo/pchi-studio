@@ -17,7 +17,7 @@
 //!   {"type":"ready","dept":"lighting","ready":true,"note":"cue 12 loaded","source":"dept-page"}
 //!       (a client that repeats the same report every few seconds is a heartbeat: it is not logged)
 //!
-//! HTTP: `POST /show` (send an edited show; `?dry=1` previews the changes), `GET /report` (planned vs actual cue times, delivery problems),
+//! HTTP: `POST /show` (send an edited show; `?dry=1` previews the changes), `POST /show/undo` (back to before the last send; with `--edit-key` both need `X-Pchi-Edit-Key`), `GET /report` (planned vs actual cue times, delivery problems),
 //! `POST /devices/<id>/test` (one harmless test message to a device), `GET /state` (the hello snapshot), `GET /events` (the event log),
 //! `GET /ready`, `POST /ready/<dept>` {"ready":true,"note":"..."} and
 //! `POST /input` {"event":"GO"}: plain HTTP so any desk, script or button box can take part.
@@ -76,7 +76,16 @@ pub struct Show {
     readiness: Mutex<BTreeMap<String, Value>>,
     /// Where cues are sent. None when the show was loaded without a rig (nothing is routed).
     output: Mutex<Option<Arc<Output>>>,
+    /// When set, sending a show, undoing a send and test-firing need this key (the operator's).
+    edit_key: Mutex<Option<String>>,
+    /// Shows replaced by a send, newest last, so a send can be undone. Each keeps the rig that went with it.
+    history: Mutex<Vec<(Showchart, Option<Vec<rig::Device>>)>>,
 }
+
+/// How long a department page may stay silent before it counts as not linked (mirrors the Studio).
+const STALE_MS: i64 = 30_000;
+/// How many sends can be undone.
+const UNDO_DEPTH: usize = 10;
 
 impl Show {
     /// Validates the chart, begins a recorded run and arms the initial state's timers.
@@ -96,9 +105,24 @@ impl Show {
             tx: broadcast::channel(1024).0,
             readiness: Mutex::new(BTreeMap::new()),
             output: Mutex::new(output.map(Arc::new)),
+            edit_key: Mutex::new(None),
+            history: Mutex::new(Vec::new()),
         });
         show.arm(0);
         Ok(show)
+    }
+
+    /// Require `key` for sending shows, undoing sends and test-firing. `None` (or empty) leaves them open.
+    pub fn set_edit_key(&self, key: Option<String>) {
+        *self.edit_key.lock().unwrap() = key.filter(|k| !k.is_empty());
+    }
+
+    /// Whether `provided` may edit: always when no key is set.
+    pub fn edit_ok(&self, provided: Option<&str>) -> bool {
+        match &*self.edit_key.lock().unwrap() {
+            None => true,
+            Some(k) => provided == Some(k.as_str()),
+        }
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Value> {
@@ -122,6 +146,8 @@ impl Show {
             "output": out.as_ref().map(|o| if o.sending() { "live" } else { "dry-run" }),
             // the server's clock now, so a client can tell how old each readiness report is without trusting its own clock
             "server_ts": now_ms(),
+            "edit_locked": self.edit_key.lock().unwrap().is_some(),
+            "undo_depth": self.history.lock().unwrap().len(),
             // elapsed, not a timestamp: the client counts from its own clock
             "elapsed_ms": (now_ms() - g.entered_at).max(0),
         })
@@ -289,6 +315,23 @@ impl Show {
     /// kept; timers and cues are re-armed for the new definition from where the scene is now.
     /// Refused (Err) if the new show is invalid or no longer has the running scene.
     pub fn replace(self: &Arc<Self>, chart: Showchart, devices: Option<Vec<rig::Device>>, apply: bool) -> Result<Value, (u16, Value)> {
+        self.replace_with(chart, devices, apply, false)
+    }
+
+    /// Put the show back as it was before the last send. `apply` false previews what would change.
+    pub fn undo(self: &Arc<Self>, apply: bool) -> Result<Value, (u16, Value)> {
+        let (chart, devices) = self.history.lock().unwrap().last().cloned().ok_or((409u16, json!({"error": "nothing to undo"})))?;
+        let r = self.replace_with(chart, devices, apply, true)?;
+        if apply {
+            self.history.lock().unwrap().pop();
+            let mut r = r;
+            r["undo_depth"] = json!(self.history.lock().unwrap().len());
+            return Ok(r);
+        }
+        Ok(r)
+    }
+
+    fn replace_with(self: &Arc<Self>, chart: Showchart, devices: Option<Vec<rig::Device>>, apply: bool, is_undo: bool) -> Result<Value, (u16, Value)> {
         let candidate = ShowEngine::new(chart.clone()).map_err(|errs| (422u16, json!({"error": errs.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; ")})))?;
         drop(candidate);
         let old_dev: Vec<rig::Device> = self.output.lock().unwrap().as_ref().map(|o| o.devices().to_vec()).unwrap_or_default();
@@ -296,18 +339,54 @@ impl Show {
         let (d, generation, elapsed) = {
             let mut g = self.inner.lock().unwrap();
             let elapsed = (now_ms() - g.entered_at).max(0) as u64;
-            let d = diff::diff(&g.engine.chart, &chart, &old_dev, &new_dev, &g.engine.current_state, elapsed);
+            let mut d = diff::diff(&g.engine.chart, &chart, &old_dev, &new_dev, &g.engine.current_state, elapsed);
+            // edited cues still to fire in the running scene: is the device they go to ready?
+            {
+                let ready = self.readiness.lock().unwrap();
+                let now = now_ms();
+                let state = g.engine.current_state.clone();
+                for (scene, lane_id, cue_id) in &d.touched {
+                    if *scene != state {
+                        continue;
+                    }
+                    let Some(lane) = chart.state(scene).and_then(|s| s.timeline.as_ref()).and_then(|t| t.lanes.iter().find(|l| l.id == *lane_id)) else { continue };
+                    let Some(cue) = lane.cues.iter().find(|c| c.id == *cue_id) else { continue };
+                    if cue.at_ms <= elapsed {
+                        continue;
+                    }
+                    let dept = lane.dept.clone().unwrap_or_else(|| rig::dept_of_kind(&cue.action.kind).to_string());
+                    if dept == "other" || new_dev.is_empty() {
+                        continue;
+                    }
+                    let Ok(dev) = rig::resolve(&new_dev, &dept, lane.device.as_deref()) else { continue };
+                    let word = ready.get(&dev.id).or_else(|| ready.get(&dev.dept));
+                    let fresh = word.filter(|w| !(w["source"] == "dept-page" && now - w["ts"].as_i64().unwrap_or(0) > STALE_MS));
+                    let what = cue.label.clone().unwrap_or_else(|| cue.action.kind.clone());
+                    match fresh {
+                        Some(w) if w["ready"] == json!(false) => d.notes.push(format!("{} is on hold: the edited cue \"{what}\" at {:.1}s will still be sent to it", dev.label, cue.at_ms as f64 / 1000.0)),
+                        None => d.notes.push(format!("{} has not reported READY: the edited cue \"{what}\" at {:.1}s goes to it anyway", dev.label, cue.at_ms as f64 / 1000.0)),
+                        _ => {}
+                    }
+                }
+            }
             if !d.blockers.is_empty() {
                 return Err((409, json!({"error": d.blockers.join("; "), "diff": d})));
             }
             if !apply {
                 return Ok(json!({"applied": false, "diff": d}));
             }
+            if !is_undo {
+                let mut h = self.history.lock().unwrap();
+                h.push((g.engine.chart.clone(), self.output.lock().unwrap().as_ref().map(|o| o.devices().to_vec())));
+                if h.len() > UNDO_DEPTH {
+                    h.remove(0);
+                }
+            }
             g.engine.chart = chart;
             g.generation += 1;
             let show_id = g.engine.chart.id.clone().unwrap_or_else(|| "show".into());
             let ts = now_ms();
-            let _ = g.store.append(ts, "studio", Some(&show_id), "show.edit", &json!({"changes": d.changes, "notes": d.notes}));
+            let _ = g.store.append(ts, "studio", Some(&show_id), "show.edit", &json!({"changes": d.changes, "notes": d.notes, "undo": is_undo}));
             (d, g.generation, elapsed)
         };
         if devices.is_some() {
@@ -315,9 +394,9 @@ impl Show {
             *self.output.lock().unwrap() = Some(Arc::new(Output::new(new_dev, sending)));
         }
         let hello = self.snapshot();
-        self.publish(json!({"type": "show", "ts": now_ms(), "definition": hello["definition"], "devices": hello["devices"], "output": hello["output"], "diff": d}));
+        self.publish(json!({"type": "show", "ts": now_ms(), "definition": hello["definition"], "devices": hello["devices"], "output": hello["output"], "undo_depth": hello["undo_depth"], "diff": d}));
         self.arm_from(generation, elapsed);
-        Ok(json!({"applied": true, "diff": d}))
+        Ok(json!({"applied": true, "diff": d, "undo_depth": self.history.lock().unwrap().len()}))
     }
 
     /// Send one harmless message (`/pchi/test`) to a device, so the operator can check the link before doors.
@@ -464,6 +543,7 @@ pub fn router_with_token(show: Arc<Show>, token: Option<String>) -> Router {
             (StatusCode::OK, Json(a.show.run_report()))
         }))
         .route("/show", post(post_show))
+        .route("/show/undo", post(post_undo))
         .route("/devices/:id/test", post(post_test))
         .route("/ready/:dept", post(post_ready))
         .route("/input", post(post_input))
@@ -483,6 +563,9 @@ async fn post_show(State(a): State<App>, q: Query<HashMap<String, String>>, h: H
     if !authorized(&a.token, &q, &h) {
         return (StatusCode::UNAUTHORIZED, Json(json!({"error": "token required"})));
     }
+    if !a.show.edit_ok(edit_key_of(&q, &h)) {
+        return locked();
+    }
     let (chart, devices) = match rig::load(&body) {
         Ok(x) => x,
         Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))),
@@ -494,10 +577,37 @@ async fn post_show(State(a): State<App>, q: Query<HashMap<String, String>>, h: H
     }
 }
 
+/// The operator's key, from `X-Pchi-Edit-Key` or `?edit_key=`.
+fn edit_key_of<'a>(q: &'a HashMap<String, String>, h: &'a HeaderMap) -> Option<&'a str> {
+    h.get("x-pchi-edit-key").and_then(|v| v.to_str().ok()).or_else(|| q.get("edit_key").map(String::as_str))
+}
+
+fn locked() -> (StatusCode, Json<Value>) {
+    (StatusCode::FORBIDDEN, Json(json!({"error": "the operator key is required for this", "locked": true})))
+}
+
+/// `POST /show/undo` (`?dry=1` to preview): put the show back as it was before the last send.
+async fn post_undo(State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap) -> impl IntoResponse {
+    if !authorized(&a.token, &q, &h) {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "token required"})));
+    }
+    if !a.show.edit_ok(edit_key_of(&q, &h)) {
+        return locked();
+    }
+    let dry = q.get("dry").is_some_and(|v| v == "1" || v == "true");
+    match a.show.undo(!dry) {
+        Ok(v) => (StatusCode::OK, Json(v)),
+        Err((code, v)) => (StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST), Json(v)),
+    }
+}
+
 /// `POST /devices/<id>/test`: one `/pchi/test` message to that device.
 async fn post_test(State(a): State<App>, Path(id): Path<String>, q: Query<HashMap<String, String>>, h: HeaderMap) -> impl IntoResponse {
     if !authorized(&a.token, &q, &h) {
         return (StatusCode::UNAUTHORIZED, Json(json!({"error": "token required"})));
+    }
+    if !a.show.edit_ok(edit_key_of(&q, &h)) {
+        return locked();
     }
     match a.show.test_fire(&id).await {
         Ok(v) => (StatusCode::OK, Json(v)),
@@ -1029,6 +1139,85 @@ mod tests {
         let logged = show.events().iter().filter(|e| e["type"] == "show.ready").count();
         assert_eq!(logged, 2, "the heartbeat is not recorded");
         assert!(show.snapshot()["server_ts"].as_i64().unwrap() > 0);
+    }
+
+    #[tokio::test]
+    async fn the_operator_key_guards_sending_undoing_and_testing() {
+        let (show, addr) = serve(None).await;
+        let body = serde_json::to_string(&quick()).unwrap();
+        // no key set: open, as before
+        assert_eq!(http(addr, "POST", "/show?dry=1", &body, "").await.0, 200);
+        show.set_edit_key(Some("s3cret".into()));
+        assert_eq!(show.snapshot()["edit_locked"], true);
+        assert!(!show.edit_ok(None) && !show.edit_ok(Some("nope")) && show.edit_ok(Some("s3cret")));
+        let (st, v) = http(addr, "POST", "/show", &body, "").await;
+        assert_eq!((st, v["locked"].as_bool()), (403, Some(true)));
+        assert_eq!(http(addr, "POST", "/show/undo", "", "X-Pchi-Edit-Key: wrong\r\n").await.0, 403);
+        assert_eq!(http(addr, "POST", "/devices/x/test", "", "").await.0, 403);
+        // with the key in the header or the query it goes through
+        assert_eq!(http(addr, "POST", "/show?dry=1", &body, "X-Pchi-Edit-Key: s3cret\r\n").await.0, 200);
+        assert_eq!(http(addr, "POST", "/show?dry=1&edit_key=s3cret", &body, "").await.0, 200);
+        // departments and viewers can still read and report READY
+        assert_eq!(http(addr, "GET", "/state", "", "").await.0, 200);
+        assert_eq!(http(addr, "POST", "/ready/lighting", r#"{"ready":true}"#, "").await.0, 200);
+    }
+
+    #[tokio::test]
+    async fn a_send_can_be_undone_and_undo_has_a_limit() {
+        let show = Show::start(quick(), EventStore::open_in_memory().unwrap()).unwrap();
+        show.apply("studio", "START");
+        assert_eq!(show.snapshot()["undo_depth"], 0);
+        assert_eq!(show.undo(true).unwrap_err().0, 409, "nothing to undo yet");
+
+        let mut edited = quick();
+        move_cue(&mut edited, "INTRO", "lighting", 3_000);
+        show.replace(edited.clone(), None, true).unwrap();
+        assert_eq!(show.snapshot()["undo_depth"], 1);
+        assert_eq!(show.snapshot()["definition"], serde_json::to_value(&edited).unwrap());
+
+        // a preview of the undo changes nothing; applying it restores the earlier show and keeps the scene
+        let dry = show.undo(false).unwrap();
+        assert_eq!(dry["applied"], false);
+        assert!(dry["diff"]["changes"][0].as_str().unwrap().contains("moved 3.0s → 0.4s"), "{dry}");
+        assert_eq!(show.snapshot()["undo_depth"], 1);
+        let done = show.undo(true).unwrap();
+        assert_eq!(done["undo_depth"], 0);
+        assert_eq!(show.snapshot()["definition"], serde_json::to_value(quick()).unwrap());
+        assert_eq!(show.snapshot()["state"], "INTRO");
+
+        // only the last UNDO_DEPTH sends are kept
+        for i in 0..(UNDO_DEPTH + 3) {
+            let mut c = quick();
+            move_cue(&mut c, "INTRO", "lighting", 3_000 + i as u64 * 10);
+            show.replace(c, None, true).unwrap();
+        }
+        assert_eq!(show.snapshot()["undo_depth"], UNDO_DEPTH);
+    }
+
+    #[tokio::test]
+    async fn an_edited_cue_for_a_device_that_is_not_ready_is_flagged_before_sending() {
+        let out = Output::new(vec![device("d1", "lighting-desk", 9002), device("l1", "laser", 9003)], false);
+        let show = Show::start_with(quick(), EventStore::open_in_memory().unwrap(), Some(out)).unwrap();
+        show.apply("studio", "START");
+        show.set_ready("lighting", false, "fixing a fixture", "http").unwrap(); // on hold
+        // the laser never reported at all
+
+        let mut edited = quick();
+        move_cue(&mut edited, "INTRO", "lighting", 5_000); // later than "now": still to fire
+        move_cue(&mut edited, "INTRO", "laser", 6_000);
+        let r = show.replace(edited, None, false).unwrap();
+        let notes: Vec<&str> = r["diff"]["notes"].as_array().unwrap().iter().map(|n| n.as_str().unwrap()).collect();
+        assert!(notes.iter().any(|n| n.contains("d1 is on hold")), "{notes:?}");
+        assert!(notes.iter().any(|n| n.contains("l1 has not reported READY")), "{notes:?}");
+
+        // once they are ready, the same edit carries no such warning
+        show.set_ready("lighting", true, "", "http").unwrap();
+        show.set_ready("l1", true, "", "http").unwrap();
+        let mut again = quick();
+        move_cue(&mut again, "INTRO", "lighting", 5_000);
+        move_cue(&mut again, "INTRO", "laser", 6_000);
+        let r = show.replace(again, None, false).unwrap();
+        assert!(r["diff"]["notes"].as_array().unwrap().is_empty(), "{r}");
     }
 
     #[tokio::test]

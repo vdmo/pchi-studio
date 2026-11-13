@@ -24,6 +24,9 @@ struct Cli {
     /// Require this token (`?token=` or `Authorization: Bearer`) on every request. Strongly recommended with a non-local --bind.
     #[arg(long, env = "PCHI_TOKEN")]
     token: Option<String>,
+    /// Require this key (`X-Pchi-Edit-Key`, or `?edit_key=`) to send an edited show, undo a send, or test-fire a device. Keeps department pages and viewers from changing the show.
+    #[arg(long, env = "PCHI_EDIT_KEY")]
+    edit_key: Option<String>,
     /// Really send cues to the rig's devices (UDP/OSC to each device's host and port). Without it, deliveries are only reported as "dry-run".
     #[arg(long)]
     send: bool,
@@ -44,9 +47,13 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("warning: --send has no effect: {} has no rig (open it in Studio, add devices and Save as .pchi)", cli.file);
     }
     let show = Show::start_with(chart, store, devices.map(|d| Output::new(d, cli.send))).map_err(anyhow::Error::msg)?;
+    show.set_edit_key(cli.edit_key.clone());
     let listener = tokio::net::TcpListener::bind(&cli.bind).await.with_context(|| format!("binding {}", cli.bind))?;
     println!("pchi-studio-api: {} on http://{} (ws://{}/ws), recording to {}",
         show.snapshot()["chart"]["id"], cli.bind, cli.bind, cli.db.as_deref().unwrap_or("memory"));
+    if cli.edit_key.as_deref().is_some_and(|k| !k.is_empty()) {
+        println!("edits: locked, sending a show, undo and test-fire need the operator key");
+    }
     match routed {
         Some(n) if cli.send => println!("output: LIVE, sending cues to {n} rig device(s)"),
         Some(n) => println!("output: dry-run, {n} rig device(s) known; add --send to really send cues"),

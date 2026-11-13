@@ -107,3 +107,25 @@ const setOne = <T extends { device?: string }>(l: T): T => {
   void _d
   return rest as T
 }
+
+/**
+ * Who must be ready for `scene`: the departments and devices that have cues in it.
+ * Returns board keys: a device id where the rig has devices for the lane (all
+ * candidates when the lane has not chosen one), otherwise the department id.
+ * An empty set means nobody is needed, so no "on hold" should hold up the GO.
+ */
+export function requiredFor(chart: Showchart, scene: string | undefined, nodes: PchiNode[]): Set<string> {
+  const need = new Set<string>()
+  const lanes = chart.states.find((s) => s.id === scene)?.timeline?.lanes ?? []
+  for (const l of lanes) {
+    if (l.cues.length === 0 || !l.dept || l.dept === 'other') continue
+    if (l.device) {
+      need.add(l.device)
+      continue
+    }
+    const c = devicesFor(nodes, l.dept)
+    if (c.length === 0) need.add(l.dept)
+    else c.forEach((n) => need.add(n.id))
+  }
+  return need
+}

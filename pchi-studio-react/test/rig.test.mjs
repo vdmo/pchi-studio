@@ -65,3 +65,20 @@ test('setLaneDevice does not mutate and can clear', () => {
   assert.equal(d.states.find((s) => s.id === 'INTRO').timeline.lanes[0].device, 'x')
   assert.equal(setLaneDevice(d, 'INTRO', 'laser', undefined).states.find((s) => s.id === 'INTRO').timeline.lanes[0].device, undefined)
 })
+
+test('requiredFor lists the departments and devices that have cues in a scene', () => {
+  const { requiredFor } = sdk
+  let c = withCue(withCue(show(), 'laser'), 'lighting')
+  // no rig: the departments themselves
+  assert.deepEqual([...requiredFor(c, 'INTRO', [])].sort(), ['laser', 'lighting'])
+  // a rig: the devices, every candidate when the lane has not chosen
+  const rig = [node('l1', 'laser'), node('d1', 'lighting-desk'), node('d2', 'lighting-desk'), node('a1', 'audio-console')]
+  assert.deepEqual([...requiredFor(c, 'INTRO', rig)].sort(), ['d1', 'd2', 'l1'])
+  c = setLaneDevice(c, 'INTRO', 'lighting', 'd2')
+  assert.deepEqual([...requiredFor(c, 'INTRO', rig)].sort(), ['d2', 'l1'])
+  // a scene with no cues, an unknown scene, an empty lane or an "other" lane needs nobody
+  assert.equal(requiredFor(c, 'PRESHOW', rig).size, 0)
+  assert.equal(requiredFor(c, 'NOPE', rig).size, 0)
+  assert.equal(requiredFor(c, undefined, rig).size, 0)
+  assert.equal(requiredFor(withCue(show(), 'other'), 'INTRO', rig).size, 0)
+})
