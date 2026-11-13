@@ -3,7 +3,7 @@ import { Background, BackgroundVariant, Panel, ReactFlow } from '@xyflow/react'
 import { ZoomControls, buildEdges, buildNodes, edgeTypes, nodeTypes } from './showchartGraph'
 import Card from './Card'
 import CommandBar from './CommandBar'
-import TimelineStrip, { stripHeight } from './TimelineStrip'
+import TimelineStrip, { useStripLayout } from './TimelineStrip'
 import { sceneInfo } from './sceneInfo'
 import { fmt } from './TimelineStrip'
 import {
@@ -166,7 +166,8 @@ export default function LivePanel({ onFeed, onStatus }: Props) {
   const elapsed = Math.max(0, now - enteredAt)
   const exit = def && state ? sceneInfo(def, state).exit : undefined
   const tlTotal = Math.max(timelineEnd(tl) + 1000, 5000, exit ? exit.ms + 500 : 0)
-  const tlHeight = def && state ? stripHeight(lanes.length) : 0
+  const strip = useStripLayout(lanes.length)
+  const tlHeight = def && state ? strip.h : 0
 
   // tick only while there is something to count down or a timeline is still playing
   const counting = lanes.some((l) => l.cues.some((c) => !fired.has(c.id))) || timerRows.some((r) => now - enteredAt <= r.ms + 500) || (lanes.length > 0 && elapsed <= tlTotal + 500)
@@ -244,7 +245,7 @@ export default function LivePanel({ onFeed, onStatus }: Props) {
 
   return (
     <div className={`cv has-right ${tlHeight ? 'has-tl' : ''}`} style={{ ['--tl-h' as string]: `${tlHeight}px` }}>
-      {def && tlHeight > 0 && <TimelineStrip state={state} tl={tl} elapsed={elapsed} fired={fired} exit={exit} />}
+      {def && tlHeight > 0 && <TimelineStrip state={state} tl={tl} elapsed={elapsed} fired={fired} exit={exit} layout={strip} />}
       {def ? (
         <div className="cv-canvas">
         <ReactFlow

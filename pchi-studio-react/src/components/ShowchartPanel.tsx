@@ -22,7 +22,7 @@ import {
 } from './showchartGraph'
 import CommandBar from './CommandBar'
 import StartScreen from './StartScreen'
-import TimelineStrip, { stripHeight } from './TimelineStrip'
+import TimelineStrip, { useStripLayout } from './TimelineStrip'
 import { sceneInfo } from './sceneInfo'
 import Card from './Card'
 import ActionList from './ActionList'
@@ -287,7 +287,8 @@ function Editor({ chart, history, note, scene, onScene, onOpenTimeline }: Props)
   // the selected scene's timeline sits under the canvas, so the chart and what happens inside each scene are seen together
   const selState = chart.states.find((s) => s.id === selected)
   const stripOn = !!selState && chart.states.length > 0
-  const stripH = stripOn ? stripHeight(selState!.timeline?.lanes.length ?? 0) : 0
+  const strip = useStripLayout(selState?.timeline?.lanes.length ?? 0)
+  const stripH = stripOn ? strip.h : 0
   const stateOptions = chart.states.map((s) => <option key={s.id}>{s.id}</option>)
 
   return (
@@ -323,7 +324,7 @@ function Editor({ chart, history, note, scene, onScene, onOpenTimeline }: Props)
             fitView
             fitViewOptions={{ padding: 0.18 }}
             // remount when the canvas is resized by a docked panel or states are added, so it re-fits
-            key={`${chart.states.length}-${outline}-${right !== null}-${stripH}`}
+            key={`${chart.states.length}-${outline}-${right !== null}-${stripOn ? strip.settled : 0}`}
           >
             <Background variant={BackgroundVariant.Dots} gap={22} size={1.2} color="#2b2e3a" />
 
@@ -365,7 +366,7 @@ function Editor({ chart, history, note, scene, onScene, onOpenTimeline }: Props)
           {chart.states.length === 0 && <StartScreen chart={chart} onApply={commit} />}
         </div>
 
-        {stripOn && <TimelineStrip state={selState!.id} tl={selState!.timeline} exit={sceneInfo(chart, selState!.id).exit} onOpen={onOpenTimeline} />}
+        {stripOn && <TimelineStrip state={selState!.id} tl={selState!.timeline} exit={sceneInfo(chart, selState!.id).exit} onOpen={onOpenTimeline} layout={strip} />}
 
         {outline && (
           <Card title="Outline" className="left" onClose={() => setOutline(false)}>

@@ -6,6 +6,7 @@ import RigPanel, { type Rig } from './components/RigPanel'
 import LivePanel from './components/LivePanel'
 import EventConsole, { type LogEntry } from './components/EventConsole'
 import { useHistory } from './components/useHistory'
+import Logo from './components/Logo'
 
 type Mode = 'show' | 'timeline' | 'rig' | 'live'
 type Status = 'connecting' | 'online' | 'offline'
@@ -75,7 +76,7 @@ export default function App() {
   return (
     <div className="app">
       <header className="topbar">
-        <strong className="brand">PCHI Studio</strong>
+        <Logo />
         <nav className="tabs" role="tablist" aria-label="Views">
           {TABS.map((t) => (
             <button key={t.id} role="tab" aria-selected={mode === t.id} className={mode === t.id ? 'on' : ''} onClick={() => setMode(t.id)} title={t.hint}>

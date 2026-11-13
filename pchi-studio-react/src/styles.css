@@ -328,3 +328,22 @@ button.go:disabled { background: #1b1d25; color: #7a7f92; border-color: #2f323e;
 .ready-chip.ready { border-color: #34d39988; } .ready-chip.ready b { color: #34d399; }
 .ready-chip.hold { border-color: #fbbf2499; background: #fbbf2414; } .ready-chip.hold b { color: #fbbf24; }
 .ready-chip.nolink b { color: #7a7f92; font-weight: 500; }
+
+/* --- the timeline strip can be dragged taller and folded away --- */
+.live-tl { overflow: visible; }
+.live-tl.folded > header { border-bottom: 0; }
+.tl-grip { position: absolute; left: 0; right: 0; top: -5px; height: 10px; cursor: ns-resize; z-index: 7; touch-action: none; }
+.tl-grip::after { content: ''; position: absolute; left: 50%; top: 3px; width: 44px; height: 4px; margin-left: -22px; border-radius: 2px; background: #3a3d4a; transition: background .15s; }
+.tl-grip:hover::after { background: #3b82f6; }
+.live-tl > header .fold { padding: 0 8px; min-width: 28px; font-size: 13px; }
+.live-tl-body { display: flex; flex-direction: column; }
+.live-lane { flex: 1 0 32px; max-height: 76px; height: auto; }
+.live-tl-body { overflow-x: hidden; } /* the playhead at 100% must not add a horizontal scrollbar */
+
+/* --- logo --- */
+.logo { display: inline-flex; align-items: center; gap: 8px; color: #f3e6da; line-height: 1; white-space: nowrap; user-select: none; }
+.logo-peach { width: 24px; height: 25px; flex: none; }
+.logo-word { font-size: 22px; font-weight: 700; letter-spacing: -1px; }
+.logo-dot { color: #ed9972; }
+.logo-sub { font-size: 11px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: #9a9eac; padding: 3px 0 0 2px; }
+@media (max-width: 760px) { .logo-sub { display: none; } }

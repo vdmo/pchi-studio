@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40">
+  <!-- The PCHI peach, as drawn on pchi.life, on a dark tile so it reads in any browser theme -->
+  <rect width="40" height="40" rx="9" fill="#1b1d25"/>
+  <g transform="translate(4 4) scale(.8)">
+    <path d="M21 11C15 5 5 11 5 21c0 9 9 15 15 15s15-7 15-16c0-10-9-14-14-9Z" fill="#ed9972" stroke="#f3e6da" stroke-width="1.6"/>
+    <path d="M20 11c4 5 4 15 0 22M21 10c0-4 3-7 5-8" fill="none" stroke="#f3e6da" stroke-width="1.6" stroke-linecap="round"/>
+    <path d="M20 10C13 11 8 6 9 3c6-1 10 2 11 7Z" fill="#869365" stroke="#f3e6da" stroke-width="1.4"/>
+  </g>
+</svg>
