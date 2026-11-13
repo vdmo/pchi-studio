@@ -2,18 +2,20 @@ import { useCallback, useMemo, useRef, useState } from 'react'
 import { newShow, newShowchart, type PchiEvent, type PchiShowFile } from '@pchi/sdk'
 import ShowchartPanel from './components/ShowchartPanel'
 import TimelinePanel from './components/TimelinePanel'
+import CueSheet from './components/CueSheet'
 import RigPanel, { type Rig } from './components/RigPanel'
 import LivePanel from './components/LivePanel'
 import EventConsole, { type LogEntry } from './components/EventConsole'
 import { useHistory } from './components/useHistory'
 import Logo from './components/Logo'
 
-type Mode = 'show' | 'timeline' | 'rig' | 'live'
+type Mode = 'show' | 'timeline' | 'cues' | 'rig' | 'live'
 type Status = 'connecting' | 'online' | 'offline'
 
 const TABS: { id: Mode; label: string; hint: string }[] = [
   { id: 'show', label: 'Show', hint: 'States and the transitions between them' },
   { id: 'timeline', label: 'Timeline', hint: 'Multi-lane cues inside each state' },
+  { id: 'cues', label: 'Cue sheet', hint: 'Every cue in calling order, for stage managers' },
   { id: 'rig', label: 'Rig', hint: 'The systems that take part in the show' },
   { id: 'live', label: 'Live', hint: 'Operate a running show' },
 ]
@@ -100,6 +102,7 @@ export default function App() {
 
       {mode === 'show' && <ShowchartPanel chart={showchart} history={history} note={note} scene={scene} onScene={setScene} onOpenTimeline={() => setMode('timeline')} />}
       {mode === 'timeline' && <TimelinePanel chart={showchart} history={history} note={note} scene={scene} onScene={setScene} />}
+      {mode === 'cues' && <CueSheet chart={showchart} history={history} scene={scene} onScene={setScene} onOpenTimeline={() => setMode('timeline')} />}
       {mode === 'rig' && <RigPanel rig={rig} onChange={setRig} />}
       {mode === 'live' && <LivePanel onFeed={onFeed} onStatus={setLiveStatus} />}
 

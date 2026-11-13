@@ -347,3 +347,48 @@ button.go:disabled { background: #1b1d25; color: #7a7f92; border-color: #2f323e;
 .logo-dot { color: #ed9972; }
 .logo-sub { font-size: 11px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: #9a9eac; padding: 3px 0 0 2px; }
 @media (max-width: 760px) { .logo-sub { display: none; } }
+
+/* --- cue sheet --- */
+.cs { display: flex; flex-direction: column; }
+.cs-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; padding: 8px 12px; border-bottom: 1px solid #262a33; background: #15171d; }
+.cs-title { display: flex; align-items: baseline; gap: 10px; }
+.cs-title b { font-size: 15px; }
+.cs-filters { display: flex; gap: 4px; }
+.cs-filters button { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; font-size: 12.5px; border-radius: 999px; }
+.cs-filters button i { width: 8px; height: 8px; border-radius: 50%; }
+.cs-filters button.on { background: #3b82f6; border-color: #3b82f6; color: #fff; }
+.cs-search { width: 150px; padding: 4px 8px; font-size: 13px; }
+.cs-scroll { flex: 1; min-height: 0; overflow: auto; padding: 0 0 40px; }
+.cs-table { width: 100%; min-width: 760px; border-collapse: collapse; font-size: 13px; }
+.cs-table th { position: sticky; top: 0; z-index: 2; text-align: left; padding: 6px 8px; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: #9a9eac; background: #181a21; border-bottom: 1px solid #262a33; }
+.cs-table td { padding: 3px 8px; border-bottom: 1px solid #1d2028; vertical-align: middle; }
+.cs-scene td { padding: 9px 12px 7px; background: #1b1d25; border-top: 1px solid #2a2e39; cursor: pointer; font-size: 13.5px; }
+.cs-scene b { font-size: 14px; letter-spacing: .02em; }
+.cs-on .cs-scene td { background: #23283a; box-shadow: inset 3px 0 #3b82f6; }
+.cs-leaves { margin-left: 14px; font-size: 12px; color: #9a9eac; }
+.cs-edit { float: right; padding: 2px 10px; font-size: 12px; }
+.cs-row td:first-child { border-left: 4px solid var(--dept); }
+.cs-row.enter td, .cs-row.exit td { color: #9a9eac; }
+.c-q { width: 54px; font: 600 12px ui-monospace, monospace; color: #fbbf24; }
+.c-t { width: 156px; } .c-t label { display: flex; align-items: center; gap: 6px; } .c-t input { width: 66px; } .c-t small { color: #9a9eac; font: 11px ui-monospace, monospace; }
+.c-d { width: 100px; } .cs-dept { display: inline-flex; align-items: center; gap: 6px; } .cs-dept i { width: 8px; height: 8px; border-radius: 50%; }
+.c-l { width: 110px; color: #b6bac7; } .c-a { width: 110px; } .c-x { width: 34px; text-align: center; }
+.c-v input, .c-n input { width: 100%; box-sizing: border-box; background: transparent; border-color: transparent; }
+.c-v input:hover, .c-n input:hover, .c-t input:hover { border-color: #3a3d4a; }
+.c-v { min-width: 150px; } .c-n { min-width: 160px; }
+.cs-none td { padding: 8px 14px; font-size: 12.5px; }
+
+/* printing: a plain black-on-white sheet, without the app around it */
+@media print {
+  html, body, #root { overflow: visible !important; height: auto !important; background: #fff !important; }
+  .app { display: block !important; height: auto !important; }
+  .topbar, .slimfoot, .cs-bar, .cs-edit, .c-x, .cs-search { display: none !important; }
+  .cv, .cv-canvas, .cs, .cs-scroll { position: static !important; overflow: visible !important; background: #fff !important; }
+  .cs-table { min-width: 0; color: #000; font-size: 11pt; }
+  .cs-table th { position: static; background: #eee; color: #000; }
+  .cs-table td, .cs-scene td { background: #fff !important; color: #000 !important; border-color: #bbb; box-shadow: none !important; }
+  .cs-scene td { background: #eee !important; }
+  .c-q { color: #000; }
+  .c-v input, .c-n input, .c-t input { border: 0; color: #000; background: transparent; }
+  .cs-scene { break-after: avoid; } .cs-row { break-inside: avoid; }
+}

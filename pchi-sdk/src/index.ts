@@ -566,6 +566,7 @@ export function guardError(expr: string): string | null {
 
 export * from './commands'
 export * from './live'
+export * from './cuesheet'
 
 // ───────────────────────── Timelines (mirrors crates/pchi-showchart/src/timeline.rs) ─────────────────────────
 
