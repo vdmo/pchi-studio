@@ -26,6 +26,9 @@ pub struct Lane {
     /// Department the lane belongs to ("visual", "lighting", "laser", "audio", ...). Informational.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dept: Option<String>,
+    /// Id of the rig device (Studio's Rig tab) that handles this lane. Informational.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
     #[serde(default)]
     pub cues: Vec<Cue>,
 }
@@ -89,8 +92,8 @@ mod tests {
         let t = Timeline {
             duration_ms: None,
             lanes: vec![
-                Lane { id: "lights".into(), name: "Lights".into(), dept: Some("lighting".into()), cues: vec![cue("l1", 2000, "lighting.look"), cue("l0", 0, "lighting.look")] },
-                Lane { id: "laser".into(), name: "Laser".into(), dept: None, cues: vec![cue("z1", 2000, "laser.cue")] },
+                Lane { id: "lights".into(), name: "Lights".into(), dept: Some("lighting".into()), device: None, cues: vec![cue("l1", 2000, "lighting.look"), cue("l0", 0, "lighting.look")] },
+                Lane { id: "laser".into(), name: "Laser".into(), dept: None, device: None, cues: vec![cue("z1", 2000, "laser.cue")] },
             ],
         };
         let scheduled = t.scheduled();

@@ -11,6 +11,9 @@ import {
   captureCue,
   quantizeCues,
   deptOf,
+  devicesFor,
+  setLaneDevice,
+  type PchiNode,
   scheduledCues,
   standardLanes,
   timelineEnd,
@@ -50,6 +53,8 @@ interface Props {
   /** The scene being looked at, shared with the Show tab. */
   scene: string | null
   onScene: (id: string | null) => void
+  /** Devices in the rig, for choosing which one handles a lane. */
+  nodes: PchiNode[]
 }
 
 interface Drag {
@@ -67,7 +72,7 @@ const cueText = (c: ShowCue) => {
   return `${c.action.kind}${first !== undefined && first !== '' ? ` · ${String(first)}` : ''}`
 }
 
-export default function TimelinePanel({ chart, history, note, scene, onScene }: Props) {
+export default function TimelinePanel({ chart, history, note, scene, onScene, nodes }: Props) {
   const { commit } = history
   const stateId = chart.states.some((s) => s.id === scene) ? scene! : chart.initial || chart.states[0]?.id || ''
   const setStateId = (id: string) => onScene(id)
@@ -479,6 +484,26 @@ export default function TimelinePanel({ chart, history, note, scene, onScene }: 
                           <option key={x.id} value={x.id}>{x.label}</option>
                         ))}
                       </select>
+                      {(() => {
+                        const cands = devicesFor(nodes, lane.dept)
+                        const gone = lane.device && !nodes.some((n) => n.id === lane.device)
+                        const auto = cands.length === 1 ? cands[0].label : cands.length === 0 ? '⚠ none' : 'pick…'
+                        return (
+                          <select
+                            className={`tl-dev ${gone || (!lane.device && cands.length !== 1 && lane.cues.length > 0 && lane.dept && lane.dept !== 'other') ? 'warn' : ''}`}
+                            value={lane.device ?? ''}
+                            aria-label="Rig device"
+                            title={cands.length === 0 ? `No ${lane.dept ?? ''} device in the Rig tab` : 'The rig device that handles this lane'}
+                            onChange={(e) => commit(setLaneDevice(chart, stateId, lane.id, e.target.value || undefined))}
+                          >
+                            <option value="">{auto}</option>
+                            {gone && <option value={lane.device}>⚠ removed</option>}
+                            {cands.map((n) => (
+                              <option key={n.id} value={n.id}>{n.label}</option>
+                            ))}
+                          </select>
+                        )
+                      })()}
                       <button
                         className="x"
                         aria-label={`Delete lane ${lane.name ?? ''}`}

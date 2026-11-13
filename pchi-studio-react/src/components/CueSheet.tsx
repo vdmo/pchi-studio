@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { DEPTS, buildCueSheet, cueSheetCsv, cueTime, deptOf, duplicateCueNumbers, removeCue, updateCue, type Showchart } from '@pchi/sdk'
+import { DEPTS, buildCueSheet, cueSheetCsv, cueTime, deptOf, duplicateCueNumbers, laneDevice, removeCue, updateCue, type PchiNode, type Showchart } from '@pchi/sdk'
 import type { History } from './useHistory'
 
 interface Props {
@@ -8,6 +8,7 @@ interface Props {
   scene: string | null
   onScene: (id: string | null) => void
   onOpenTimeline: () => void
+  nodes: PchiNode[]
 }
 
 const KIND_NAME: Record<string, string> = {
@@ -25,7 +26,7 @@ const KIND_NAME: Record<string, string> = {
  * the way a stage manager reads it. It is another view of the same showchart:
  * edits here change the chart (and join the same undo history).
  */
-export default function CueSheet({ chart, history, scene, onScene, onOpenTimeline }: Props) {
+export default function CueSheet({ chart, history, scene, onScene, onOpenTimeline, nodes }: Props) {
   const { commit } = history
   const [dept, setDept] = useState<string | null>(null)
   const [q, setQ] = useState('')
@@ -93,6 +94,7 @@ export default function CueSheet({ chart, history, scene, onScene, onOpenTimelin
                 <th className="c-t">Time</th>
                 <th className="c-d">Dept</th>
                 <th className="c-l">Lane</th>
+                <th className="c-dev">Device</th>
                 <th className="c-a">Action</th>
                 <th className="c-v">Value</th>
                 <th className="c-n">Note</th>
@@ -105,7 +107,7 @@ export default function CueSheet({ chart, history, scene, onScene, onOpenTimelin
               return (
                 <tbody key={b.id} className={scene === b.id ? 'cs-on' : ''}>
                   <tr className="cs-scene" onClick={() => onScene(b.id)}>
-                    <td colSpan={8}>
+                    <td colSpan={9}>
                       <b>{b.id}</b>
                       {b.label && <span className="muted"> · {b.label}</span>}
                       <span className="cs-leaves">{b.leaves.length ? `leaves: ${b.leaves.join(' · ')}` : 'the show ends here'}</span>
@@ -123,7 +125,7 @@ export default function CueSheet({ chart, history, scene, onScene, onOpenTimelin
                   </tr>
                   {rows.length === 0 && (
                     <tr className="cs-none">
-                      <td colSpan={8} className="muted">Nothing happens in this scene yet.</td>
+                      <td colSpan={9} className="muted">Nothing happens in this scene yet.</td>
                     </tr>
                   )}
                   {rows.map((r, i) => {
@@ -170,6 +172,17 @@ export default function CueSheet({ chart, history, scene, onScene, onOpenTimelin
                           <span className="cs-dept"><i style={{ background: d.color }} aria-hidden />{d.label}</span>
                         </td>
                         <td className="c-l">{r.laneName}</td>
+                        <td className="c-dev">
+                          {r.source !== 'cue' ? (
+                            <span className="muted">–</span>
+                          ) : (
+                            (() => {
+                              const dev = laneDevice(nodes, { dept: r.dept, device: r.device })
+                              if (dev) return dev.label
+                              return <span className="warn" title={r.device ? 'The device was removed from the rig' : 'No single device handles this lane. Set one in the Timeline.'}>⚠ {r.device ? 'removed' : 'none'}</span>
+                            })()
+                          )}
+                        </td>
                         <td className="c-a" title={r.kind}>{KIND_NAME[r.kind] ?? r.kind}</td>
                         <td className="c-v">
                           {editable ? (

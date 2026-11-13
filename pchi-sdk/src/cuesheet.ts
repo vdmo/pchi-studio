@@ -15,6 +15,8 @@ export interface CueRow {
   length_ms?: number
   laneId?: string
   laneName: string
+  /** The rig device chosen on the lane, if any (see rig.ts laneDevice for the fallback). */
+  device?: string
   dept: string
   cueId?: string
   label: string
@@ -69,6 +71,7 @@ export function buildCueSheet(chart: Showchart): SceneBlock[] {
       const r = act('cue', c.action, c.at_ms)
       r.laneId = l.id
       r.laneName = l.name || l.id
+      if (l.device) r.device = l.device
       r.dept = l.dept ?? deptFor(c.action.kind)
       r.cueId = c.id
       r.num = c.num ?? null

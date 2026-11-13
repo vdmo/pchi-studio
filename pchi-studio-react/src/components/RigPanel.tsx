@@ -20,7 +20,11 @@ import {
   BEHAVIOUR_COLOR,
   CATEGORY_COLOR,
   NODE_CATALOG,
+  RIG_DEPTS,
   colorOf,
+  deptOf,
+  rigDept,
+  type RigIssue,
   specOf,
   type EdgeBehaviour,
   type NodeCategory,
@@ -69,7 +73,16 @@ function RigNode({ data, selected }: NodeProps<Node<RigNodeData>>) {
 }
 const nodeTypes = { rig: RigNode }
 
-export default function RigPanel(props: { rig: Rig; onChange: (r: Rig) => void }) {
+type RigProps = {
+  rig: Rig
+  onChange: (r: Rig) => void
+  /** Called when a device is deleted, so lanes that used it can let go of it. */
+  onRemoved?: (id: string) => void
+  /** What does not add up between the show and the rig (see rigCheck). */
+  issues?: RigIssue[]
+}
+
+export default function RigPanel(props: RigProps) {
   return (
     <ReactFlowProvider>
       <RigEditor {...props} />
@@ -77,7 +90,7 @@ export default function RigPanel(props: { rig: Rig; onChange: (r: Rig) => void }
   )
 }
 
-function RigEditor({ rig, onChange }: { rig: Rig; onChange: (r: Rig) => void }) {
+function RigEditor({ rig, onChange, onRemoved, issues = [] }: RigProps) {
   const [selected, setSelected] = useState<string | null>(null)
   const [selectedEdge, setSelectedEdge] = useState<number | null>(null)
   const [library, setLibrary] = useState(false)
@@ -137,6 +150,7 @@ function RigEditor({ rig, onChange }: { rig: Rig; onChange: (r: Rig) => void }) 
   }
   const patchNode = (id: string, patch: Partial<PchiNode>) => onChange({ ...rig, nodes: rig.nodes.map((n) => (n.id === id ? { ...n, ...patch } : n)) })
   const removeNode = (id: string) => {
+    onRemoved?.(id)
     onChange({ nodes: rig.nodes.filter((n) => n.id !== id), edges: rig.edges.filter((e) => e.source !== id && e.target !== id) })
     setSelected(null)
   }
@@ -235,6 +249,18 @@ function RigEditor({ rig, onChange }: { rig: Rig; onChange: (r: Rig) => void }) 
               </Panel>
             )}
           </ReactFlow>
+          {rig.nodes.length > 0 && (
+            <details className={`rig-check ${issues.length === 0 ? 'ok' : ''}`} open={issues.length > 0 && issues.length <= 4}>
+              <summary>{issues.length === 0 ? '✓ Show and rig agree' : `${issues.length} thing${issues.length > 1 ? 's' : ''} to check`}</summary>
+              {issues.length > 0 && (
+                <ul>
+                  {issues.map((i, k) => (
+                    <li key={k}>{i.message}</li>
+                  ))}
+                </ul>
+              )}
+            </details>
+          )}
         </div>
 
         {library && (
@@ -260,6 +286,16 @@ function RigEditor({ rig, onChange }: { rig: Rig; onChange: (r: Rig) => void }) 
               Name
               <input value={node.label} onChange={(e) => patchNode(node.id, { label: e.target.value })} />
             </label>
+            <label>
+              Serves department
+              <select value={node.dept ?? ''} onChange={(e) => patchNode(node.id, { dept: e.target.value || undefined })}>
+                <option value="">{rigDept({ type: node.type }) ? `${deptOf(rigDept({ type: node.type })).label} (from type)` : 'none'}</option>
+                {RIG_DEPTS.map((d) => (
+                  <option key={d} value={d}>{deptOf(d).label}</option>
+                ))}
+              </select>
+            </label>
+            <p className="muted">Cues in a lane of this department are sent here. With more than one device per department, pick one per lane on the Timeline.</p>
             <h5>Settings</h5>
             {Object.entries(node.params).map(([k, v]) => (
               <label key={k}>

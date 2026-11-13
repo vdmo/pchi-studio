@@ -429,3 +429,20 @@ button.go:disabled { background: #1b1d25; color: #7a7f92; border-color: #2f323e;
 .rh-note { margin-left: auto; font-size: 12.5px; color: #f3b6c0; }
 .tl-row.flash .tl-track { box-shadow: inset 0 0 0 2px #ef4444aa; transition: box-shadow .4s; }
 .countin { position: absolute; z-index: 30; left: 50%; top: 42%; transform: translate(-50%, -50%); font: 800 120px ui-monospace, monospace; color: #fff; text-shadow: 0 6px 40px rgba(239,68,68,.7); pointer-events: none; }
+
+/* --- rig link: device on a lane, cue-sheet column, rig check --- */
+.tl-head { grid-template-columns: 1fr 1fr auto; }
+.tl-head > input { grid-column: 1 / 3; }
+.tl-head .x { grid-row: 1 / 3; grid-column: 3; }
+.tl-head .tl-dev { font-size: 11px; }
+.tl-dev.warn { border-color: #fbbf24; color: #fbbf24; }
+.c-dev { white-space: nowrap; font-size: 12px; }
+.c-dev .warn { color: #fbbf24; }
+.rig-check { position: absolute; z-index: 5; right: 12px; top: 12px; max-width: 320px; padding: 8px 12px; background: #1b1d25; border: 1px solid #fbbf2488; border-radius: 10px; font-size: 12px; }
+.rig-check summary { cursor: pointer; color: #fbbf24; font-weight: 600; }
+.rig-check ul { margin: 6px 0 0; padding-left: 16px; }
+.rig-check li { margin: 2px 0; }
+.rig-check.ok { border-color: #10b98166; }
+.rig-check.ok summary { color: #10b981; }
+.ready-chip .dev { display: block; font-size: 10px; opacity: .75; font-weight: 400; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ready-chip.nodev { border-style: dashed; }

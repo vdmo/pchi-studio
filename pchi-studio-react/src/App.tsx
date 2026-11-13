@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ensureCueNumbers, newShow, newShowchart, type PchiEvent, type PchiShowFile, type Showchart } from '@pchi/sdk'
+import { clearDevice, ensureCueNumbers, rigCheck, newShow, newShowchart, type PchiEvent, type PchiShowFile, type Showchart } from '@pchi/sdk'
 import ShowchartPanel from './components/ShowchartPanel'
 import TimelinePanel from './components/TimelinePanel'
 import CueSheet from './components/CueSheet'
@@ -63,6 +63,7 @@ export default function App() {
   // every change passes through here, so a cue always has its number the moment it exists
   const setChart = useCallback((c: Showchart) => setShowchart(ensureCueNumbers(c)), [])
   const history = useHistory(showchart, setChart)
+  const rigIssues = useMemo(() => rigCheck(showchart, rig.nodes), [showchart, rig.nodes])
   const [help, setHelp] = useState(false)
   const [pending, setPending] = useState<Autosave | null>(readAutosave) // unsaved work from an earlier visit
 
@@ -199,10 +200,13 @@ export default function App() {
       {help && <ShortcutsDialog onClose={() => setHelp(false)} />}
 
       {mode === 'show' && <ShowchartPanel chart={showchart} history={history} note={note} scene={scene} onScene={setScene} onOpenTimeline={() => setMode('timeline')} />}
-      {mode === 'timeline' && <TimelinePanel chart={showchart} history={history} note={note} scene={scene} onScene={setScene} />}
-      {mode === 'cues' && <CueSheet chart={showchart} history={history} scene={scene} onScene={setScene} onOpenTimeline={() => setMode('timeline')} />}
-      {mode === 'rig' && <RigPanel rig={rig} onChange={setRig} />}
-      {mode === 'live' && <LivePanel onFeed={onFeed} onStatus={setLiveStatus} />}
+      {mode === 'timeline' && <TimelinePanel chart={showchart} history={history} note={note} scene={scene} onScene={setScene} nodes={rig.nodes} />}
+      {mode === 'cues' && <CueSheet chart={showchart} history={history} scene={scene} onScene={setScene} onOpenTimeline={() => setMode('timeline')} nodes={rig.nodes} />}
+      {mode === 'rig' && <RigPanel rig={rig} onChange={setRig} issues={rigIssues} onRemoved={(id) => {
+        const c = clearDevice(showchart, id)
+        if (c !== showchart) history.commit(c)
+      }} />}
+      {mode === 'live' && <LivePanel onFeed={onFeed} onStatus={setLiveStatus} rig={rig.nodes} />}
 
       <footer className="slimfoot">
         <EventConsole log={log} onClear={() => setLog([])} collapsible />

@@ -20,6 +20,8 @@ import {
   type PchiEvent,
   type ShowContext,
   type Showchart,
+  devicesFor,
+  type PchiNode,
 } from '@pchi/sdk'
 
 /** Cues already due after `elapsed` ms in `state` (used when joining mid-state). */
@@ -38,6 +40,8 @@ interface Props {
   onFeed: (e: PchiEvent) => void
   /** Reports the feed's connection status, so the header can show the right one. */
   onStatus: (s: Status) => void
+  /** Devices in Studio's rig, to show which one stands behind each department. */
+  rig?: PchiNode[]
 }
 
 /** The runtime may require a token when it is shared over the network: Studio reads it from this browser's storage. */
@@ -61,7 +65,7 @@ type Ready = { ready: boolean; note?: string; ts: number; source?: string }
  * engine itself, apart from asking "which events could fire from here" to
  * enable the right buttons.
  */
-export default function LivePanel({ onFeed, onStatus }: Props) {
+export default function LivePanel({ onFeed, onStatus, rig = [] }: Props) {
   const [status, setStatus] = useState<Status>('connecting')
   const [def, setDef] = useState<Showchart | null>(null)
   const [state, setState] = useState('')
@@ -316,15 +320,21 @@ export default function LivePanel({ onFeed, onStatus }: Props) {
             const d = deptOf(id)
             const r = readiness[id]
             const st = !r ? 'nolink' : r.ready ? 'ready' : 'hold'
+            const devs = devicesFor(rig, id).map((n) => n.label)
+            const usedHere = (def?.states ?? []).some((s) => (s.timeline?.lanes ?? []).some((l) => l.dept === id && l.cues.length > 0))
+            const nodev = rig.length > 0 && devs.length === 0 && usedHere
             return (
               <button
                 key={id}
-                className={`ready-chip ${st}`}
+                className={`ready-chip ${st} ${nodev ? 'nodev' : ''}`}
                 onClick={() => setReady(id, !r || !r.ready ? true : false)}
-                title={`${d.label}: ${st === 'nolink' ? 'has not reported' : st === 'ready' ? 'standing by' : 'on hold'}${r?.note ? ' – ' + r.note : ''}${r?.source ? ` (via ${r.source})` : ''}. Click to ${r?.ready ? 'hold' : 'mark ready'}.`}
+                title={`${d.label}${devs.length ? ` (${devs.join(', ')})` : nodev ? ' (no device in the rig)' : ''}: ${st === 'nolink' ? 'has not reported' : st === 'ready' ? 'standing by' : 'on hold'}${r?.note ? ' – ' + r.note : ''}${r?.source ? ` (via ${r.source})` : ''}. Click to ${r?.ready ? 'hold' : 'mark ready'}.`}
               >
                 <i style={{ background: d.color }} aria-hidden />
-                <span>{d.label}</span>
+                <span>
+                  {d.label}
+                  {(devs.length > 0 || nodev) && <small className="dev">{devs.length ? devs.join(', ') : '⚠ no device'}</small>}
+                </span>
                 <b>{st === 'nolink' ? 'no link' : st === 'ready' ? 'READY' : 'HOLD'}</b>
               </button>
             )

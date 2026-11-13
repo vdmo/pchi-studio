@@ -46,7 +46,7 @@ export type NodeType =
   // distribution
   | 'ndi' | 'osc' | 'webrtc' | 'rtsp'
   // venue
-  | 'ghost-arcade' | 'projector' | 'led-wall' | 'audio-zone'
+  | 'ghost-arcade' | 'projector' | 'led-wall' | 'audio-zone' | 'laser' | 'lighting-desk' | 'audio-console'
   // intelligence
   | 'director-agent' | 'vision-agent' | 'audio-agent'
 
@@ -97,6 +97,9 @@ export const NODE_CATALOG: NodeSpec[] = [
   spec('venue', 'projector', 'Projector', {}),
   spec('venue', 'led-wall', 'LED Wall', {}),
   spec('venue', 'audio-zone', 'Audio Zone', {}),
+  spec('venue', 'laser', 'Laser', { host: '127.0.0.1', port: 8000 }),
+  spec('venue', 'lighting-desk', 'Lighting Desk', { host: '127.0.0.1', port: 7700 }),
+  spec('venue', 'audio-console', 'Audio Console', { host: '127.0.0.1', port: 10023 }),
   spec('intelligence', 'director-agent', 'Director Agent', {}),
   spec('intelligence', 'vision-agent', 'Vision Agent', {}),
   spec('intelligence', 'audio-agent', 'Audio Agent', {}),
@@ -122,6 +125,8 @@ export interface PchiNode {
   label: string
   position: { x: number; y: number }
   params: Record<string, ParamValue>
+  /** Department this device serves ('visual' | 'lighting' | 'laser' | 'audio'); inferred from the type when unset. See rig.ts. */
+  dept?: string
   /** Only meaningful when type === 'scene'. */
   sceneGraph?: SceneItem[]
 }
@@ -311,6 +316,8 @@ export interface ShowLane {
   name?: string
   /** 'visual' | 'lighting' | 'laser' | 'audio' | 'other' (see DEPTS) */
   dept?: string
+  /** Id of the rig device (a PchiNode) that handles this lane. See rig.ts. */
+  device?: string
   cues: ShowCue[]
 }
 
@@ -572,6 +579,7 @@ export * from './commands'
 export * from './live'
 export * from './cuesheet'
 export * from './capture'
+export * from './rig'
 
 // ───────────────────────── Timelines (mirrors crates/pchi-showchart/src/timeline.rs) ─────────────────────────
 
