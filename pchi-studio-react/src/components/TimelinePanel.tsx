@@ -7,6 +7,9 @@ import type { History } from './useHistory'
 import {
   DEPTS,
   actionToEvent,
+  beatMs,
+  captureCue,
+  quantizeCues,
   deptOf,
   scheduledCues,
   standardLanes,
@@ -25,6 +28,7 @@ import {
  * when the show leaves the state.
  */
 
+const CAPTURE_DEPTS = ['visual', 'lighting', 'laser', 'audio'] // keys 1-4
 const SNAP = 250 // ms
 const LANE_H = 56
 const HEAD_W = 188
@@ -72,6 +76,21 @@ export default function TimelinePanel({ chart, history, note, scene, onScene }: 
   const [playing, setPlaying] = useState(false)
   const [t, setT] = useState(0)
   const [drag, setDrag] = useState<Drag | null>(null)
+
+  // ── rehearsal: play the scene and tap to drop cues where they belong ──
+  const [rehearse, setRehearse] = useState(false)
+  const [speed, setSpeed] = useState(1)
+  const [countIn, setCountIn] = useState(true)
+  const [count, setCount] = useState<number | null>(null)
+  const [bpm, setBpm] = useState(120)
+  const [grid, setGrid] = useState<'250' | '500' | '1000' | 'beat' | 'half'>('beat')
+  const [flash, setFlash] = useState<{ lane: string; text: string } | null>(null)
+  const [take, setTake] = useState<string[]>([]) // cue ids captured since Rehearse was switched on
+  const speedRef = useRef(1)
+  speedRef.current = speed
+  const nowRef = useRef(0) // the playhead, readable from a key handler without waiting for a render
+  const chartRef = useRef(chart)
+  chartRef.current = chart
 
   const state = chart.states.find((s) => s.id === stateId)
   const tl: ShowTimeline = state?.timeline ?? { lanes: [] }
@@ -164,7 +183,8 @@ export default function TimelinePanel({ chart, history, note, scene, onScene }: 
     if (!playing) return
     let raf = 0
     const tick = () => {
-      const now = performance.now() - startedAt.current
+      const now = (performance.now() - startedAt.current) * speedRef.current
+      nowRef.current = now
       setT(now)
       for (const c of cues) {
         if (c.at_ms <= now && !fired.current.has(c.cue)) {
@@ -179,17 +199,66 @@ export default function TimelinePanel({ chart, history, note, scene, onScene }: 
     return () => cancelAnimationFrame(raf)
   }, [playing, cues, total, note, stateId])
 
-  const togglePlay = () => {
-    if (playing) return setPlaying(false)
-    const from = t >= total ? 0 : t
-    startedAt.current = performance.now() - from
+  const begin = () => {
+    const from = nowRef.current >= total ? 0 : nowRef.current
+    startedAt.current = performance.now() - from / speedRef.current
     fired.current = new Set(cues.filter((c) => c.at_ms < from).map((c) => c.cue))
+    nowRef.current = from
     setT(from)
     setPlaying(true)
   }
+  const togglePlay = () => {
+    if (count !== null) return setCount(null) // cancel a count-in
+    if (playing) return setPlaying(false)
+    // in rehearsal, a short count-in lets you get your hands ready
+    if (rehearse && countIn) return setCount(3)
+    begin()
+  }
   const stop = () => {
     setPlaying(false)
+    setCount(null)
+    nowRef.current = 0
     setT(0)
+  }
+  useEffect(() => {
+    if (count === null) return
+    if (count === 0) {
+      setCount(null)
+      begin()
+      return
+    }
+    const id = window.setTimeout(() => setCount(count - 1), 1000 / speedRef.current)
+    return () => window.clearTimeout(id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [count])
+  // changing speed while playing keeps the playhead where it is
+  useEffect(() => {
+    if (playing) startedAt.current = performance.now() - nowRef.current / speed
+  }, [speed, playing])
+
+  const capture = (deptId: string) => {
+    if (!state) return
+    const at = nowRef.current
+    const r = captureCue(chartRef.current, stateId, deptId, at, () => newId('c'))
+    if (!r) return
+    chartRef.current = r.chart
+    commit(r.chart) // each tap is its own undo step
+    setTake((x) => [...x, r.cueId])
+    const d = deptOf(deptId)
+    setFlash({ lane: r.laneId, text: `${d.label} cue at ${fmt(Math.round(at / 50) * 50)}${r.laneAdded ? ' (new lane)' : ''}` })
+    window.setTimeout(() => setFlash((f) => (f && f.lane === r.laneId ? null : f)), 1600)
+  }
+  // cues from this take that still exist (some may have been undone or deleted)
+  const takeLive = take.filter((id) => tl.lanes.some((l) => l.cues.some((c) => c.id === id)))
+  const tidy = () => {
+    const ms = grid === 'beat' ? beatMs(bpm) : grid === 'half' ? beatMs(bpm, 2) : Number(grid)
+    const r = quantizeCues(chartRef.current, stateId, ms, takeLive.length ? new Set(takeLive) : undefined)
+    if (r.moved) {
+      chartRef.current = r.chart
+      commit(r.chart)
+    }
+    setFlash({ lane: '', text: r.moved ? `Moved ${r.moved} cue${r.moved > 1 ? 's' : ''} onto the grid` : 'Everything is already on the grid' })
+    window.setTimeout(() => setFlash(null), 2200)
   }
 
   // ── keyboard ──
@@ -204,6 +273,9 @@ export default function TimelinePanel({ chart, history, note, scene, onScene }: 
       } else if (e.key === ' ') {
         e.preventDefault()
         togglePlay()
+      } else if (rehearse && !mod && !e.altKey && !e.repeat && /^[1-4]$/.test(e.key)) {
+        e.preventDefault()
+        capture(CAPTURE_DEPTS[Number(e.key) - 1])
       } else if ((e.key === 'Delete' || e.key === 'Backspace') && sel) {
         e.preventDefault()
         deleteCue(sel.lane, sel.cue)
@@ -212,7 +284,7 @@ export default function TimelinePanel({ chart, history, note, scene, onScene }: 
     window.addEventListener('keydown', h)
     return () => window.removeEventListener('keydown', h)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sel, playing, t, total, cues, chart, history.undo, history.redo])
+  }, [sel, playing, t, total, cues, chart, history.undo, history.redo, rehearse, count, stateId, countIn])
 
   const addLane = () => {
     const lane: ShowLane = { id: newId('lane'), name: 'New lane', dept: 'other', cues: [] }
@@ -226,9 +298,11 @@ export default function TimelinePanel({ chart, history, note, scene, onScene }: 
   }
   const scrub = (e: MouseEvent<HTMLDivElement>) => {
     const rect = e.currentTarget.getBoundingClientRect()
-    setT(Math.max(0, ((e.clientX - rect.left) / pps) * 1000))
-    fired.current = new Set(cues.filter((c) => c.at_ms < ((e.clientX - rect.left) / pps) * 1000).map((c) => c.cue))
-    startedAt.current = performance.now() - ((e.clientX - rect.left) / pps) * 1000
+    const at = Math.max(0, ((e.clientX - rect.left) / pps) * 1000)
+    nowRef.current = at
+    setT(at)
+    fired.current = new Set(cues.filter((c) => c.at_ms < at).map((c) => c.cue))
+    startedAt.current = performance.now() - at / speedRef.current
   }
 
   const step = pps >= 70 ? 1 : pps >= 35 ? 2 : 5
@@ -290,6 +364,9 @@ export default function TimelinePanel({ chart, history, note, scene, onScene }: 
             </button>
             <span className="time" aria-live="off">{fmt(t)}</span>
           </div>
+          <button className={`rehearse ${rehearse ? 'on' : ''}`} aria-pressed={rehearse} onClick={() => (setRehearse((r) => !r), setTake([]))} title="Play the scene and tap keys 1-4 to drop cues at the playhead">
+            ● Rehearse
+          </button>
           <label className="tl-zoom" title="Zoom">
             <span aria-hidden>⌕</span>
             <input type="range" min={30} max={240} value={pps} onChange={(e) => setPps(Number(e.target.value))} aria-label="Timeline zoom" />
@@ -308,6 +385,44 @@ export default function TimelinePanel({ chart, history, note, scene, onScene }: 
           </label>
           <button onClick={addLane}>+ Lane</button>
         </div>
+
+        {rehearse && (
+          <div className="tl-rehearse" role="group" aria-label="Rehearsal capture">
+            <div className="rh-pads">
+              {CAPTURE_DEPTS.map((id, i) => {
+                const d = deptOf(id)
+                return (
+                  <button key={id} className="rh-pad" style={{ ['--dept' as string]: d.color }} onClick={() => capture(id)} title={`Drop a ${d.label} cue at the playhead (key ${i + 1})`}>
+                    <kbd>{i + 1}</kbd> {d.label}
+                  </button>
+                )
+              })}
+            </div>
+            <span className="rh-sep" />
+            <div className="seg" role="group" aria-label="Playback speed">
+              {[0.5, 1, 2].map((s) => (
+                <button key={s} className={speed === s ? 'on' : ''} aria-pressed={speed === s} onClick={() => setSpeed(s)}>{s}×</button>
+              ))}
+            </div>
+            <label className="rh-chk"><input type="checkbox" checked={countIn} onChange={(e) => setCountIn(e.target.checked)} /> count-in</label>
+            <span className="rh-sep" />
+            <label className="rh-chk" title="Tempo, for the beat grid">
+              BPM <input type="number" min={20} max={400} value={bpm} onChange={(e) => setBpm(Math.min(400, Math.max(20, Number(e.target.value) || 120)))} />
+            </label>
+            <select value={grid} onChange={(e) => setGrid(e.target.value as typeof grid)} aria-label="Grid">
+              <option value="beat">beat</option>
+              <option value="half">½ beat</option>
+              <option value="250">¼ s</option>
+              <option value="500">½ s</option>
+              <option value="1000">1 s</option>
+            </select>
+            <button onClick={tidy} title={takeLive.length ? 'Snap the cues you just captured onto the grid' : 'Snap every cue in this scene onto the grid'}>
+              Tidy {takeLive.length ? `take (${takeLive.length})` : 'all'}
+            </button>
+            <span className="rh-note" role="status" aria-live="polite">{flash?.text ?? (playing ? 'Tap 1–4 on the beat' : 'Press Space to start')}</span>
+          </div>
+        )}
+        {count !== null && count > 0 && <div className="countin" aria-hidden>{count}</div>}
 
         <div className="tl-scene" aria-label={`How the show enters and leaves ${stateId}`}>
           <span className="muted">Scene</span>
@@ -356,7 +471,7 @@ export default function TimelinePanel({ chart, history, note, scene, onScene }: 
               {tl.lanes.map((lane) => {
                 const d = deptOf(lane.dept)
                 return (
-                  <div className="tl-row" key={lane.id} style={{ height: LANE_H }}>
+                  <div className={`tl-row ${flash?.lane === lane.id ? 'flash' : ''}`} key={lane.id} style={{ height: LANE_H }}>
                     <div className="tl-head" style={{ width: HEAD_W, borderLeftColor: d.color }} onClick={(e) => e.stopPropagation()}>
                       <input value={lane.name ?? ''} aria-label="Lane name" placeholder="Lane" onChange={(e) => patchLane(lane.id, { name: e.target.value }, `lane:${lane.id}`)} />
                       <select value={lane.dept ?? 'other'} aria-label="Department" onChange={(e) => patchLane(lane.id, { dept: e.target.value })}>
