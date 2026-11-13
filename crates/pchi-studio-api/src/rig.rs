@@ -30,9 +30,9 @@ impl Device {
 pub fn dept_of_type(t: &str) -> Option<&'static str> {
     Some(match t {
         "vork" | "unreal" | "touchdesigner" | "notch" | "projector" | "led-wall" | "resolume" => "visual",
-        "lighting" | "lighting-desk" | "grandma3" | "eos" => "lighting",
+        "lighting" | "lighting-desk" | "grandma3" | "eos" | "magicq" => "lighting",
         "laser" | "beyond" => "laser",
-        "audio-zone" | "audio-console" | "audio-agent" | "x32" => "audio",
+        "audio-zone" | "audio-console" | "audio-agent" | "x32" | "qlab" => "audio",
         _ => return None,
     })
 }
@@ -116,6 +116,8 @@ mod tests {
         assert_eq!(dept_of_type("eos"), Some("lighting"));
         assert_eq!(dept_of_type("x32"), Some("audio"));
         assert_eq!(dept_of_type("beyond"), Some("laser"));
+        assert_eq!(dept_of_type("magicq"), Some("lighting"));
+        assert_eq!(dept_of_type("qlab"), Some("audio"));
         assert_eq!(dept_of_type("ndi"), None);
         assert_eq!(dept_of_type("cue"), None);
         assert_eq!(dept_of_kind("lighting.look"), "lighting");

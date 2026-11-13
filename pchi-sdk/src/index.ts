@@ -48,7 +48,7 @@ export type NodeType =
   // venue
   | 'ghost-arcade' | 'projector' | 'led-wall' | 'audio-zone' | 'laser' | 'lighting-desk' | 'audio-console'
   // tool profiles (the exact OSC dialect of a popular tool)
-  | 'resolume' | 'grandma3' | 'eos' | 'x32' | 'beyond'
+  | 'resolume' | 'grandma3' | 'eos' | 'x32' | 'beyond' | 'qlab' | 'magicq'
   // intelligence
   | 'director-agent' | 'vision-agent' | 'audio-agent'
 
@@ -108,6 +108,8 @@ export const NODE_CATALOG: NodeSpec[] = [
   spec('venue', 'eos', 'ETC Eos', { host: '127.0.0.1', port: 8000 }),
   spec('venue', 'x32', 'Behringer X32 / M32', { host: '127.0.0.1', port: 10023 }),
   spec('venue', 'beyond', 'Pangolin BEYOND', { host: '127.0.0.1', port: 12000 }),
+  spec('venue', 'qlab', 'QLab', { host: '127.0.0.1', port: 53000 }),
+  spec('venue', 'magicq', 'ChamSys MagicQ', { host: '127.0.0.1', port: 8000 }),
   spec('intelligence', 'director-agent', 'Director Agent', {}),
   spec('intelligence', 'vision-agent', 'Vision Agent', {}),
   spec('intelligence', 'audio-agent', 'Audio Agent', {}),

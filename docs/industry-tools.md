@@ -81,7 +81,9 @@ Strobe stays as it is until it can be checked against the real thing.
 
 ## Status
 
-Built (first version): the five profiles in the picks above, plus laser arm/disarm and a hard stop. See
+Built (first version): the five profiles in the picks above, **QLab** and **ChamSys MagicQ** added after, plus laser arm/disarm and a hard stop.
+
+**TouchDesigner** needs no profile: you define its OSC addresses yourself, so the generic `/pchi/...` messages (e.g. `/pchi/scene/activate`) can be received with an OSC In node. **Ableton Live** is controlled by MIDI or an add-on, and PCHI has no MIDI output yet, so it is not covered. See
 "Tool profiles" and "Laser safety" in `connecting-systems.md` for what each sends and which addresses are
 confirmed. **None has been tried against the real tools yet.**
 

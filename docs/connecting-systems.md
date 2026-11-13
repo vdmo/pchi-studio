@@ -56,7 +56,7 @@ pchi-studio-api my-show.pchi --send     # really sends
 - Sending is off unless `--send` is given, so opening a show file can never fire a laser by accident.
   Use a dry run first and test each device before doors.
 
-### Tool profiles (Resolume, grandMA3, Eos, X32, BEYOND)
+### Tool profiles (Resolume, grandMA3, Eos, X32, BEYOND, QLab, MagicQ)
 
 Add one of these in the Rig tab and the runtime speaks that tool's own OSC instead of the generic `/pchi/...`
 messages. Set the device's **host and port to match the tool's own OSC settings**: only Resolume's default
@@ -64,10 +64,12 @@ messages. Set the device's **host and port to match the tool's own OSC settings*
 
 | Device | Cue kind | Value | Sends | Source of the address |
 |---|---|---|---|---|
-| Resolume Arena | Visuals (scene) | `3` = column, `2/5` = layer/clip, or a full address from Resolume's OSC Shortcut mode | `/composition/columns/3/connect`, `/composition/layers/2/clips/5/connect` (int 1), or your address | clip form: third-party tutorial; column form: **from memory, not confirmed** |
+| Resolume Arena | Visuals (scene) | `3` = column, `2/5` = layer/clip, or a full address from Resolume's OSC Shortcut mode | `/composition/columns/3/connect`, `/composition/layers/2/clips/5/connect` (int 1), or your address | both forms confirmed by community sources (a Workcad manual shows the column packet), not by a Resolume page |
 | grandMA3 | Lighting (look) | `402` = executor, or a playback command such as `Goto Cue 5` | `/cmd` string `Go+ Exec 402` | MA3 manual (checked). Only playback commands (`Go`, `Go+`, `Go-`, `GoBack`, `Goto`, `Pause`, `Off`, `On`, `Flash`) are allowed: a show file can never send `Delete`, `Store` and the like |
 | ETC Eos | Lighting (look) | `2` or `2.5` = cue, `3/9` = cuelist/cue | `/eos/cue/2/fire`, `/eos/cue/3/9/fire` | ETC support article (checked) |
 | Behringer X32 / M32 | Audio (snapshot) | scene number 0 to 99 | `/-action/goscene` (int) | **from memory, not confirmed against a desk** |
+| QLab | Audio or Visuals | a cue number (`12`, `12.5`, `A1`), or `stop`, `panic`, `pause`, `resume` | `/cue/12/start`, or `/stop` etc. | QLab's OSC dictionary confirms cue addressing and the workspace commands; the `start` entry was past what could be read: re-check. Set the device's department to Visuals in the Rig tab to use it for video |
+| ChamSys MagicQ | Lighting (look) | `3` = playback go, `3/5` = jump to cue 5, `release 3` | `/pb/3/go`, `/pb/3/5`, `/pb/3/release` | ChamSys's OSC page as reported by search; the page itself could not be fetched. MagicQ PC controls only playbacks 1 to 10 |
 | Pangolin BEYOND | Laser (cue) | the cue name | `/beyond/general/StartCue` (string); kinds `laser.stop` and `laser.blackout` map to `StopCue` and `BlackOut` | Pangolin wiki (checked) |
 
 A value the tool cannot use is reported as a failed delivery with the reason; it is never guessed.
