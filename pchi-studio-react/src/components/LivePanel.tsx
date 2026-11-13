@@ -5,6 +5,9 @@ import Card from './Card'
 import CommandBar from './CommandBar'
 import TimelineStrip, { useStripLayout } from './TimelineStrip'
 import { sceneInfo } from './sceneInfo'
+import LiveCallSheet from './LiveCallSheet'
+import RuntimeTools, { testFire } from './RuntimeTools'
+import { STALE_MS, feedUrl, type Ready } from './liveFeed'
 import { fmt } from './TimelineStrip'
 import {
   DEPTS,
@@ -20,7 +23,7 @@ import {
   type PchiEvent,
   type ShowContext,
   type Showchart,
-  devicesFor,
+  rigDept,
   type PchiNode,
 } from '@pchi/sdk'
 
@@ -42,22 +45,14 @@ interface Props {
   onStatus: (s: Status) => void
   /** Devices in Studio's rig, to show which one stands behind each department. */
   rig?: PchiNode[]
+  /** The show as Studio has it now (showchart + rig), to send to the runtime. */
+  getFile?: () => unknown
 }
 
-/** The runtime may require a token when it is shared over the network: Studio reads it from this browser's storage. */
-const feedToken = () => {
-  try {
-    return localStorage.getItem('pchi.token') ?? ''
-  } catch {
-    return ''
-  }
-}
-const feedUrl = () => {
-  const t = feedToken()
-  return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/ws${t ? `?token=${encodeURIComponent(t)}` : ''}`
-}
-
-type Ready = { ready: boolean; note?: string; ts: number; source?: string }
+/** A rig device as the running show knows it. */
+type RunDevice = { id: string; label: string; dept: string }
+/** What the runtime did with one cue: sent, dry-run, no-device or failed. */
+type Delivery = { ts: number; kind: string; status: 'sent' | 'dry-run' | 'no-device' | 'failed'; device?: string; label?: string; dept?: string; target?: string; error?: string; lane?: string }
 
 /**
  * Live view of a show running in pchi-studio-api. The server is the source of
@@ -65,7 +60,7 @@ type Ready = { ready: boolean; note?: string; ts: number; source?: string }
  * engine itself, apart from asking "which events could fire from here" to
  * enable the right buttons.
  */
-export default function LivePanel({ onFeed, onStatus, rig = [] }: Props) {
+export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props) {
   const [status, setStatus] = useState<Status>('connecting')
   const [def, setDef] = useState<Showchart | null>(null)
   const [state, setState] = useState('')
@@ -82,6 +77,18 @@ export default function LivePanel({ onFeed, onStatus, rig = [] }: Props) {
   useEffect(() => onStatusRef.current(status), [status])
   // what each department has said: standing by, on hold, or nothing yet
   const [readiness, setReadiness] = useState<Record<string, Ready>>({})
+  // the rig the running show was started with, and what became of each cue sent to it
+  const [runDevices, setRunDevices] = useState<RunDevice[] | null>(null)
+  const [output, setOutput] = useState<'live' | 'dry-run' | null>(null)
+  const [last, setLast] = useState<Record<string, Delivery>>({})
+  const [gaps, setGaps] = useState<Delivery[]>([]) // cues no device could take
+  const [beat, setBeat] = useState(() => Date.now())
+  useEffect(() => {
+    const id = window.setInterval(() => setBeat(Date.now()), 5000)
+    return () => window.clearInterval(id)
+  }, [])
+  const [view, setView] = useState<'operate' | 'calls'>('operate')
+  const [testing, setTesting] = useState<string | null>(null)
   const [armed, setArmed] = useState(false) // GO pressed once while a department is on hold
   const [trail, setTrail] = useState<{ ts: number; text: string }[]>([])
   const [key, setKey] = useState('energy')
@@ -108,7 +115,17 @@ export default function LivePanel({ onFeed, onStatus, rig = [] }: Props) {
         onFeedRef.current(msg)
         switch (msg.type) {
           case 'hello':
-            setReadiness((msg.readiness as Record<string, Ready>) ?? {})
+            {
+              // how old each report is, by the server's own clock: this browser's clock may differ
+              const serverNow = Number(msg.server_ts ?? 0)
+              const here = Date.now()
+              const raw = (msg.readiness as Record<string, Omit<Ready, 'seen'>>) ?? {}
+              setReadiness(Object.fromEntries(Object.entries(raw).map(([k, v]) => [k, { ...v, seen: serverNow ? here - Math.max(0, serverNow - v.ts) : here }])))
+            }
+            setRunDevices(Array.isArray(msg.devices) ? (msg.devices as RunDevice[]) : null)
+            setOutput(msg.output === 'live' || msg.output === 'dry-run' ? msg.output : null)
+            setLast({})
+            setGaps([])
             setDef(msg.definition as Showchart)
             setState(String(msg.state))
             setCtx((msg.context as ShowContext) ?? {})
@@ -130,7 +147,17 @@ export default function LivePanel({ onFeed, onStatus, rig = [] }: Props) {
             }
             break
           case 'readiness':
-            setReadiness((r) => ({ ...r, [String(msg.dept)]: { ready: !!msg.ready, note: String(msg.note ?? ''), ts: Number(msg.ts), source: String(msg.source ?? '') } }))
+            setReadiness((r) => ({ ...r, [String(msg.dept)]: { ready: !!msg.ready, note: String(msg.note ?? ''), ts: Number(msg.ts), source: String(msg.source ?? ''), seen: Date.now() } }))
+            break
+          case 'delivery': {
+            const d = msg as unknown as Delivery
+            if (d.device) setLast((l) => ({ ...l, [d.device!]: d }))
+            else if (d.status === 'no-device') setGaps((g) => [...g.filter((x) => !(x.dept === d.dept && x.kind === d.kind)), d].slice(-8))
+            break
+          }
+          case 'show':
+            setDef(msg.definition as Showchart)
+            setRunDevices(Array.isArray(msg.devices) ? (msg.devices as RunDevice[]) : null)
             break
           case 'context':
             setCtx((c) => ({ ...c, [String(msg.key)]: msg.value }))
@@ -218,7 +245,18 @@ export default function LivePanel({ onFeed, onStatus, rig = [] }: Props) {
     .flatMap((l) => l.cues.map((c) => ({ ...c, lane: l.name || l.id, dept: l.dept })))
     .filter((c) => !fired.has(c.id))
     .sort((a, b) => a.at_ms - b.at_ms)[0]
-  const onHold = Object.entries(readiness).filter(([, v]) => !v.ready).map(([k]) => k)
+  // One chip per department, or per device when the rig has devices for it. A device's own
+  // report counts first; with none, the department's word stands for it.
+  const stale = (r?: Ready) => !!r && r.source === 'dept-page' && beat - r.seen > STALE_MS
+  const devices: RunDevice[] = runDevices ?? rig.flatMap((n) => { const d = rigDept(n); return d ? [{ id: n.id, label: n.label, dept: d }] : [] })
+  const boardDepts = [...new Set([...DEPTS.filter((d) => d.id !== 'other').map((d) => d.id as string), ...Object.keys(readiness).filter((k) => !devices.some((x) => x.id === k))])]
+  const live = (r?: Ready) => (stale(r) ? undefined : r)
+  const board = boardDepts.flatMap((dept) => {
+    const own = devices.filter((x) => x.dept === dept)
+    if (own.length === 0) return [{ key: dept, dept, label: deptOf(dept).label, device: undefined as RunDevice | undefined, r: live(readiness[dept]) }]
+    return own.map((x) => ({ key: x.id, dept, label: x.label, device: x as RunDevice | undefined, r: live(readiness[x.id]) ?? live(readiness[dept]) }))
+  })
+  const onHold = board.filter((b) => b.r && !b.r.ready).map((b) => b.label)
 
   const pressGo = () => {
     if (!go) return
@@ -245,7 +283,6 @@ export default function LivePanel({ onFeed, onStatus, rig = [] }: Props) {
   }, [])
 
   const setReady = (dept: string, ready: boolean) => send({ type: 'ready', dept, ready, note: ready ? 'set in Studio' : 'held in Studio' })
-  const boardDepts = [...new Set([...DEPTS.filter((d) => d.id !== 'other').map((d) => d.id as string), ...Object.keys(readiness)])]
 
   return (
     <div className={`cv has-right ${tlHeight ? 'has-tl' : ''}`} style={{ ['--tl-h' as string]: `${tlHeight}px` }}>
@@ -291,6 +328,10 @@ export default function LivePanel({ onFeed, onStatus, rig = [] }: Props) {
 
       <Card title="Show" className="right">
         <p className="bigstate">{state || '—'}</p>
+        <div className="seg lv-seg" role="group" aria-label="Live view">
+          <button className={view === 'operate' ? 'on' : ''} aria-pressed={view === 'operate'} onClick={() => setView('operate')}>Operate</button>
+          <button className={view === 'calls' ? 'on' : ''} aria-pressed={view === 'calls'} onClick={() => setView('calls')}>Call sheet</button>
+        </div>
 
         <div className="nextup" aria-live="off">
           <span className="muted">Next up</span>
@@ -314,32 +355,81 @@ export default function LivePanel({ onFeed, onStatus, rig = [] }: Props) {
           <small>{!go ? (autoNext ? `moves on by itself in ${fmt(autoLeft ?? 0)}` : 'nothing to send') : onHold.length ? `${onHold.join(', ')} on hold${armed ? ': press again to go' : ''}` : 'Space'}</small>
         </button>
 
-        <h5>Departments</h5>
+        {view === 'calls' && def && (
+          <LiveCallSheet
+            def={def}
+            scene={state}
+            elapsed={elapsed}
+            fired={fired}
+            devices={devices.map((d) => ({ id: d.id, label: d.label, dept: d.dept, type: 'cue', position: { x: 0, y: 0 }, params: {} }))}
+            nextScene={(go ?? autoNext)?.target}
+          />
+        )}
+        <h5>
+          Departments{' '}
+          {output && (
+            <span className={`out-badge ${output}`} title={output === 'live' ? 'The runtime is sending cues to the rig devices (UDP/OSC)' : 'Dry run: nothing leaves the runtime. Start it with --send to really send cues.'}>
+              {output === 'live' ? 'sending' : 'dry run'}
+            </span>
+          )}
+        </h5>
         <div className="ready-board">
-          {boardDepts.map((id) => {
-            const d = deptOf(id)
-            const r = readiness[id]
+          {board.map(({ key, dept, label, device, r }) => {
+            const d = deptOf(dept)
             const st = !r ? 'nolink' : r.ready ? 'ready' : 'hold'
-            const devs = devicesFor(rig, id).map((n) => n.label)
-            const usedHere = (def?.states ?? []).some((s) => (s.timeline?.lanes ?? []).some((l) => l.dept === id && l.cues.length > 0))
-            const nodev = rig.length > 0 && devs.length === 0 && usedHere
+            const dv = device ? last[device.id] : undefined
+            const usedHere = (def?.states ?? []).some((s) => (s.timeline?.lanes ?? []).some((l) => l.dept === dept && l.cues.length > 0))
+            const nodev = !device && devices.length > 0 && usedHere
             return (
               <button
-                key={id}
-                className={`ready-chip ${st} ${nodev ? 'nodev' : ''}`}
-                onClick={() => setReady(id, !r || !r.ready ? true : false)}
-                title={`${d.label}${devs.length ? ` (${devs.join(', ')})` : nodev ? ' (no device in the rig)' : ''}: ${st === 'nolink' ? 'has not reported' : st === 'ready' ? 'standing by' : 'on hold'}${r?.note ? ' – ' + r.note : ''}${r?.source ? ` (via ${r.source})` : ''}. Click to ${r?.ready ? 'hold' : 'mark ready'}.`}
+                key={key}
+                className={`ready-chip ${st} ${nodev ? 'nodev' : ''} ${dv?.status === 'failed' ? 'failed' : ''}`}
+                onClick={() => setReady(key, !r || !r.ready ? true : false)}
+                title={`${device ? `${label} (${d.label})` : d.label}${nodev ? ' (no device in the rig)' : ''}: ${st === 'nolink' ? 'has not reported' : st === 'ready' ? 'standing by' : 'on hold'}${r?.note ? ' – ' + r.note : ''}${r?.source ? ` (via ${r.source})` : ''}${dv ? `. Last cue: ${dv.status}${dv.error ? ' – ' + dv.error : ''}` : ''}. Click to ${r?.ready ? 'hold' : 'mark ready'}.`}
               >
                 <i style={{ background: d.color }} aria-hidden />
                 <span>
-                  {d.label}
-                  {(devs.length > 0 || nodev) && <small className="dev">{devs.length ? devs.join(', ') : '⚠ no device'}</small>}
+                  {label}
+                  {device && <small className="dev">{d.label}{dv ? ` · ${dv.status === 'failed' ? '⚠ failed' : dv.status}` : ''}</small>}
+                  {nodev && <small className="dev">⚠ no device</small>}
                 </span>
                 <b>{st === 'nolink' ? 'no link' : st === 'ready' ? 'READY' : 'HOLD'}</b>
               </button>
             )
           })}
         </div>
+        {(gaps.length > 0 || Object.values(last).some((l) => l.status === 'failed')) && (
+          <ul className="delivery-warn" role="status">
+            {gaps.map((g, i) => (
+              <li key={`g${i}`}>⚠ {g.kind}: {g.error}</li>
+            ))}
+            {Object.values(last).filter((l) => l.status === 'failed').map((l) => (
+              <li key={l.device}>⚠ {l.label ?? l.device}: {l.error}</li>
+            ))}
+          </ul>
+        )}
+        {devices.length > 0 && (
+          <div className="dev-tests">
+            {devices.map((x) => (
+              <button
+                key={x.id}
+                className="dev-test"
+                disabled={testing === x.id}
+                title={output === 'live' ? 'Send one /pchi/test message to this device' : 'Dry run: reports where the test would go'}
+                onClick={async () => {
+                  if (output === 'live' && !confirm(`Send a test message to ${x.label}?${x.dept === 'laser' ? ' This is a laser: make sure the area is clear and the safety shutter is in your control.' : ''}`)) return
+                  setTesting(x.id)
+                  const r = await testFire(x.id)
+                  setTesting(null)
+                  setLast((l) => ({ ...l, [x.id]: { ts: Date.now(), kind: 'test', status: r.status as Delivery['status'], device: x.id, label: x.label, dept: x.dept, error: r.error } }))
+                }}
+              >
+                Test {x.label}
+              </button>
+            ))}
+          </div>
+        )}
+        {getFile && <RuntimeTools getFile={getFile} />}
         {timerRows.map((r, i) => {
           const elapsed = Math.max(0, now - enteredAt)
           const left = Math.max(0, r.ms - elapsed)

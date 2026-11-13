@@ -1083,6 +1083,8 @@ dependencies = [
  "futures-util",
  "pchi-eventstore",
  "pchi-showchart",
+ "rosc",
+ "serde",
  "serde_json",
  "tokio",
  "tokio-tungstenite",

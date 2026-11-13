@@ -105,17 +105,18 @@ export default function App() {
   const note = useCallback((e: PchiEvent) => pushLog('sim', e), [pushLog])
   const onFeed = useCallback((e: PchiEvent) => pushLog('in', e), [pushLog])
 
+  const buildFile = (): PchiShowFile => ({
+    version: '1.0',
+    project: meta.project,
+    name: meta.name,
+    nodes: rig.nodes,
+    edges: rig.edges,
+    timeline: [],
+    assets: [],
+    showchart,
+  })
   const save = () => {
-    const file: PchiShowFile = {
-      version: '1.0',
-      project: meta.project,
-      name: meta.name,
-      nodes: rig.nodes,
-      edges: rig.edges,
-      timeline: [],
-      assets: [],
-      showchart,
-    }
+    const file = buildFile()
     const blob = new Blob([JSON.stringify(file, null, 2)], { type: 'application/json' })
     const a = document.createElement('a')
     a.href = URL.createObjectURL(blob)
@@ -206,7 +207,7 @@ export default function App() {
         const c = clearDevice(showchart, id)
         if (c !== showchart) history.commit(c)
       }} />}
-      {mode === 'live' && <LivePanel onFeed={onFeed} onStatus={setLiveStatus} rig={rig.nodes} />}
+      {mode === 'live' && <LivePanel onFeed={onFeed} onStatus={setLiveStatus} rig={rig.nodes} getFile={buildFile} />}
 
       <footer className="slimfoot">
         <EventConsole log={log} onClear={() => setLog([])} collapsible />

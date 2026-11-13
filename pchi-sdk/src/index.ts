@@ -580,6 +580,7 @@ export * from './live'
 export * from './cuesheet'
 export * from './capture'
 export * from './rig'
+export * from './brief'
 
 // ───────────────────────── Timelines (mirrors crates/pchi-showchart/src/timeline.rs) ─────────────────────────
 

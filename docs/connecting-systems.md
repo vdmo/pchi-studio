@@ -32,6 +32,56 @@ pchi-studio-api show.pchi.json --bind 0.0.0.0:3100 --token <secret> --db show.db
 - The token is plain text on the wire. Use a closed show network, or put the runtime behind TLS
   (a reverse proxy) if the network is shared with the public or with guests.
 
+### Sending cues to the rig
+
+Run the runtime on a Studio `.pchi` file (Save from Studio) and it knows the rig as well as the show:
+
+```bash
+pchi-studio-api my-show.pchi            # dry run: reports where each cue WOULD go
+pchi-studio-api my-show.pchi --send     # really sends
+```
+
+- Each cue goes to its lane's device (chosen on the Timeline), or the only device for its department.
+  Scene enter/exit actions go by their kind (`lighting.look` is lighting, and so on).
+- The message is generic OSC over UDP to the device's `host` and `port` (set in the Rig tab):
+  address `/pchi/<kind>` (`lighting.look` becomes `/pchi/lighting/look`), arguments are the action's
+  values in key order. A desk with its own OSC dialect needs a small adapter to translate it.
+- Studio's Live tab shows, per device, READY and what became of its last cue (sent, dry-run, failed),
+  and lists cues that no device could take ("no laser device in the rig").
+- A device may report readiness under its own id (`POST /ready/<device id>`); otherwise its
+  department's report stands for it.
+- **UDP has no acknowledgement.** "sent" means the packet left this machine, not that the desk acted on it.
+  Only the device's own READY report (or a feedback adapter) says that.
+- A failed or unreachable send is reported and never stops or delays the show.
+- Sending is off unless `--send` is given, so opening a show file can never fire a laser by accident.
+  Use a dry run first and test each device before doors.
+
+### Department pages, live edits, report, test fire
+
+- **Department page.** Open `http://<studio host>/?dept=lighting` (or a device id, `?dept=laser-1`) on a
+  tablet or desk. It shows what that department has coming (STANDBY within 10 s, GO when due) and one big
+  READY button. While READY it checks in every 10 s; if it stops for 30 s the operator's board shows
+  "no link" rather than a stale READY. Add `?token=...` once if the runtime has a token (it is kept in
+  that browser and removed from the address bar). Check-ins are not written to the event log.
+- **Call sheet.** On Live, the **Call sheet** view follows the running show: STANDBY and GO per cue, done
+  cues struck through, and the next scene's first cues below.
+- **Send show to runtime.** Live > "Send show to runtime…" shows exactly what would change (scenes,
+  transitions, cues moved/added/removed, devices) and any effect on the scene running now (for example a
+  cue moved to a time already past will not fire late). It is refused if the running scene was removed.
+  The scene, its clock and the context are kept. `POST /show` (`?dry=1` to preview) does the same.
+- **Run report.** Live > "Run report" (or `GET /report`): each cue's planned and actual time, failed sends,
+  cues with no device, and edits made mid-show.
+- **Test fire.** Live > "Test <device>" (or `POST /devices/<id>/test`) sends one harmless `/pchi/test`
+  message; in a dry run it only reports where it would go. With `--send` Studio asks first (and warns for
+  lasers).
+- **Brief.** On the start screen, paste one scene per line (with a length and the words lights, lasers,
+  visuals, audio) and press "Draft the commands". It is a small parser, not an AI: it only fills the command
+  box for you to read and edit, and lists what it did not understand.
+
+**Not done, and why:** nothing here has been tried against real Strobe, a lighting desk, a laser or an audio
+console (only against a local UDP listener); desk-specific protocols (MIDI, Art-Net, vendor OSC dialects) need
+an adapter per device, and which ones to build depends on the actual gear.
+
 ## Next, in order
 
 1. **Departments see the show too.** A small page or app per department that shows "next up" and a

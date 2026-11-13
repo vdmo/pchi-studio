@@ -446,3 +446,68 @@ button.go:disabled { background: #1b1d25; color: #7a7f92; border-color: #2f323e;
 .rig-check.ok summary { color: #10b981; }
 .ready-chip .dev { display: block; font-size: 10px; opacity: .75; font-weight: 400; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ready-chip.nodev { border-style: dashed; }
+
+/* --- device delivery status on the Live board --- */
+.out-badge { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; padding: 1px 7px; border-radius: 999px; vertical-align: middle; }
+.out-badge.live { background: #10b98126; color: #34d399; border: 1px solid #10b98188; }
+.out-badge.dry-run { background: #7a7f9222; color: #a6abbd; border: 1px solid #7a7f9288; }
+.ready-chip.failed { border-color: #ef4444; }
+.delivery-warn { list-style: none; margin: 6px 0 0; padding: 0; font-size: 12px; color: #fbbf24; }
+.delivery-warn li { margin: 2px 0; }
+
+/* --- live call sheet, department page --- */
+.lv-seg { margin: 6px 0 10px; }
+.lcs h5 { margin: 10px 0 4px; }
+.lcs-list { list-style: none; margin: 0; padding: 0; }
+.lcs-list.later { opacity: .55; }
+.lcs-row { display: grid; grid-template-columns: 38px 44px 1fr auto; gap: 8px; align-items: center; padding: 6px 8px; border-left: 4px solid var(--dept, #7a7f92); border-bottom: 1px solid #22252d; font-size: 13px; }
+.lcs-q { font-weight: 700; font-variant-numeric: tabular-nums; }
+.lcs-t { color: #9aa0b4; font: 12px ui-monospace, monospace; }
+.lcs-what small { display: block; color: #8b90a3; font-size: 11px; }
+.lcs-call { font-size: 12px; white-space: nowrap; }
+.lcs-row.done { opacity: .45; text-decoration: line-through; }
+.lcs-row.standby { background: #3a2f12; }
+.lcs-row.standby .lcs-call { color: #fbbf24; }
+.lcs-row.go { background: #14391f; }
+.lcs-row.go .lcs-call { color: #34d399; }
+.lcs-row.next { outline: 1px solid #fbbf2455; }
+
+.deptpage { min-height: 100vh; box-sizing: border-box; padding: 16px; max-width: 560px; margin: 0 auto; display: flex; flex-direction: column; gap: 10px; }
+.deptpage header { display: flex; align-items: center; justify-content: space-between; }
+.deptpage h1 { margin: 6px 0 0; font-size: 34px; border-left: 8px solid var(--dept); padding-left: 12px; }
+.dp-call { padding: 16px; border-radius: 14px; background: #1b1d25; border: 2px solid #2f323e; display: flex; flex-direction: column; gap: 4px; font-size: 16px; }
+.dp-call b { font-size: 38px; letter-spacing: .04em; }
+.dp-call.standby { background: #3a2f12; border-color: #fbbf24; }
+.dp-call.standby b { color: #fbbf24; }
+.dp-call.go { background: #14391f; border-color: #34d399; }
+.dp-call.go b { color: #34d399; }
+.dp-ready { padding: 26px 12px; font-size: 30px; font-weight: 800; border-radius: 16px; border: 3px solid #4b5163; background: #20232c; }
+.dp-ready small { display: block; margin-top: 4px; font-size: 13px; font-weight: 400; opacity: .8; }
+.dp-ready.on { background: #14532d; border-color: #34d399; color: #d1fae5; }
+.dp-ready.hold { background: #5c1d1d; border-color: #ef4444; color: #fee2e2; }
+.dp-list { list-style: none; margin: 0; padding: 0; }
+.dp-list li { display: grid; grid-template-columns: 52px 1fr auto; gap: 8px; padding: 8px 0; border-bottom: 1px solid #262a33; font-size: 15px; }
+
+/* --- send to runtime, run report, test fire --- */
+.rt-tools, .dev-tests { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.dev-test { font-size: 12px; padding: 3px 8px; }
+.dialog.wide { width: min(820px, calc(100vw - 32px)); }
+.rt-diff, .rt-notes { list-style: none; margin: 4px 0 10px; padding: 0; font: 12.5px ui-monospace, monospace; }
+.rt-diff li, .rt-notes li { padding: 3px 8px; border-left: 3px solid #4b5163; margin: 2px 0; }
+.rt-diff .add { border-color: #34d399; color: #a7f3d0; }
+.rt-diff .del { border-color: #ef4444; color: #fecaca; }
+.rt-diff .mod { border-color: #fbbf24; }
+.rt-notes li { border-color: #fbbf24; color: #fde68a; }
+.rt-err { color: #fca5a5; }
+.rt-ok { color: #a7f3d0; }
+.rt-actions { display: flex; gap: 8px; margin-top: 12px; }
+.rt-actions .primary { background: #3b82f6; border-color: #3b82f6; color: #fff; }
+.rt-sum { font-size: 14px; }
+.rt-table td, .rt-table th { font-size: 12.5px; }
+.rt-table tr.late td { background: #3a2f12; }
+
+/* --- brief to draft --- */
+.start-brief { margin: 10px 0; text-align: left; }
+.start-brief summary { cursor: pointer; color: #9aa0b4; font-size: 13px; }
+.start-brief textarea { width: 100%; box-sizing: border-box; margin: 8px 0; font: 13px ui-monospace, monospace; }
+.start-notes { margin: 6px 0; padding-left: 18px; font-size: 12px; color: #fbbf24; }

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { runCommandText, type Showchart } from '@pchi/sdk'
+import { briefToCommands, draftText, runCommandText, type Showchart } from '@pchi/sdk'
 
 /**
  * Starting points for an empty show. Each one is just a command sentence, so
@@ -29,6 +29,16 @@ const IDEAS = ['chain preshow, intro, drop, finale', 'chain idle, attract, inter
 export default function StartScreen({ chart, onApply }: { chart: Showchart; onApply: (c: Showchart) => void }) {
   const [text, setText] = useState('')
   const [error, setError] = useState<{ text: string; hint?: string } | null>(null)
+  const [brief, setBrief] = useState('')
+  const [notes, setNotes] = useState<string[]>([])
+
+  // a brief only DRAFTS commands into the box above: nothing is built until the person has read them and pressed Build it
+  const draft = () => {
+    const d = briefToCommands(brief)
+    setNotes(d.notes)
+    setError(null)
+    if (d.commands.length) setText(draftText(d))
+  }
 
   const run = (input: string) => {
     const r = runCommandText(input, chart)
@@ -55,6 +65,26 @@ export default function StartScreen({ chart, onApply }: { chart: Showchart; onAp
           ✗ {error.text} {error.hint && <span className="muted">{error.hint}</span>}
         </p>
       )}
+      <details className="start-brief">
+        <summary>Have a brief? Paste it and get a draft</summary>
+        <textarea
+          value={brief}
+          onChange={(e) => setBrief(e.target.value)}
+          rows={5}
+          spellCheck={false}
+          aria-label="Show brief"
+          placeholder={'One scene per line, with a length and departments if you like:\nPreshow, 20 minutes\nIntro, 30 seconds, blue lights\nDrop with lasers sweep and visuals tunnel\nFinale'}
+        />
+        <button type="button" onClick={draft} disabled={!brief.trim()}>Draft the commands</button>
+        {notes.length > 0 && (
+          <ul className="start-notes" role="status">
+            {notes.map((n, i) => (
+              <li key={i}>{n}</li>
+            ))}
+          </ul>
+        )}
+        <p className="muted">This reads scene names, lengths ("30 seconds", "2 min") and the words lights, lasers, visuals, audio. It is not an AI: it writes the commands above for you to check and edit first.</p>
+      </details>
       <div className="start-ideas">
         {IDEAS.map((i) => (
           <button key={i} type="button" onClick={() => setText(i)}>{i}</button>

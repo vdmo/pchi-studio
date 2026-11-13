@@ -56,6 +56,11 @@ pub struct ScheduledCue {
     pub lane: String,
     pub cue: String,
     pub action: Action,
+    /// The lane's department and chosen rig device, so the runtime can route the cue.
+    pub dept: Option<String>,
+    pub device: Option<String>,
+    /// The cue number, for the run report.
+    pub num: Option<f64>,
 }
 
 impl Timeline {
@@ -70,6 +75,9 @@ impl Timeline {
                     lane: l.id.clone(),
                     cue: c.id.clone(),
                     action: c.action.clone(),
+                    dept: l.dept.clone(),
+                    device: l.device.clone(),
+                    num: c.num,
                 })
             })
             .collect();

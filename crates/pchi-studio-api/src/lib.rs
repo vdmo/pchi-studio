@@ -8,12 +8,17 @@
 //!   {"type":"action", "ts", "event":{"type":<kind>, ...payload}}
 //!   {"type":"context", "ts", "key", "value"}
 //!   {"type":"readiness", "ts", "dept", "ready", "note", "source"}
+//!   {"type":"delivery", "ts", "kind", "lane", "cue", "status", "device", "label", "dept", "target", "error"}
+//!       status: "sent" | "dry-run" | "no-device" | "failed" (see the `output` module)
+//!   {"type":"show", "definition", "devices", "diff"}: the show was replaced while running
 //!   {"type":"error", "message"}
 //! client -> server:
 //!   {"type":"input","event":"START"}  {"type":"context","key":"energy","value":0.3}  {"type":"reset"}
-//!   {"type":"ready","dept":"lighting","ready":true,"note":"cue 12 loaded"}
+//!   {"type":"ready","dept":"lighting","ready":true,"note":"cue 12 loaded","source":"dept-page"}
+//!       (a client that repeats the same report every few seconds is a heartbeat: it is not logged)
 //!
-//! HTTP: `GET /state` (the hello snapshot), `GET /events` (the event log),
+//! HTTP: `POST /show` (send an edited show; `?dry=1` previews the changes), `GET /report` (planned vs actual cue times, delivery problems),
+//! `POST /devices/<id>/test` (one harmless test message to a device), `GET /state` (the hello snapshot), `GET /events` (the event log),
 //! `GET /ready`, `POST /ready/<dept>` {"ready":true,"note":"..."} and
 //! `POST /input` {"event":"GO"}: plain HTTP so any desk, script or button box can take part.
 //!
@@ -33,9 +38,14 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+pub mod diff;
+pub mod output;
+pub mod rig;
+
 use futures_util::{SinkExt, StreamExt};
+use output::{Output, Plan};
 use pchi_eventstore::{recorder, EventStore};
-use pchi_showchart::{timer_event, ScheduledCue, ShowEngine, Showchart};
+use pchi_showchart::{timer_event, Action, ScheduledCue, ShowEngine, Showchart};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
@@ -64,11 +74,18 @@ pub struct Show {
     tx: broadcast::Sender<Value>,
     /// Latest word from each department: {ready, note, ts, source}.
     readiness: Mutex<BTreeMap<String, Value>>,
+    /// Where cues are sent. None when the show was loaded without a rig (nothing is routed).
+    output: Mutex<Option<Arc<Output>>>,
 }
 
 impl Show {
     /// Validates the chart, begins a recorded run and arms the initial state's timers.
     pub fn start(chart: Showchart, store: EventStore) -> Result<Arc<Self>, String> {
+        Self::start_with(chart, store, None)
+    }
+
+    /// As `start`, routing cues to the devices in `output` (see the `output` module).
+    pub fn start_with(chart: Showchart, store: EventStore, output: Option<Output>) -> Result<Arc<Self>, String> {
         let engine = ShowEngine::new(chart)
             .map_err(|errs| errs.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; "))?;
         let ts = now_ms();
@@ -78,6 +95,7 @@ impl Show {
             inner: Mutex::new(Inner { engine, store, generation: 0, entered_at: ts }),
             tx: broadcast::channel(1024).0,
             readiness: Mutex::new(BTreeMap::new()),
+            output: Mutex::new(output.map(Arc::new)),
         });
         show.arm(0);
         Ok(show)
@@ -89,6 +107,7 @@ impl Show {
 
     /// Full picture for a client that just connected.
     pub fn snapshot(&self) -> Value {
+        let out = self.output.lock().unwrap().clone();
         let g = self.inner.lock().unwrap();
         let c = &g.engine.chart;
         json!({
@@ -99,6 +118,10 @@ impl Show {
             "context": g.engine.context,
             "timers": g.engine.pending_timers(),
             "readiness": self.readiness_map(),
+            "devices": out.as_ref().map(|o| json!(o.devices())).unwrap_or(Value::Null),
+            "output": out.as_ref().map(|o| if o.sending() { "live" } else { "dry-run" }),
+            // the server's clock now, so a client can tell how old each readiness report is without trusting its own clock
+            "server_ts": now_ms(),
             // elapsed, not a timestamp: the client counts from its own clock
             "elapsed_ms": (now_ms() - g.entered_at).max(0),
         })
@@ -118,16 +141,20 @@ impl Show {
         }
         let note: String = note.chars().take(200).collect();
         let ts = now_ms();
+        // Saying the same thing again (a department page checking in every few
+        // seconds) refreshes the time but is not news: it is not written to the log.
+        let heartbeat;
         {
             let mut r = self.readiness.lock().unwrap();
             // a stray client cannot grow the list forever
             if !r.contains_key(&dept) && r.len() >= 64 {
                 return Err("too many departments".into());
             }
+            heartbeat = r.get(&dept).is_some_and(|o| o["ready"] == json!(ready) && o["note"] == json!(note) && o["source"] == json!(source));
             r.insert(dept.clone(), json!({"ready": ready, "note": note, "ts": ts, "source": source}));
         }
-        let msg = json!({"type": "readiness", "ts": ts, "dept": dept, "ready": ready, "note": note, "source": source});
-        {
+        let msg = json!({"type": "readiness", "ts": ts, "dept": dept, "ready": ready, "note": note, "source": source, "heartbeat": heartbeat});
+        if !heartbeat {
             let g = self.inner.lock().unwrap();
             let show_id = g.engine.chart.id.clone().unwrap_or_else(|| "show".into());
             let _ = g.store.append(ts, source, Some(&show_id), "show.ready", &msg);
@@ -155,6 +182,7 @@ impl Show {
         let ts = now_ms();
         let mut out = Vec::new();
         let mut armed = None;
+        let mut routed: Vec<Action> = Vec::new();
         let applied;
         {
             let mut g = self.inner.lock().unwrap();
@@ -167,6 +195,7 @@ impl Show {
                                     "from": from, "to": g.engine.current_state, "applied": applied}));
                     for a in res.unwrap_or_default() {
                         out.push(json!({"type": "action", "ts": ts, "event": a.to_event()}));
+                        routed.push(a);
                     }
                     if applied {
                         g.generation += 1;
@@ -181,6 +210,9 @@ impl Show {
             }
         }
         out.into_iter().for_each(|m| self.publish(m));
+        for a in &routed {
+            self.route(ts, a, None, None, None, None);
+        }
         if let Some(generation) = armed {
             self.arm(generation);
         }
@@ -222,23 +254,29 @@ impl Show {
     /// (its entry): one task per timed transition and one per timeline cue. Each
     /// task does nothing if the show has left the state it was armed for.
     fn arm(self: &Arc<Self>, generation: u64) {
+        self.arm_from(generation, 0)
+    }
+
+    /// As `arm`, for a state that has already been running for `elapsed` ms (after a live edit):
+    /// what is already past is not fired late, and the rest keeps its original time.
+    fn arm_from(self: &Arc<Self>, generation: u64, elapsed: u64) {
         let (timers, cues) = {
             let g = self.inner.lock().unwrap();
             (g.engine.pending_timers(), g.engine.pending_cues())
         };
-        for ms in timers {
+        for ms in timers.into_iter().filter(|&ms| elapsed == 0 || ms > elapsed) {
             let show = Arc::clone(self);
             tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(ms)).await;
+                tokio::time::sleep(Duration::from_millis(ms - elapsed)).await;
                 if show.inner.lock().unwrap().generation == generation {
                     show.apply("timer", &timer_event(ms));
                 }
             });
         }
-        for cue in cues {
+        for cue in cues.into_iter().filter(|c| elapsed == 0 || c.at_ms > elapsed) {
             let show = Arc::clone(self);
             tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(cue.at_ms)).await;
+                tokio::time::sleep(Duration::from_millis(cue.at_ms - elapsed)).await;
                 if show.inner.lock().unwrap().generation == generation {
                     show.fire_cue(&cue);
                 }
@@ -246,16 +284,153 @@ impl Show {
         }
     }
 
+    /// Swap in an edited show while the current one runs. With `apply` false it only
+    /// reports what would change. The running scene, its clock and the context are
+    /// kept; timers and cues are re-armed for the new definition from where the scene is now.
+    /// Refused (Err) if the new show is invalid or no longer has the running scene.
+    pub fn replace(self: &Arc<Self>, chart: Showchart, devices: Option<Vec<rig::Device>>, apply: bool) -> Result<Value, (u16, Value)> {
+        let candidate = ShowEngine::new(chart.clone()).map_err(|errs| (422u16, json!({"error": errs.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; ")})))?;
+        drop(candidate);
+        let old_dev: Vec<rig::Device> = self.output.lock().unwrap().as_ref().map(|o| o.devices().to_vec()).unwrap_or_default();
+        let new_dev = devices.clone().unwrap_or_else(|| old_dev.clone());
+        let (d, generation, elapsed) = {
+            let mut g = self.inner.lock().unwrap();
+            let elapsed = (now_ms() - g.entered_at).max(0) as u64;
+            let d = diff::diff(&g.engine.chart, &chart, &old_dev, &new_dev, &g.engine.current_state, elapsed);
+            if !d.blockers.is_empty() {
+                return Err((409, json!({"error": d.blockers.join("; "), "diff": d})));
+            }
+            if !apply {
+                return Ok(json!({"applied": false, "diff": d}));
+            }
+            g.engine.chart = chart;
+            g.generation += 1;
+            let show_id = g.engine.chart.id.clone().unwrap_or_else(|| "show".into());
+            let ts = now_ms();
+            let _ = g.store.append(ts, "studio", Some(&show_id), "show.edit", &json!({"changes": d.changes, "notes": d.notes}));
+            (d, g.generation, elapsed)
+        };
+        if devices.is_some() {
+            let sending = self.output.lock().unwrap().as_ref().is_some_and(|o| o.sending());
+            *self.output.lock().unwrap() = Some(Arc::new(Output::new(new_dev, sending)));
+        }
+        let hello = self.snapshot();
+        self.publish(json!({"type": "show", "ts": now_ms(), "definition": hello["definition"], "devices": hello["devices"], "output": hello["output"], "diff": d}));
+        self.arm_from(generation, elapsed);
+        Ok(json!({"applied": true, "diff": d}))
+    }
+
+    /// Send one harmless message (`/pchi/test`) to a device, so the operator can check the link before doors.
+    /// Reported like any delivery. In a dry run nothing is sent.
+    pub async fn test_fire(self: &Arc<Self>, id: &str) -> Result<Value, String> {
+        let out = self.output.lock().unwrap().clone().ok_or("this show has no rig to test")?;
+        let dev = out.devices().iter().find(|d| d.id == id).cloned().ok_or_else(|| format!("no device '{id}' in the rig"))?;
+        let mut m = json!({"type": "delivery", "ts": now_ms(), "kind": "test", "lane": null, "cue": null,
+                           "device": dev.id, "label": dev.label, "dept": dev.dept, "target": dev.address()});
+        if !out.sending() {
+            m["status"] = json!("dry-run");
+            m["note"] = json!("sending is off: start the runtime with --send");
+        } else {
+            match output::deliver(&dev, &Action::new("test", json!({}))).await {
+                Ok(_) => m["status"] = json!("sent"),
+                Err(e) => {
+                    m["status"] = json!("failed");
+                    m["error"] = json!(e);
+                }
+            }
+        }
+        self.report(m.clone());
+        Ok(m)
+    }
+
+    /// The run so far: every cue's planned and actual time, deliveries that went wrong, and edits made mid-show.
+    pub fn run_report(&self) -> Value {
+        let events = self.events();
+        let of = |t: &str| events.iter().filter(|e| e["type"] == t).map(|e| e["payload"].clone()).collect::<Vec<_>>();
+        let cues = of("show.cue");
+        let deliveries = of("show.delivery");
+        let problems: Vec<&Value> = deliveries.iter().filter(|d| matches!(d["status"].as_str(), Some("failed") | Some("no-device"))).collect();
+        let worst = cues.iter().map(|c| c["drift_ms"].as_i64().unwrap_or(0).abs()).max().unwrap_or(0);
+        json!({
+            "cues": cues,
+            "problems": problems,
+            "edits": of("show.edit"),
+            "summary": {
+                "cues_fired": cues.len(),
+                "deliveries": deliveries.len(),
+                "failed": deliveries.iter().filter(|d| d["status"] == "failed").count(),
+                "no_device": deliveries.iter().filter(|d| d["status"] == "no-device").count(),
+                "worst_drift_ms": worst,
+            },
+        })
+    }
+
     /// Publish (and record) the action of a timeline cue that has come due.
-    fn fire_cue(&self, cue: &ScheduledCue) {
+    fn fire_cue(self: &Arc<Self>, cue: &ScheduledCue) {
         let ts = now_ms();
         let event = cue.action.to_event();
         {
             let g = self.inner.lock().unwrap();
             let show_id = g.engine.chart.id.clone().unwrap_or_else(|| "show".into());
             let _ = g.store.append(ts, &show_id, None, &cue.action.kind, &event);
+            // what the show planned against what happened, for the run report
+            let actual = (ts - g.entered_at).max(0);
+            let rec = json!({"scene": g.engine.current_state, "lane": cue.lane, "cue": cue.cue, "num": cue.num, "kind": cue.action.kind,
+                             "planned_ms": cue.at_ms, "actual_ms": actual, "drift_ms": actual - cue.at_ms as i64});
+            let _ = g.store.append(ts, "runtime", Some(&show_id), "show.cue", &rec);
         }
         self.publish(json!({"type": "action", "ts": ts, "event": event, "lane": cue.lane, "cue": cue.cue}));
+        self.route(ts, &cue.action, Some(&cue.lane), Some(&cue.cue), cue.dept.as_deref(), cue.device.as_deref());
+    }
+
+    /// Send an action to the device that handles it and report what happened as a
+    /// `delivery` message: status "sent", "dry-run", "no-device" or "failed". Never blocks the show.
+    fn route(self: &Arc<Self>, ts: i64, action: &Action, lane: Option<&str>, cue: Option<&str>, dept: Option<&str>, device: Option<&str>) {
+        let Some(out) = self.output.lock().unwrap().clone() else { return };
+        let base = json!({"type": "delivery", "ts": ts, "kind": action.kind, "lane": lane, "cue": cue});
+        fn with(base: &Value, extra: Value) -> Value {
+            let mut m = base.clone();
+            m.as_object_mut().unwrap().extend(extra.as_object().cloned().unwrap_or_default());
+            m
+        }
+        match out.plan(&action.kind, dept, device) {
+            Plan::NotRouted => {}
+            Plan::NoDevice { dept, reason } => self.report(with(&base, json!({"status": "no-device", "dept": dept, "error": reason}))),
+            Plan::To(dev) => {
+                let ident = json!({"device": dev.id, "label": dev.label, "dept": dev.dept, "target": dev.address()});
+                if !out.sending() {
+                    let mut m = ident;
+                    m["status"] = json!("dry-run");
+                    m["note"] = json!("sending is off: start the runtime with --send");
+                    return self.report(with(&base, m));
+                }
+                let show = Arc::clone(self);
+                let action = action.clone();
+                tokio::spawn(async move {
+                    let result = output::deliver(&dev, &action).await;
+                    let mut m = ident;
+                    match result {
+                        Ok(_) => m["status"] = json!("sent"),
+                        Err(e) => {
+                            m["status"] = json!("failed");
+                            m["error"] = json!(e);
+                        }
+                    }
+                    show.report(with(&base, m));
+                });
+            }
+        }
+    }
+
+    /// Record a delivery result in the event log and tell every listener.
+    fn report(&self, msg: Value) {
+        let ts = msg["ts"].as_i64().unwrap_or_else(now_ms);
+        {
+            let g = self.inner.lock().unwrap();
+            let show_id = g.engine.chart.id.clone().unwrap_or_else(|| "show".into());
+            let _ = g.store.append(ts, "runtime", Some(&show_id), "show.delivery", &msg);
+        }
+        self.publish(msg);
     }
 }
 
@@ -284,6 +459,12 @@ pub fn router_with_token(show: Arc<Show>, token: Option<String>) -> Router {
             if !authorized(&a.token, &q, &h) { return (StatusCode::UNAUTHORIZED, Json(json!({"error": "token required"}))); }
             (StatusCode::OK, Json(a.show.readiness_map()))
         }))
+        .route("/report", get(|State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap| async move {
+            if !authorized(&a.token, &q, &h) { return (StatusCode::UNAUTHORIZED, Json(json!({"error": "token required"}))); }
+            (StatusCode::OK, Json(a.show.run_report()))
+        }))
+        .route("/show", post(post_show))
+        .route("/devices/:id/test", post(post_test))
         .route("/ready/:dept", post(post_ready))
         .route("/input", post(post_input))
         .route("/ws", get(ws_upgrade))
@@ -294,6 +475,34 @@ fn authorized(token: &Option<String>, q: &HashMap<String, String>, h: &HeaderMap
     let Some(t) = token else { return true };
     let bearer = h.get("authorization").and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer "));
     q.get("token").map(String::as_str) == Some(t.as_str()) || bearer == Some(t.as_str())
+}
+
+/// `POST /show` (a show file, as Studio saves it) replaces the running show's definition;
+/// `?dry=1` only reports what would change. See `Show::replace`.
+async fn post_show(State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap, body: String) -> impl IntoResponse {
+    if !authorized(&a.token, &q, &h) {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "token required"})));
+    }
+    let (chart, devices) = match rig::load(&body) {
+        Ok(x) => x,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))),
+    };
+    let dry = q.get("dry").is_some_and(|v| v == "1" || v == "true");
+    match a.show.replace(chart, devices, !dry) {
+        Ok(v) => (StatusCode::OK, Json(v)),
+        Err((code, v)) => (StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST), Json(v)),
+    }
+}
+
+/// `POST /devices/<id>/test`: one `/pchi/test` message to that device.
+async fn post_test(State(a): State<App>, Path(id): Path<String>, q: Query<HashMap<String, String>>, h: HeaderMap) -> impl IntoResponse {
+    if !authorized(&a.token, &q, &h) {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "token required"})));
+    }
+    match a.show.test_fire(&id).await {
+        Ok(v) => (StatusCode::OK, Json(v)),
+        Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e}))),
+    }
 }
 
 async fn post_ready(
@@ -379,7 +588,9 @@ fn handle_client(show: &Arc<Show>, text: &str) {
         Some("reset") => show.reset(),
         Some("ready") => {
             if let Some(d) = v["dept"].as_str() {
-                if let Err(e) = show.set_ready(d, v["ready"].as_bool().unwrap_or(true), v["note"].as_str().unwrap_or(""), "ws") {
+                // a client may name itself ("dept-page"); anything odd falls back to plain "ws"
+                let source = v["source"].as_str().filter(|s| !s.is_empty() && s.len() <= 20 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')).unwrap_or("ws");
+                if let Err(e) = show.set_ready(d, v["ready"].as_bool().unwrap_or(true), v["note"].as_str().unwrap_or(""), source) {
                     show.publish(json!({"type": "error", "message": e}));
                 }
             }
@@ -525,6 +736,187 @@ mod tests {
         assert_eq!(actions(&mut rx), [("laser.cue".to_string(), Some("laser".to_string()))]);
     }
 
+    fn device(id: &str, kind: &str, port: u16) -> rig::Device {
+        rig::Device { id: id.into(), label: id.into(), kind: kind.into(), dept: rig::dept_of_type(kind).unwrap().into(), host: Some("127.0.0.1".into()), port: Some(port) }
+    }
+
+    fn deliveries(rx: &mut broadcast::Receiver<Value>) -> Vec<Value> {
+        std::iter::from_fn(|| rx.try_recv().ok()).filter(|m| m["type"] == "delivery").collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cues_are_routed_to_their_devices_as_a_dry_run_and_gaps_are_reported() {
+        // visual and lighting have a device, lasers do not
+        let out = Output::new(vec![device("v1", "notch", 9001), device("d1", "lighting-desk", 9002)], false);
+        let show = Show::start_with(timelines(), EventStore::open_in_memory().unwrap(), Some(out)).unwrap();
+        let mut rx = show.subscribe();
+        show.apply("studio", "START"); // INTRO: visual 0s, lighting 2s, laser 4s
+        tokio::time::sleep(Duration::from_millis(4_001)).await;
+        let d = deliveries(&mut rx);
+        let summary: Vec<_> = d.iter().map(|m| (m["kind"].as_str().unwrap(), m["status"].as_str().unwrap(), m["device"].as_str())).collect();
+        assert_eq!(summary, [("scene.activate", "dry-run", Some("v1")), ("lighting.look", "dry-run", Some("d1")), ("laser.cue", "no-device", None)]);
+        assert_eq!(d[0]["target"], "127.0.0.1:9001");
+        assert!(d[2]["error"].as_str().unwrap().contains("no laser device"));
+        // the run is on the record, so a replay shows what went where
+        assert!(show.events().iter().any(|e| e["type"] == "show.delivery"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_show_without_a_rig_routes_nothing() {
+        let show = Show::start(timelines(), EventStore::open_in_memory().unwrap()).unwrap();
+        let mut rx = show.subscribe();
+        show.apply("studio", "START");
+        tokio::time::sleep(Duration::from_millis(5_000)).await;
+        assert!(deliveries(&mut rx).is_empty());
+        assert_eq!(show.snapshot()["devices"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn with_sending_on_the_cue_really_arrives_and_is_reported_sent() {
+        let rx_sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = rx_sock.local_addr().unwrap().port();
+        let out = Output::new(vec![device("v1", "notch", port), device("d1", "lighting-desk", 1), device("l1", "laser", 1)], true);
+        let show = Show::start_with(timelines(), EventStore::open_in_memory().unwrap(), Some(out)).unwrap();
+        assert_eq!(show.snapshot()["output"], "live");
+        let mut rx = show.subscribe();
+        show.apply("studio", "START"); // visual cue at 0s
+        let mut buf = [0u8; 512];
+        let (n, _) = tokio::time::timeout(Duration::from_secs(3), rx_sock.recv_from(&mut buf)).await.expect("packet").unwrap();
+        let (_, pkt) = rosc::decoder::decode_udp(&buf[..n]).unwrap();
+        let rosc::OscPacket::Message(m) = pkt else { panic!() };
+        assert_eq!(m.addr, "/pchi/scene/activate");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let d = deliveries(&mut rx);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0]["status"], "sent");
+        assert_eq!(d[0]["device"], "v1");
+    }
+
+    #[tokio::test]
+    async fn a_device_that_cannot_be_reached_is_reported_failed_and_the_show_goes_on() {
+        let mut bad = device("v1", "notch", 9);
+        bad.host = Some("no-such-host.invalid".into());
+        let show = Show::start_with(timelines(), EventStore::open_in_memory().unwrap(), Some(Output::new(vec![bad], true))).unwrap();
+        let mut rx = show.subscribe();
+        assert!(show.apply("studio", "START"));
+        tokio::time::sleep(Duration::from_millis(1_800)).await;
+        let d = deliveries(&mut rx);
+        assert_eq!(d[0]["status"], "failed");
+        assert!(d[0]["error"].as_str().unwrap().contains("no-such-host.invalid"));
+        assert_eq!(show.snapshot()["state"], "INTRO", "a failed send never stops the show");
+    }
+
+    fn move_cue(c: &mut Showchart, scene: &str, lane: &str, to_ms: u64) {
+        let l = c.states.iter_mut().find(|s| s.id == scene).unwrap().timeline.as_mut().unwrap().lanes.iter_mut().find(|l| l.id == lane).unwrap();
+        l.cues[0].at_ms = to_ms;
+    }
+
+    /// INTRO with its three cues pulled in to 0 / 0.4 / 0.8 s, so real-clock tests stay short.
+    /// (Elapsed time comes from the wall clock, which a paused test clock does not move.)
+    fn quick() -> Showchart {
+        let mut c = timelines();
+        move_cue(&mut c, "INTRO", "visual", 0);
+        move_cue(&mut c, "INTRO", "lighting", 400);
+        move_cue(&mut c, "INTRO", "laser", 800);
+        c
+    }
+
+    #[tokio::test]
+    async fn a_live_edit_keeps_the_running_scene_and_re_arms_its_cues() {
+        let show = Show::start(quick(), EventStore::open_in_memory().unwrap()).unwrap();
+        let mut rx = show.subscribe();
+        show.apply("studio", "START"); // INTRO: visual 0, lighting 0.4 s, laser 0.8 s
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let _ = actions(&mut rx);
+
+        // a preview changes nothing
+        let mut edited = quick();
+        move_cue(&mut edited, "INTRO", "lighting", 600);
+        let dry = show.replace(edited.clone(), None, false).unwrap();
+        assert_eq!(dry["applied"], false);
+        assert!(dry["diff"]["changes"][0].as_str().unwrap().contains("moved 0.4s → 0.6s"), "{dry}");
+
+        // applying it: lighting now fires at 0.6 s (not 0.4 s), the laser still at 0.8 s, and the scene is unchanged
+        let done = show.replace(edited, None, true).unwrap();
+        assert_eq!(done["applied"], true);
+        assert_eq!(show.snapshot()["state"], "INTRO");
+        tokio::time::sleep(Duration::from_millis(350)).await; // ~0.5 s into the scene
+        assert!(actions(&mut rx).is_empty(), "the old 0.4 s lighting cue must not fire");
+        tokio::time::sleep(Duration::from_millis(250)).await; // ~0.75 s
+        assert_eq!(actions(&mut rx), [("lighting.look".to_string(), Some("lighting".to_string()))]);
+        tokio::time::sleep(Duration::from_millis(250)).await; // ~1.0 s
+        assert_eq!(actions(&mut rx), [("laser.cue".to_string(), Some("laser".to_string()))]);
+
+        // the edit is on the record
+        assert_eq!(show.run_report()["edits"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_cue_edited_to_a_time_already_past_does_not_fire_late() {
+        let show = Show::start(quick(), EventStore::open_in_memory().unwrap()).unwrap();
+        let mut rx = show.subscribe();
+        show.apply("studio", "START");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let _ = actions(&mut rx);
+        let mut edited = quick();
+        move_cue(&mut edited, "INTRO", "laser", 100); // moved to before "now"
+        let r = show.replace(edited, None, true).unwrap();
+        assert!(r["diff"]["notes"][0].as_str().unwrap().contains("will not fire this time"), "{r}");
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        let kinds: Vec<_> = actions(&mut rx).into_iter().map(|a| a.0).collect();
+        assert_eq!(kinds, ["lighting.look"], "the laser cue is skipped, the lighting cue still fires");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_live_edit_that_removes_the_running_scene_is_refused() {
+        let show = Show::start(timelines(), EventStore::open_in_memory().unwrap()).unwrap();
+        show.apply("studio", "START");
+        let mut gone = timelines();
+        gone.states.retain(|s| s.id != "INTRO");
+        gone.transitions.retain(|t| t.source != "INTRO" && t.target != "INTRO");
+        gone.initial = gone.states[0].id.clone();
+        let err = show.replace(gone, None, true).unwrap_err();
+        assert_eq!(err.0, 409);
+        assert!(err.1["error"].as_str().unwrap().contains("running scene INTRO"));
+        assert_eq!(show.snapshot()["state"], "INTRO", "the show is untouched");
+    }
+
+    #[tokio::test]
+    async fn the_report_gives_planned_and_actual_cue_times() {
+        let out = Output::new(vec![device("v1", "notch", 9001)], false);
+        let show = Show::start_with(quick(), EventStore::open_in_memory().unwrap(), Some(out)).unwrap();
+        show.apply("studio", "START");
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        let r = show.run_report();
+        let cues = r["cues"].as_array().unwrap();
+        assert_eq!(cues.len(), 3);
+        assert_eq!(cues[1]["planned_ms"], 400);
+        assert!(cues[1]["drift_ms"].as_i64().unwrap().abs() < 100, "{}", cues[1]);
+        assert_eq!(r["summary"]["cues_fired"], 3);
+        assert_eq!(r["summary"]["no_device"], 2, "lighting and laser have no device in this rig");
+        assert_eq!(r["problems"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_fire_reaches_a_device_or_reports_why_not() {
+        let rx_sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = rx_sock.local_addr().unwrap().port();
+        // dry run: reported, nothing sent
+        let dry = Show::start_with(quick(), EventStore::open_in_memory().unwrap(), Some(Output::new(vec![device("l1", "laser", port)], false))).unwrap();
+        assert_eq!(dry.test_fire("l1").await.unwrap()["status"], "dry-run");
+        assert!(tokio::time::timeout(Duration::from_millis(200), rx_sock.recv_from(&mut [0u8; 64])).await.is_err(), "nothing may leave in a dry run");
+        // live: the packet arrives
+        let live = Show::start_with(quick(), EventStore::open_in_memory().unwrap(), Some(Output::new(vec![device("l1", "laser", port)], true))).unwrap();
+        let r = live.test_fire("l1").await.unwrap();
+        assert_eq!(r["status"], "sent");
+        let mut buf = [0u8; 64];
+        let (n, _) = tokio::time::timeout(Duration::from_secs(2), rx_sock.recv_from(&mut buf)).await.unwrap().unwrap();
+        let rosc::OscPacket::Message(m) = rosc::decoder::decode_udp(&buf[..n]).unwrap().1 else { panic!() };
+        assert_eq!(m.addr, "/pchi/test");
+        assert!(live.test_fire("nope").await.unwrap_err().contains("no device"));
+        assert!(Show::start(quick(), EventStore::open_in_memory().unwrap()).unwrap().test_fire("l1").await.unwrap_err().contains("no rig"));
+    }
+
     #[tokio::test(start_paused = true)]
     async fn leaving_a_state_cancels_its_unfired_cues() {
         let show = Show::start(timelines(), EventStore::open_in_memory().unwrap()).unwrap();
@@ -623,6 +1015,20 @@ mod tests {
         let (_, all) = http(addr, "GET", "/ready", "", "").await;
         assert_eq!(all["laser"]["ready"], false);
         assert!(show.events().iter().any(|e| e["type"] == "show.ready"), "readiness is in the event log");
+    }
+
+    #[tokio::test]
+    async fn repeating_the_same_readiness_is_a_heartbeat_and_stays_out_of_the_log() {
+        let (show, _addr) = serve(None).await;
+        let mut rx = show.subscribe();
+        show.set_ready("lighting", true, "standing by", "dept-page").unwrap();
+        show.set_ready("lighting", true, "standing by", "dept-page").unwrap();
+        show.set_ready("lighting", false, "standing by", "dept-page").unwrap(); // a real change
+        let m: Vec<Value> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert_eq!(m.iter().map(|x| x["heartbeat"].as_bool().unwrap()).collect::<Vec<_>>(), [false, true, false]);
+        let logged = show.events().iter().filter(|e| e["type"] == "show.ready").count();
+        assert_eq!(logged, 2, "the heartbeat is not recorded");
+        assert!(show.snapshot()["server_ts"].as_i64().unwrap() > 0);
     }
 
     #[tokio::test]
