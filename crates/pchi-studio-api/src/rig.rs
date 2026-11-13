@@ -15,6 +15,8 @@ pub struct Device {
     pub dept: String,
     pub host: Option<String>,
     pub port: Option<u16>,
+    /// Port to listen on for what the device sends back (set to match the tool's OSC output port).
+    pub listen_port: Option<u16>,
 }
 
 impl Device {
@@ -79,8 +81,9 @@ fn device_of(n: &Value) -> Option<Device> {
     let params = n.get("params");
     let host = params.and_then(|p| p.get("host")).and_then(Value::as_str).map(str::to_string);
     let port = params.and_then(|p| p.get("port")).and_then(|p| p.as_u64().or_else(|| p.as_str().and_then(|s| s.trim().parse().ok()))).and_then(|p| u16::try_from(p).ok());
+    let listen_port = params.and_then(|p| p.get("listen_port")).and_then(|p| p.as_u64().or_else(|| p.as_str().and_then(|s| s.trim().parse().ok()))).and_then(|p| u16::try_from(p).ok()).filter(|p| *p > 0);
     let id = n.get("id")?.as_str()?.to_string();
-    Some(Device { label: n.get("label").and_then(Value::as_str).unwrap_or(&id).to_string(), id, kind, dept, host, port })
+    Some(Device { label: n.get("label").and_then(Value::as_str).unwrap_or(&id).to_string(), id, kind, dept, host, port, listen_port })
 }
 
 /// The device that handles a cue: the lane's chosen one, else the only device of
@@ -102,7 +105,7 @@ mod tests {
     use super::*;
 
     fn dev(id: &str, kind: &str) -> Device {
-        Device { id: id.into(), label: id.into(), kind: kind.into(), dept: dept_of_type(kind).unwrap().into(), host: Some("127.0.0.1".into()), port: Some(9000) }
+        Device { id: id.into(), label: id.into(), kind: kind.into(), dept: dept_of_type(kind).unwrap().into(), host: Some("127.0.0.1".into()), port: Some(9000), listen_port: None }
     }
 
     #[test]
@@ -154,6 +157,7 @@ mod tests {
         assert_eq!(rig[0].address().as_deref(), Some("10.0.0.5:8000"));
         assert_eq!(rig[1].dept, "lighting");
         assert_eq!(rig[1].port, Some(7700));
+        assert_eq!(rig[0].listen_port, None);
         assert!(load("{").is_err());
     }
 }

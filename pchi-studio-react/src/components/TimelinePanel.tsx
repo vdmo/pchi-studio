@@ -14,6 +14,7 @@ import {
   devicesFor,
   setLaneDevice,
   type PchiNode,
+  type RigState,
   scheduledCues,
   standardLanes,
   timelineEnd,
@@ -55,6 +56,9 @@ interface Props {
   onScene: (id: string | null) => void
   /** Devices in the rig, for choosing which one handles a lane. */
   nodes: PchiNode[]
+  /** The whole rig, and a way to change it, so a sentence like "add qlab" works here too. */
+  rig?: RigState
+  onRig?: (rig: RigState) => void
 }
 
 interface Drag {
@@ -72,7 +76,7 @@ const cueText = (c: ShowCue) => {
   return `${c.action.kind}${first !== undefined && first !== '' ? ` · ${String(first)}` : ''}`
 }
 
-export default function TimelinePanel({ chart, history, note, scene, onScene, nodes }: Props) {
+export default function TimelinePanel({ chart, history, note, scene, onScene, nodes, rig, onRig }: Props) {
   const { commit } = history
   const stateId = chart.states.some((s) => s.id === scene) ? scene! : chart.initial || chart.states[0]?.id || ''
   const setStateId = (id: string) => onScene(id)
@@ -333,6 +337,8 @@ export default function TimelinePanel({ chart, history, note, scene, onScene, no
           <CommandBar
             chart={chart}
             onApply={commit}
+            rig={rig}
+            onRig={onRig}
             onUndo={history.undo}
             onRedo={history.redo}
             canUndo={history.canUndo}
@@ -487,13 +493,15 @@ export default function TimelinePanel({ chart, history, note, scene, onScene, no
                       {(() => {
                         const cands = devicesFor(nodes, lane.dept)
                         const gone = lane.device && !nodes.some((n) => n.id === lane.device)
-                        const auto = cands.length === 1 ? cands[0].label : cands.length === 0 ? '⚠ none' : 'pick…'
+                        const needsDevice = !!lane.dept && lane.dept !== 'other'
+                        // amber means "this lane has cues but nothing is sure to receive them"; an empty lane or an "Other" lane never warns
+                        const auto = !needsDevice ? '—' : cands.length === 1 ? cands[0].label : cands.length === 0 ? (lane.cues.length > 0 ? '⚠ none' : 'none') : 'pick…'
                         return (
                           <select
                             className={`tl-dev ${gone || (!lane.device && cands.length !== 1 && lane.cues.length > 0 && lane.dept && lane.dept !== 'other') ? 'warn' : ''}`}
                             value={lane.device ?? ''}
                             aria-label="Rig device"
-                            title={cands.length === 0 ? `No ${lane.dept ?? ''} device in the Rig tab` : 'The rig device that handles this lane'}
+                            title={!needsDevice ? 'No device needed for this lane' : cands.length === 0 ? `No ${lane.dept} device in the Rig tab: add one there, or ignore this (the show still plays, nothing is sent)` : cands.length > 1 && !lane.device ? `${cands.length} ${lane.dept} devices in the rig: pick the one that should receive this lane's cues` : 'The rig device that handles this lane'}
                             onChange={(e) => commit(setLaneDevice(chart, stateId, lane.id, e.target.value || undefined))}
                           >
                             <option value="">{auto}</option>

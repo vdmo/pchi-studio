@@ -76,6 +76,27 @@ A value the tool cannot use is reported as a failed delivery with the reason; it
 Try each profile against the real tool (or its software/offline version) before a show relies on it.
 The five dialects live in `crates/pchi-studio-api/src/profiles.rs`, each with tests that decode the exact bytes.
 
+### Feedback from the tools (link status)
+
+"Sent" only means a packet left this machine. When the runtime is really sending (`--send`), it also **listens**:
+
+- Each device keeps one UDP socket open. A tool that answers "to whoever asked" (the X32 does) answers on it,
+  and a tool that pushes feedback to a port you set in it (Eos, QLab) reaches the device's **listen port**
+  (set `listen_port` in the Rig tab; Eos defaults to 8001 and QLab to 53001, the ports their documentation
+  names: set them to match the tool's own OSC output settings). Only datagrams from the device's own address are
+  accepted, and at most 20 messages a second per device are shown (the rest are counted, not shown).
+- **Probe:** only where a vendor reply is known, the runtime asks every 5 s. Today that is the X32 (`/info`). For
+  other tools there is no verified "are you there" message, so they show feedback only if they send some.
+- **Link states** on the Live board: **● linked** (answered a probe recently), **○ no reply** (answered before, silent
+  for 15 s), **heard** (a tool we only listen to sent something), **waiting to hear** (expected to talk, has not yet),
+  or nothing (this tool gives no feedback). The Live tab's "Heard from devices" list shows the last messages
+  (address and values), which is also the quickest way to check a profile against a real tool.
+- If a device the **next scene needs** has stopped answering, GO warns (a second press goes anyway), as for a
+  department on hold. It never blocks the show.
+- **Link is not READY.** A mixer that answers a ping is on the network; whether audio is ready for the show is
+  still the department's word. They are shown separately on purpose.
+- A device that cannot listen on its port (already in use) is reported once as an error.
+
 ### Laser safety
 
 - **Lasers start disarmed on every runtime start.** A laser device gets no cues, and no test-fire, until the

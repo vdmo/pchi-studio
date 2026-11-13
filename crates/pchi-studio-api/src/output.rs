@@ -17,11 +17,12 @@
 
 use crate::rig::{dept_of_kind, resolve, Device};
 use pchi_showchart::Action;
+use crate::links::Links;
 use crate::profiles;
 use rosc::{encoder, OscMessage, OscPacket, OscType};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::BTreeSet;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::{lookup_host, UdpSocket};
 
@@ -33,6 +34,11 @@ pub struct Output {
     /// Laser devices the operator has armed. A laser gets nothing from the show until it is armed,
     /// and every runtime start begins disarmed.
     armed: Mutex<BTreeSet<String>>,
+    /// Open sockets to the devices, shared across live edits so listening never stops.
+    links: Arc<Links>,
+    /// How often a device that can be probed is asked to answer, and how long silence counts as lost.
+    pub probe_every: Duration,
+    pub link_timeout: Duration,
 }
 
 /// What routing decided for one action.
@@ -47,13 +53,50 @@ pub enum Plan {
 
 impl Output {
     pub fn new(devices: Vec<Device>, send: bool) -> Self {
-        Self { devices, send, armed: Mutex::new(BTreeSet::new()) }
+        Self { devices, send, armed: Mutex::new(BTreeSet::new()), links: Arc::new(Links::default()), probe_every: Duration::from_secs(5), link_timeout: Duration::from_secs(15) }
+    }
+
+    /// Change how often devices are probed and when silence counts as lost (the defaults are 5 s and 15 s).
+    pub fn with_timing(mut self, probe_every: Duration, link_timeout: Duration) -> Self {
+        self.probe_every = probe_every;
+        self.link_timeout = link_timeout;
+        self
+    }
+
+    pub fn links(&self) -> &Arc<Links> {
+        &self.links
+    }
+
+    /// Whether this device is expected to answer: it can be probed, or has a listen port.
+    pub fn expects_feedback(dev: &Device) -> bool {
+        profiles::probe(&dev.kind).is_some() || dev.listen_port.is_some()
+    }
+
+    /// The device's link: "linked" (answered a probe recently), "lost" (answered before, now silent),
+    /// "heard" (a tool we only listen to has sent something), "silent" (expected to talk, has not yet)
+    /// or "none" (this tool gives no feedback). Absent when the runtime is not sending.
+    pub fn link_state(&self, dev: &Device) -> Option<Value> {
+        if !self.send {
+            return None;
+        }
+        let heard = self.links.last_heard(&dev.id);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
+        let age = (heard > 0).then(|| (now - heard).max(0));
+        let probed = profiles::probe(&dev.kind).is_some();
+        let state = match (probed, dev.listen_port.is_some(), age) {
+            (true, _, Some(a)) if a <= self.link_timeout.as_millis() as i64 => "linked",
+            (true, _, Some(_)) => "lost",
+            (false, _, Some(_)) => "heard",
+            (_, true, None) | (true, _, None) => "silent",
+            (false, false, None) => "none",
+        };
+        Some(json!({"state": state, "heard_ms_ago": age, "probed": probed}))
     }
 
     /// The same output with a new device list (after a live edit), keeping the armed state of lasers that are still there.
     pub fn with_devices(&self, devices: Vec<Device>) -> Self {
         let keep: BTreeSet<String> = self.armed.lock().unwrap().iter().filter(|id| devices.iter().any(|d| &d.id == *id && d.dept == "laser")).cloned().collect();
-        Self { devices, send: self.send, armed: Mutex::new(keep) }
+        Self { devices, send: self.send, armed: Mutex::new(keep), links: Arc::clone(&self.links), probe_every: self.probe_every, link_timeout: self.link_timeout }
     }
 
     pub fn is_armed(&self, id: &str) -> bool {
@@ -121,11 +164,34 @@ pub fn encode(action: &Action) -> Result<Vec<u8>, String> {
 /// Send one action to a device. Returns the `host:port` it went to. A device of a profiled type
 /// (see the `profiles` module) gets that tool's own messages; anything else gets the generic ones.
 pub async fn deliver(dev: &Device, action: &Action) -> Result<String, String> {
-    let packets = match (action.kind.as_str(), profiles::encode(&dev.kind, action)) {
+    send_packets(dev, packets_for(dev, action)?).await
+}
+
+impl Output {
+    /// Send an action to a device through its kept socket, so the device can answer on it.
+    pub async fn deliver(&self, dev: &Device, action: &Action) -> Result<String, String> {
+        self.send_packets(dev, packets_for(dev, action)?).await
+    }
+
+    /// Send ready-made OSC packets to a device through its kept socket.
+    pub async fn send_packets(&self, dev: &Device, packets: Vec<Vec<u8>>) -> Result<String, String> {
+        let addr = dev.address().ok_or_else(|| format!("{} has no host and port in the rig", dev.label))?;
+        let go = async {
+            let link = self.links.get(dev).await?;
+            for bytes in &packets {
+                link.socket.send_to(bytes, link.target).await.map_err(|e| format!("send to {addr} failed: {e}"))?;
+            }
+            Ok::<_, String>(addr.clone())
+        };
+        tokio::time::timeout(SEND_TIMEOUT, go).await.map_err(|_| format!("sending to {addr} timed out"))?
+    }
+}
+
+fn packets_for(dev: &Device, action: &Action) -> Result<Vec<Vec<u8>>, String> {
+    Ok(match (action.kind.as_str(), profiles::encode(&dev.kind, action)) {
         ("test", _) | (_, None) => vec![encode(action)?],
         (_, Some(r)) => r?,
-    };
-    send_packets(dev, packets).await
+    })
 }
 
 /// Send ready-made OSC packets to a device.
@@ -150,7 +216,7 @@ mod tests {
     use serde_json::json;
 
     fn dev(id: &str, kind: &str, port: u16) -> Device {
-        Device { id: id.into(), label: id.into(), kind: kind.into(), dept: dept_of_type(kind).unwrap().into(), host: Some("127.0.0.1".into()), port: Some(port) }
+        Device { id: id.into(), label: id.into(), kind: kind.into(), dept: dept_of_type(kind).unwrap().into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None }
     }
 
     #[test]

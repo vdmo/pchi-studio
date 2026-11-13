@@ -205,6 +205,16 @@ fn beyond(a: &Action) -> Result<Vec<Vec<u8>>, String> {
     }
 }
 
+/// A harmless message that makes this kind of tool answer, so the runtime can tell it is listening.
+/// Only where the vendor's own material shows a reply: the X32 answers `/info`. Others return `None`:
+/// for those the link shows only what the tool sends on its own (see `links`).
+pub fn probe(device_type: &str) -> Option<Vec<u8>> {
+    match device_type {
+        "x32" => pack("/info", vec![]).ok(),
+        _ => None,
+    }
+}
+
 /// What a hard stop sends to a device of this type, so the output actually goes dark.
 /// Empty when no safe message is known (the tool's own stop must be used).
 pub fn stop_messages(device_type: &str) -> Vec<Vec<u8>> {

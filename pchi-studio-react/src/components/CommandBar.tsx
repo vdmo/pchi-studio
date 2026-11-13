@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { COMMAND_EXAMPLES, runCommandText, type LiveAction, type LiveResult, type Showchart } from '@pchi/sdk'
+import { COMMAND_EXAMPLES, QUICK_SYSTEMS, runStudioCommand, type LiveAction, type LiveResult, type RigState, type Showchart } from '@pchi/sdk'
 
 /** What a confirmed command will do: shown in the voice preview, then applied. */
 interface Exec {
@@ -18,6 +18,9 @@ interface Props {
   onRedo?: () => boolean
   canUndo?: boolean
   canRedo?: boolean
+  /** The rig, so systems can be added and changed by sentence too ("add qlab"). */
+  rig?: RigState
+  onRig?: (rig: RigState) => void
   /** The state the user is looking at: timeline commands without "in <state>" apply to it. */
   stateContext?: string
   placeholder?: string
@@ -50,14 +53,14 @@ const VOICE_ERRORS: Record<string, string> = {
   network: 'The browser’s speech service could not be reached. Type the command instead.',
 }
 
-type Message = { kind: 'ok' | 'error' | 'info'; text: string; hint?: string; lines?: string[] }
+type Message = { kind: 'ok' | 'error' | 'info'; text: string; hint?: string; lines?: string[]; next?: string }
 
 /**
  * Arrange the show by typing or speaking. Both go through runCommandText():
  * typed commands apply at once (and can be undone); spoken ones are shown as a
  * preview first, because a misheard command is the main risk with voice.
  */
-export default function CommandBar({ chart, onApply, live, onUndo, onRedo, canUndo, canRedo, stateContext, placeholder }: Props) {
+export default function CommandBar({ chart, onApply, live, onUndo, onRedo, canUndo, canRedo, rig, onRig, stateContext, placeholder }: Props) {
   const [text, setText] = useState('')
   const [msg, setMsg] = useState<Message | null>(null)
   const [plan, setPlan] = useState<{ exec: Exec; heard: string } | null>(null)
@@ -65,12 +68,16 @@ export default function CommandBar({ chart, onApply, live, onUndo, onRedo, canUn
   const [askPrivacy, setAskPrivacy] = useState(false)
   const [voiceOk, setVoiceOk] = useState(false) // privacy notice accepted this session
   const [showExamples, setShowExamples] = useState(false)
+  const [quick, setQuick] = useState(false) // the quick-add menu
+  const [sceneName, setSceneName] = useState('')
   const rec = useRef<Recognition>()
   const inputRef = useRef<HTMLInputElement>(null)
   const chartRef = useRef(chart)
   chartRef.current = chart
   const liveRef = useRef(live)
   liveRef.current = live
+  const rigRef = useRef(rig)
+  rigRef.current = rig
   const stateRef = useRef(stateContext)
   stateRef.current = stateContext
 
@@ -91,11 +98,11 @@ export default function CommandBar({ chart, onApply, live, onUndo, onRedo, canUn
 
   // The undo history lives in the editor (it also covers dragging, deleting and
   // field edits), so a command is just one more change handed to onApply.
-  const commit = (x: Exec, label: string) => {
+  const commit = (x: Exec, label: string, next?: string) => {
     x.apply()
     setPlan(null)
     setText('')
-    setMsg({ kind: 'ok', text: label, lines: [...x.summaries, ...x.notes.map((n) => `assumed ${n}`)] })
+    setMsg({ kind: 'ok', text: label, lines: [...x.summaries, ...x.notes.map((n) => (n.startsWith(':') ? n.slice(2) : `assumed ${n}`))], next })
   }
 
   const undo = () => setMsg(onUndo?.() ? { kind: 'ok', text: 'Undone.' } : { kind: 'info', text: 'Nothing to undo.' })
@@ -114,9 +121,9 @@ export default function CommandBar({ chart, onApply, live, onUndo, onRedo, canUn
       }
       return commit(exec, 'Sent.')
     }
-    const r = runCommandText(input, chartRef.current!, { state: stateRef.current })
+    const r = runStudioCommand(input, chartRef.current!, rigRef.current ?? { nodes: [], edges: [] }, { state: stateRef.current })
     if (!r.ok) return setMsg({ kind: 'error', text: r.error, hint: r.hint })
-    const only = r.steps.length === 1 ? r.steps[0].command.op : null
+    const only = r.steps.length === 1 ? r.steps[0].op : null
     if (only === 'undo' || only === 'redo' || only === 'help') setText('')
     if (only === 'undo') return undo()
     if (only === 'redo') return redo()
@@ -124,10 +131,16 @@ export default function CommandBar({ chart, onApply, live, onUndo, onRedo, canUn
       setShowExamples(true)
       return setMsg({ kind: 'info', text: 'Here are some things you can say or type:' })
     }
+    // a sentence may change the show, the rig, or both: only hand over what actually changed
+    const apply = () => {
+      if (r.chart !== chartRef.current) onApply?.(r.chart)
+      if (r.rigChanged) onRig?.(r.rig)
+    }
+    const notes = r.rigChanged ? [...r.notes, ': systems are not part of undo: say "remove <name>" to take one out'] : r.notes
     if (fromVoice) {
       setMsg(null)
-      setPlan({ exec: { summaries: r.steps.map((s) => s.summary), notes: r.notes, apply: () => onApply?.(r.chart) }, heard: input })
-    } else commit({ summaries: r.steps.map((s) => s.summary), notes: r.notes, apply: () => onApply?.(r.chart) }, 'Done.')
+      setPlan({ exec: { summaries: r.steps.map((s) => s.summary), notes, apply }, heard: input })
+    } else commit({ summaries: r.steps.map((s) => s.summary), notes, apply }, 'Done.', r.next)
   }
 
   const startVoice = () => {
@@ -195,8 +208,41 @@ export default function CommandBar({ chart, onApply, live, onUndo, onRedo, canUn
             <button type="button" onClick={redo} disabled={!canRedo} title="Redo (Ctrl+Shift+Z)">↷</button>
           </>
         )}
+        {!live && (
+          <button type="button" className={quick ? 'on' : ''} onClick={() => setQuick((q) => !q)} aria-expanded={quick} title="Quick add: a scene or a system (QLab, X32, Resolume, grandMA3 ...)">＋ Add</button>
+        )}
         <button type="button" onClick={() => setShowExamples((s) => !s)} aria-expanded={showExamples} title="Examples">?</button>
       </form>
+
+      {quick && !live && (
+        <div className="cmdnote quickadd" role="group" aria-label="Quick add">
+          <h5>Scene</h5>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault()
+              if (!sceneName.trim()) return
+              run(`add scene ${sceneName.trim()}`, false)
+              setSceneName('')
+            }}
+          >
+            <input value={sceneName} onChange={(e) => setSceneName(e.target.value)} placeholder="name, e.g. drop" aria-label="New scene name" spellCheck={false} />
+            <button type="submit" disabled={!sceneName.trim()}>＋ Scene</button>
+          </form>
+          {rig && onRig && (
+            <>
+              <h5>System (a tool or device the show talks to)</h5>
+              <div className="chips">
+                {QUICK_SYSTEMS.map((s) => (
+                  <button key={s.type} type="button" className="chip" onClick={() => run(s.command, false)} title={`Same as typing "${s.command}"`}>
+                    ＋ {s.label}
+                  </button>
+                ))}
+              </div>
+              <p className="muted">Or type it: "add x32 called FOH desk at 192.168.1.20". Set a host later with "set qlab host to 192.168.1.50".</p>
+            </>
+          )}
+        </div>
+      )}
 
       {askPrivacy && (
         <div className="cmdnote" role="alertdialog" aria-label="Voice input privacy">
@@ -245,7 +291,32 @@ export default function CommandBar({ chart, onApply, live, onUndo, onRedo, canUn
                 ))}
               </ul>
             )}
-            {msg.hint && <div className="muted">{msg.hint}</div>}
+            {msg.hint && (() => {
+              const dym = msg.hint.match(/^Did you mean:\s*(.+?)(?:\s+·|$)/)
+              return (
+                <div className="muted">
+                  {dym ? (
+                    <>
+                      Did you mean{' '}
+                      <button type="button" className="suggest" onClick={() => { setText(dym[1]); inputRef.current?.focus() }} title="Put this in the box">
+                        {dym[1]}
+                      </button>
+                      ? <span>{msg.hint.slice(msg.hint.indexOf('·'))}</span>
+                    </>
+                  ) : (
+                    msg.hint
+                  )}
+                </div>
+              )
+            })()}
+            {msg.next && (
+              <div className="muted">
+                Next, try{' '}
+                <button type="button" className="suggest" onClick={() => { setText(msg.next!); inputRef.current?.focus() }} title="Put this in the box">
+                  {msg.next}
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>

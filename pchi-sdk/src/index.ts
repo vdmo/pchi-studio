@@ -105,10 +105,10 @@ export const NODE_CATALOG: NodeSpec[] = [
   // Ports are the tools' usual ones or placeholders: set them to match the tool's own OSC settings.
   spec('venue', 'resolume', 'Resolume Arena', { host: '127.0.0.1', port: 7000 }),
   spec('venue', 'grandma3', 'grandMA3', { host: '127.0.0.1', port: 8000 }),
-  spec('venue', 'eos', 'ETC Eos', { host: '127.0.0.1', port: 8000 }),
+  spec('venue', 'eos', 'ETC Eos', { host: '127.0.0.1', port: 8000, listen_port: 8001 }),
   spec('venue', 'x32', 'Behringer X32 / M32', { host: '127.0.0.1', port: 10023 }),
   spec('venue', 'beyond', 'Pangolin BEYOND', { host: '127.0.0.1', port: 12000 }),
-  spec('venue', 'qlab', 'QLab', { host: '127.0.0.1', port: 53000 }),
+  spec('venue', 'qlab', 'QLab', { host: '127.0.0.1', port: 53000, listen_port: 53001 }),
   spec('venue', 'magicq', 'ChamSys MagicQ', { host: '127.0.0.1', port: 8000 }),
   spec('intelligence', 'director-agent', 'Director Agent', {}),
   spec('intelligence', 'vision-agent', 'Vision Agent', {}),
@@ -591,6 +591,8 @@ export * from './cuesheet'
 export * from './capture'
 export * from './rig'
 export * from './brief'
+export * from './suggest'
+export * from './systems'
 
 // ───────────────────────── Timelines (mirrors crates/pchi-showchart/src/timeline.rs) ─────────────────────────
 

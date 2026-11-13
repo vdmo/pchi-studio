@@ -10,6 +10,7 @@
 // Importing values from './index' is circular (index re-exports this file);
 // that is safe because nothing here runs at import time.
 
+import { hintFor } from './suggest'
 import {
   DEPTS,
   guardError,
@@ -27,6 +28,7 @@ export type ShowCommand =
   | { op: 'clearShow' }
   | { op: 'addState'; id: string; label?: string; ifMissing?: boolean }
   | { op: 'removeState'; id: string }
+  | { op: 'duplicateState'; id: string; to?: string }
   | { op: 'renameState'; from: string; to: string }
   | { op: 'labelState'; id: string; label: string }
   | { op: 'setInitial'; id: string }
@@ -65,7 +67,10 @@ export type CommandResult =
 /** Phrases the parser understands; the Studio shows these as examples. */
 export const COMMAND_EXAMPLES = [
   'chain preshow, intro, drop, breakdown, finale',
-  'add state drop',
+  'add scene drop',
+  'intro then drop then finale',
+  'delete scene drop',
+  'duplicate scene drop',
   'from intro to drop on go',
   'from drop to breakdown after 30 seconds',
   'from intro to drop on go if energy > 0.7',
@@ -218,6 +223,23 @@ export function applyCommand(chart: Showchart, cmd: ShowCommand): { chart: Showc
       return { chart: c, summary: `Remove state ${cmd.id}${gone ? ` and ${gone} transition${gone > 1 ? 's' : ''}` : ''}` }
     }
 
+    case 'duplicateState': {
+      const src = need(cmd.id)
+      let id = cmd.to
+      if (id) {
+        if (c.states.some((x) => x.id === id)) throw new CommandError(`State ${id} already exists.`)
+      } else {
+        id = `${cmd.id}_2`
+        for (let n = 3; c.states.some((x) => x.id === id); n++) id = `${cmd.id}_${n}`
+      }
+      // a copy of what happens in the scene; its cues get new numbers, and it has no transitions of its own yet
+      const copy: ShowState = JSON.parse(JSON.stringify(src))
+      copy.id = id
+      copy.timeline?.lanes.forEach((l) => l.cues.forEach((q) => delete q.num))
+      c.states = [...c.states, copy]
+      return { chart: c, summary: `Duplicate ${cmd.id} as ${id}` }
+    }
+
     case 'renameState': {
       need(cmd.from)
       if (c.states.some((s) => s.id === cmd.to)) throw new CommandError(`State ${cmd.to} already exists.`)
@@ -340,6 +362,14 @@ function parseAction(phrase: string): ShowAction | null {
   // PIP capability names: audio.snapshot (desk snapshot) and audio.scene (stem / scene)
   if ((m = p.match(/^(?:audio|sound)\s+snapshot\s+(.+)$/i))) return { kind: 'audio.snapshot', payload: { snapshot: val(m[1]) } }
   if ((m = p.match(/^(?:audio|sound)\s+(?:scene\s+|stem\s+|cue\s+|preset\s+)?(.+)$/i))) return { kind: 'audio.scene', payload: { scene: val(m[1]) } }
+  // a tool by name: "qlab cue 3", "x32 scene 12", "eos cue 5", "grandma3 402", "resolume 2/5", "beyond sweep", "magicq 3"
+  if ((m = p.match(/^qlab\s+(?:cue\s+)?(.+)$/i))) return { kind: 'audio.snapshot', payload: { snapshot: val(m[1]) } }
+  if ((m = p.match(/^(?:x32|m32)\s+(?:scene\s+|snapshot\s+)?(.+)$/i))) return { kind: 'audio.snapshot', payload: { snapshot: val(m[1]) } }
+  if ((m = p.match(/^eos\s+(?:cue\s+)?(.+)$/i))) return { kind: 'lighting.look', payload: { look: val(m[1]) } }
+  if ((m = p.match(/^(?:grandma\s*3|grandma|ma\s*3)\s+(?:exec(?:utor)?\s+)?(.+)$/i))) return { kind: 'lighting.look', payload: { look: val(m[1]) } }
+  if ((m = p.match(/^(?:magicq|chamsys)\s+(?:playback\s+)?(.+)$/i))) return { kind: 'lighting.look', payload: { look: val(m[1]) } }
+  if ((m = p.match(/^resolume\s+(?:(?:column|clip)\s+)?(.+)$/i))) return { kind: 'scene.activate', payload: { scene: val(m[1]) } }
+  if ((m = p.match(/^(?:beyond|pangolin)\s+(?:cue\s+)?(.+)$/i))) return { kind: 'laser.cue', payload: { cue: val(m[1]) } }
   if ((m = p.match(/^playlist\s+(.+)$/i))) return { kind: 'playlist.play', payload: { playlist: val(m[1]) } }
   if ((m = p.match(/^output\s+(.+)$/i))) return { kind: 'output.activate', payload: { target: val(m[1]) } }
   if ((m = p.match(/^cue\s+(.+)$/i))) return { kind: 'cue.trigger', payload: { cue: val(m[1]) } }
@@ -360,7 +390,7 @@ function parseAction(phrase: string): ShowAction | null {
 }
 
 const ACTION_BOUNDARY =
-  /\b(?:activate|set|trigger|fire|load|play|start|launch|run|cue|lighting|lights?|laser|audio|sound|visuals?|video|scene|playlist|output|send|emit|switch)\b/i
+  /\b(?:activate|set|trigger|fire|load|play|start|launch|run|cue|lighting|lights?|laser|audio|sound|visuals?|video|scene|playlist|output|send|emit|switch|qlab|x32|m32|eos|grandma3?|ma3|resolume|beyond|pangolin|magicq|chamsys)\b/i
 
 /** "drop set lighting look blue, laser cue l3" → state text + action phrases */
 function splitStateAndActions(rest: string): { stateText: string; phrases: string[] } | null {
@@ -376,6 +406,10 @@ function splitStateAndActions(rest: string): { stateText: string; phrases: strin
 }
 
 const FRAGMENT_START = 'add|create|new|make|remove|delete|rename|label|title|connect|link|disconnect|unlink|set|start|begin|when|on|from|clear|chain|sequence|undo|redo|help|entering|leaving|move|at'
+
+export function splitCommandFragments(text: string): string[] {
+  return splitFragments(text)
+}
 
 function splitFragments(text: string): string[] {
   return text
@@ -407,6 +441,27 @@ function parseFragment(text: string, chart: Showchart, notes: string[], defaultS
   const timeline = parseTimelineFragment(text, chart, notes, defaultState)
   if (timeline) return timeline
 
+  // "make a show with intro, drop and finale" (and "a show of ...")
+  if ((m = text.match(/^(?:make|create|build|set\s*up|new)\s+(?:me\s+)?(?:a\s+|the\s+)?(?:new\s+)?show\s+(?:of|with|from|called|containing)\s*:?\s*(.+)$/i))) {
+    const names = m[1].split(/\s*(?:,|->|→|\bthen\b|\band\b|&)\s*/i).map((s) => s.trim()).filter(Boolean)
+    const ids = names.map((n) => resolveState(chart, n, notes) ?? norm(n))
+    const cmds: ShowCommand[] = ids.map((id) => ({ op: 'addState', id, ifMissing: true }) as ShowCommand)
+    for (let i = 0; i < ids.length - 1; i++) cmds.push({ op: 'addTransition', source: ids[i], target: ids[i + 1], event: 'NEXT' })
+    if (cmds.length) return cmds
+  }
+
+  // "intro then drop then finale", "intro -> drop -> finale": plain names in order are a chain
+  if (/(?:->|→|=>|\bthen\b)/i.test(text)) {
+    const parts = text.split(/\s*(?:->|→|=>|\bthen\b)\s*/i).map((s) => s.trim()).filter(Boolean)
+    const plain = parts.every((p) => /^[A-Za-z0-9_' -]{1,40}$/.test(p) && p.split(/\s+/).length <= 3 && !/^(?:when|on|from|add|set|go|at|in|rename|remove|delete|after|if|connect|link|chain)\b/i.test(p))
+    if (plain && (parts.length >= 3 || /\bthen\b/i.test(text)) && parts.length >= 2) {
+      const ids = parts.map((n) => resolveState(chart, n, notes) ?? norm(n))
+      const cmds: ShowCommand[] = ids.map((id) => ({ op: 'addState', id, ifMissing: true }) as ShowCommand)
+      for (let i = 0; i < ids.length - 1; i++) cmds.push({ op: 'addTransition', source: ids[i], target: ids[i + 1], event: 'NEXT' })
+      return cmds
+    }
+  }
+
   // chain preshow, intro, drop → states + NEXT transitions
   if ((m = text.match(/^(?:chain|sequence|flow|arrange|build|show)(?:\s+(?:of|with|from))?\s*:?\s+(.+)$/i))) {
     const names = m[1].split(/\s*(?:,|->|→|\bthen\b|\bto\b|\band\b)\s*/i).map((s) => s.trim()).filter(Boolean)
@@ -430,21 +485,35 @@ function parseFragment(text: string, chart: Showchart, notes: string[], defaultS
     return [{ op: 'setInitial', id: st(m[1]) }]
   if ((m = text.match(/^(?:make|set)\s+(.+?)\s+(?:as\s+)?(?:the\s+)?(?:initial|starting|first|start)(?:\s+state)?$/i))) return [{ op: 'setInitial', id: st(m[1]) }]
 
+  // "add scenes intro, drop and finale" (no transitions: just the scenes)
+  if ((m = text.match(/^(?:add|create|new|make)\s+(?:the\s+)?(?:new\s+)?(?:states|scenes)\s*:?\s+(.+)$/i))) {
+    const ids = m[1].split(/\s*(?:,|\band\b|&)\s*/i).map((s) => norm(s)).filter(Boolean)
+    if (ids.length) return ids.map((id) => ({ op: 'addState', id, ifMissing: true }) as ShowCommand)
+  }
+
   // add / remove state
   if (
-    (m = text.match(/^(?:add|create|new|make)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?state(?:\s+(?:called|named))?\s+(.+?)(?:\s+(?:labell?ed|with label|titled)\s+(.+))?$/i)) ||
+    (m = text.match(/^(?:add|create|new|make)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:state|scene)(?:\s+(?:called|named))?\s+(.+?)(?:\s+(?:labell?ed|with label|titled)\s+(.+))?$/i)) ||
     (m = text.match(/^(?:add|create|new|make)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(.+?)\s+state(?:\s+(?:labell?ed|with label|titled)\s+(.+))?$/i))
   ) {
     const id = norm(m[1])
     if (!id) throw new Unparsed()
     return [{ op: 'addState', id, ...(m[2] ? { label: m[2].trim().replace(/^["'“”]+|["'“”]+$/g, '') } : {}) }]
   }
-  if ((m = text.match(/^(?:remove|delete|erase)\s+(?:the\s+)?state\s+(.+)$/i)) || (m = text.match(/^(?:remove|delete|erase)\s+(?:the\s+)?(.+?)\s+state$/i)))
+  if ((m = text.match(/^(?:remove|delete|erase)\s+(?:the\s+)?(?:state|scene)\s+(.+)$/i)) || (m = text.match(/^(?:remove|delete|erase)\s+(?:the\s+)?(.+?)\s+(?:state|scene)$/i)))
     return [{ op: 'removeState', id: st(m[1]) }]
+
+  // duplicate a scene: "duplicate drop", "copy scene drop as drop_2"
+  if ((m = text.match(/^(?:duplicate|copy|clone)\s+(?:the\s+)?(?:state\s+|scene\s+)?(.+?)(?:\s+(?:as|to|called|named)\s+(.+))?$/i)))
+    return [{ op: 'duplicateState', id: st(m[1]), ...(m[2] ? { to: norm(m[2]) } : {}) }]
 
   // clear actions
   if ((m = text.match(/^(?:clear|remove|delete)\s+(?:all\s+)?(?:(enter|exit|entry)\s+)?actions?\s+(?:of|for|on|from|in)\s+(.+)$/i)))
     return [{ op: 'clearActions', state: st(m[2]), ...(m[1] ? { when: m[1].toLowerCase() === 'exit' ? 'exit' : 'enter' } : {}) as { when?: 'enter' | 'exit' } }]
+
+  // "delete drop" / "remove drop": when it names a scene, that is what is meant
+  if ((m = text.match(/^(?:remove|delete|erase)\s+(?:the\s+)?(.+)$/i)) && resolveState(chart, m[1]) && !/\b(?:to|->|→)\b/.test(m[1]))
+    return [{ op: 'removeState', id: st(m[1]) }]
 
   // remove transition
   if ((m = text.match(/^(?:remove|delete|disconnect|unlink)\s+(?:the\s+)?(?:transition\s+)?(?:from\s+)?(.+?)\s+(?:to|->|→)\s+(.+?)(?:\s+on\s+(?:event\s+)?(.+))?$/i)))
@@ -469,7 +538,7 @@ function parseFragment(text: string, chart: Showchart, notes: string[], defaultS
     const cmds: ShowCommand[] = []
     for (const ph of sp.phrases) {
       const action = parseAction(ph)
-      if (!action) throw new CommandError(`I don't know the action "${ph}".`, 'Say things like: scene X, lighting look X, laser cue X, audio scene X, playlist X, output X, cue X')
+      if (!action) throw new CommandError(`I don't know the action "${ph}".`, 'Say things like: scene X, lighting look X, laser cue X, audio snapshot X, qlab cue 3, x32 scene 12, eos cue 5')
       cmds.push({ op: 'addAction', state, when: kind, action })
     }
     return cmds
@@ -536,7 +605,7 @@ function parseTransition(text: string, chart: Showchart, notes: string[]): ShowC
   }
 
   if (
-    (m = rest.match(/^(?:add\s+|create\s+|make\s+)?(?:a\s+)?(?:new\s+)?(?:transition\s+|link\s+|connection\s+)?from\s+(.+?)\s+(?:to|->|→)\s+(.+)$/i)) ||
+    (m = rest.match(/^(?:add\s+|create\s+|make\s+|go\s+)?(?:a\s+)?(?:new\s+)?(?:transition\s+|link\s+|connection\s+)?from\s+(.+?)\s+(?:to|->|→)\s+(.+)$/i)) ||
     (m = rest.match(/^(?:connect|link)\s+(.+?)\s+(?:to|with|and)\s+(.+)$/i)) ||
     (m = rest.match(/^(.+?)\s+(?:goes|go|moves|leads|jumps)\s+to\s+(.+)$/i)) ||
     (m = rest.match(/^(.+?)\s*(?:->|→)\s*(.+)$/))
@@ -578,7 +647,7 @@ export function runCommandText(text: string, chart: Showchart, opts: { state?: s
       try {
         cmds = parseFragment(frag, working, notes, opts.state)
       } catch (e) {
-        if (e instanceof Unparsed) throw new CommandError(`I didn't understand "${frag}".`, `Try something like: ${COMMAND_EXAMPLES[1]}  ·  ${COMMAND_EXAMPLES[2]}  ·  say "help" for more`)
+        if (e instanceof Unparsed) throw new CommandError(`I didn't understand "${frag}".`, hintFor(frag, working))
         throw e
       }
       for (const command of cmds) {

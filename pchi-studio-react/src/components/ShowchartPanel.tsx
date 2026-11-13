@@ -40,6 +40,7 @@ import {
   type ShowAction,
   type ShowContext,
   type Showchart,
+  type RigState,
 } from '@pchi/sdk'
 
 interface Props {
@@ -53,6 +54,9 @@ interface Props {
   onScene: (id: string | null) => void
   /** Jump to the Timeline tab to edit the selected scene. */
   onOpenTimeline: () => void
+  /** The rig, so the command box can add and change systems ("add qlab"). */
+  rig?: RigState
+  onRig?: (rig: RigState) => void
 }
 
 type Tool = 'select' | 'pan'
@@ -69,7 +73,7 @@ export default function ShowchartPanel(props: Props) {
   )
 }
 
-function Editor({ chart, history, note, scene, onScene, onOpenTimeline }: Props) {
+function Editor({ chart, history, note, scene, onScene, onOpenTimeline, rig, onRig }: Props) {
   const rf = useReactFlow()
   const { commit } = history
 
@@ -329,7 +333,7 @@ function Editor({ chart, history, note, scene, onScene, onOpenTimeline }: Props)
             <Background variant={BackgroundVariant.Dots} gap={22} size={1.2} color="#2b2e3a" />
 
             <Panel position="top-center" className="p-palette">
-              <CommandBar chart={chart} onApply={commit} onUndo={history.undo} onRedo={history.redo} canUndo={history.canUndo} canRedo={history.canRedo} stateContext={selected ?? undefined} />
+              <CommandBar chart={chart} onApply={commit} rig={rig} onRig={onRig} onUndo={history.undo} onRedo={history.redo} canUndo={history.canUndo} canRedo={history.canRedo} stateContext={selected ?? undefined} />
             </Panel>
 
             <Panel position="top-left" className="p-crumb">

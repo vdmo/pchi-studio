@@ -200,8 +200,8 @@ export default function App() {
       )}
       {help && <ShortcutsDialog onClose={() => setHelp(false)} />}
 
-      {mode === 'show' && <ShowchartPanel chart={showchart} history={history} note={note} scene={scene} onScene={setScene} onOpenTimeline={() => setMode('timeline')} />}
-      {mode === 'timeline' && <TimelinePanel chart={showchart} history={history} note={note} scene={scene} onScene={setScene} nodes={rig.nodes} />}
+      {mode === 'show' && <ShowchartPanel chart={showchart} history={history} note={note} scene={scene} onScene={setScene} onOpenTimeline={() => setMode('timeline')} rig={rig} onRig={setRig} />}
+      {mode === 'timeline' && <TimelinePanel chart={showchart} history={history} note={note} scene={scene} onScene={setScene} nodes={rig.nodes} rig={rig} onRig={setRig} />}
       {mode === 'cues' && <CueSheet chart={showchart} history={history} scene={scene} onScene={setScene} onOpenTimeline={() => setMode('timeline')} nodes={rig.nodes} />}
       {mode === 'rig' && <RigPanel rig={rig} onChange={setRig} issues={rigIssues} onRemoved={(id) => {
         const c = clearDevice(showchart, id)

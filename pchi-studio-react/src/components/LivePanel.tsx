@@ -51,9 +51,18 @@ interface Props {
 }
 
 /** A rig device as the running show knows it. */
-type RunDevice = { id: string; label: string; dept: string; armed?: boolean }
+type Link = { state: 'linked' | 'lost' | 'heard' | 'silent' | 'none'; heard_ms_ago?: number | null; /** when this browser last knew the device spoke (local clock) */ at?: number; /** the runtime asks this tool to answer, so silence means something */ probed?: boolean }
+type RunDevice = { id: string; label: string; dept: string; armed?: boolean; link?: Link }
+/** Something a device sent back (OSC), newest last. */
+type Feedback = { ts: number; device: string; label?: string; address: string; args: unknown[] }
 /** What the runtime did with one cue: sent, dry-run, no-device or failed. */
 type Delivery = { ts: number; kind: string; status: 'sent' | 'dry-run' | 'no-device' | 'failed' | 'held'; device?: string; label?: string; dept?: string; target?: string; error?: string; lane?: string }
+
+const linkText = (l: Link | undefined, now: number) => {
+  if (!l || l.state === 'none') return ''
+  const age = l.at ? ` ${Math.max(0, Math.round((now - l.at) / 1000))}s ago` : ''
+  return l.state === 'linked' ? ' · ● linked' : l.state === 'lost' ? ` · ○ no reply (last${age})` : l.state === 'heard' ? ` · heard${age}` : ' · waiting to hear'
+}
 
 /**
  * Live view of a show running in pchi-studio-api. The server is the source of
@@ -90,6 +99,7 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
   }, [])
   const [view, setView] = useState<'operate' | 'calls'>('operate')
   const [testing, setTesting] = useState<string | null>(null)
+  const [heard, setHeard] = useState<Feedback[]>([])
   const [laserNote, setLaserNote] = useState('')
   const [locked, setLocked] = useState(false) // the runtime wants an operator key for edits
   const [undoDepth, setUndoDepth] = useState(0) // sends that can still be undone
@@ -126,10 +136,11 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
               const raw = (msg.readiness as Record<string, Omit<Ready, 'seen'>>) ?? {}
               setReadiness(Object.fromEntries(Object.entries(raw).map(([k, v]) => [k, { ...v, seen: serverNow ? here - Math.max(0, serverNow - v.ts) : here }])))
             }
-            setRunDevices(Array.isArray(msg.devices) ? (msg.devices as RunDevice[]) : null)
+            setRunDevices(Array.isArray(msg.devices) ? (msg.devices as RunDevice[]).map((x) => (x.link?.heard_ms_ago != null ? { ...x, link: { ...x.link, at: Date.now() - x.link.heard_ms_ago } } : x)) : null)
             setOutput(msg.output === 'live' || msg.output === 'dry-run' ? msg.output : null)
             setLast({})
             setGaps([])
+            setHeard([])
             setLocked(!!msg.edit_locked)
             setUndoDepth(Number(msg.undo_depth ?? 0))
             setDef(msg.definition as Showchart)
@@ -161,6 +172,13 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
             else if (d.status === 'no-device') setGaps((g) => [...g.filter((x) => !(x.dept === d.dept && x.kind === d.kind)), d].slice(-8))
             break
           }
+          case 'link':
+            setRunDevices((ds) => ds && ds.map((x) => (x.id === msg.device ? { ...x, link: { ...x.link, state: msg.state as Link['state'], heard_ms_ago: msg.heard_ms_ago as number | null, at: msg.heard_ms_ago != null ? Date.now() - Number(msg.heard_ms_ago) : x.link?.at } } : x)))
+            break
+          case 'feedback':
+            setHeard((h) => [...h.slice(-7), msg as unknown as Feedback])
+            setRunDevices((ds) => ds && ds.map((x) => (x.id === msg.device && x.link ? { ...x, link: { ...x.link, at: Date.now() } } : x)))
+            break
           case 'arming':
             setRunDevices((ds) => ds && ds.map((x) => (x.id === msg.device ? { ...x, armed: !!msg.armed } : x)))
             setLast((l) => (l[String(msg.device)]?.status === 'held' ? Object.fromEntries(Object.entries(l).filter(([k]) => k !== String(msg.device))) : l)) // a stale "held" no longer applies
@@ -271,11 +289,13 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
   const nextScene = (go ?? autoNext)?.target
   const needed = def ? requiredFor(def, nextScene, devices.map((d) => ({ id: d.id, label: d.label, dept: d.dept, type: 'cue' as const, position: { x: 0, y: 0 }, params: {} }))) : new Set<string>()
   const onHold = board.filter((b) => b.r && !b.r.ready && needed.has(b.key)).map((b) => b.label)
+  // a needed device that should answer and does not is worth a second look too (it never blocks)
+  const noReply = board.filter((b) => b.device && needed.has(b.key) && (b.device.link?.state === 'lost' || (b.device.link?.state === 'silent' && b.device.link.probed))).map((b) => `${b.label} (no reply)`)
   const heldElsewhere = board.filter((b) => b.r && !b.r.ready && !needed.has(b.key)).map((b) => b.label)
 
   const pressGo = () => {
     if (!go) return
-    if (onHold.length > 0 && !armed) {
+    if (onHold.length + noReply.length > 0 && !armed) {
       setArmed(true) // a second press within a few seconds goes anyway
       window.setTimeout(() => setArmed(false), 4000)
       return
@@ -367,7 +387,7 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
         </div>
         <button className={`go ${armed ? 'armed' : onHold.length ? 'warn' : ''}`} disabled={!go} onClick={pressGo} title="Send the next event (Space)">
           {!go ? (autoNext ? 'WAITING' : 'GO') : armed ? `GO ANYWAY → ${go.target}` : `GO → ${go.target}`}
-          <small>{!go ? (autoNext ? `moves on by itself in ${fmt(autoLeft ?? 0)}` : 'nothing to send') : onHold.length ? `${onHold.join(', ')} on hold, needed in ${nextScene}${armed ? ': press again to go' : ''}` : heldElsewhere.length ? `Space · ${heldElsewhere.join(', ')} on hold but not needed in ${nextScene}` : 'Space'}</small>
+          <small>{!go ? (autoNext ? `moves on by itself in ${fmt(autoLeft ?? 0)}` : 'nothing to send') : onHold.length + noReply.length ? `${[...onHold, ...noReply].join(', ')} needed in ${nextScene}${armed ? ': press again to go' : ''}` : heldElsewhere.length ? `Space · ${heldElsewhere.join(', ')} on hold but not needed in ${nextScene}` : 'Space'}</small>
         </button>
 
         {view === 'calls' && def && (
@@ -398,14 +418,14 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
             return (
               <button
                 key={key}
-                className={`ready-chip ${st} ${device?.armed ? 'armed' : ''} ${nodev ? 'nodev' : ''} ${dv?.status === 'failed' ? 'failed' : ''} ${needed.has(key) ? 'needed' : ''}`}
+                className={`ready-chip ${st} ${device?.armed ? 'armed' : ''} ${device?.link?.state === 'lost' ? 'nolinkdev' : ''} ${nodev ? 'nodev' : ''} ${dv?.status === 'failed' ? 'failed' : ''} ${needed.has(key) ? 'needed' : ''}`}
                 onClick={() => setReady(key, !r || !r.ready ? true : false)}
                 title={`${device ? `${label} (${d.label})` : d.label}${nodev ? ' (no device in the rig)' : ''}: ${st === 'nolink' ? 'has not reported' : st === 'ready' ? 'standing by' : 'on hold'}${r?.note ? ' – ' + r.note : ''}${r?.source ? ` (via ${r.source})` : ''}${dv ? `. Last cue: ${dv.status}${dv.error ? ' – ' + dv.error : ''}` : ''}. Click to ${r?.ready ? 'hold' : 'mark ready'}.`}
               >
                 <i style={{ background: d.color }} aria-hidden />
                 <span>
                   {label}
-                  {device && <small className="dev">{d.label}{device.dept === 'laser' ? (device.armed ? ' · ARMED' : ' · disarmed') : ''}{dv ? ` · ${dv.status === 'failed' ? '⚠ failed' : dv.status}` : ''}</small>}
+                  {device && <small className="dev">{d.label}{device.dept === 'laser' ? (device.armed ? ' · ARMED' : ' · disarmed') : ''}{linkText(device.link, beat)}{dv ? ` · ${dv.status === 'failed' ? '⚠ failed' : dv.status}` : ''}</small>}
                   {nodev && <small className="dev">⚠ no device</small>}
                   {needed.has(key) && nextScene && <small className="dev need">needed in {nextScene}</small>}
                 </span>
@@ -414,6 +434,18 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
             )
           })}
         </div>
+        {heard.length > 0 && (
+          <details className="heard">
+            <summary>Heard from devices ({heard.length})</summary>
+            <ul>
+              {[...heard].reverse().map((h, i) => (
+                <li key={i}>
+                  <b>{h.label ?? h.device}</b> {h.address} <span className="muted">{h.args.map((a) => JSON.stringify(a)).join(' ')}</span>
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
         {(gaps.length > 0 || Object.values(last).some((l) => l.status === 'failed')) && (
           <ul className="delivery-warn" role="status">
             {gaps.map((g, i) => (

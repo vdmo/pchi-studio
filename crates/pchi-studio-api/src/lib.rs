@@ -10,6 +10,8 @@
 //!   {"type":"readiness", "ts", "dept", "ready", "note", "source"}
 //!   {"type":"delivery", "ts", "kind", "lane", "cue", "status", "device", "label", "dept", "target", "error"}
 //!       status: "sent" | "dry-run" | "no-device" | "failed" (see the `output` module)
+//!   {"type":"feedback", "ts", "device", "label", "address", "args"}: what a device sent back (rate-limited)
+//!   {"type":"link", "ts", "device", "state"}: linked | lost | heard | silent | none (see `Output::link_state`)
 //!   {"type":"arming", "ts", "device", "armed"}: a laser was armed or disarmed (lasers get no cues until armed)
 //!   {"type":"show", "definition", "devices", "diff"}: the show was replaced while running
 //!   {"type":"error", "message"}
@@ -40,6 +42,7 @@ use axum::{
     Json, Router,
 };
 pub mod diff;
+pub mod links;
 pub mod output;
 pub mod profiles;
 pub mod rig;
@@ -82,6 +85,8 @@ pub struct Show {
     edit_key: Mutex<Option<String>>,
     /// Shows replaced by a send, newest last, so a send can be undone. Each keeps the rig that went with it.
     history: Mutex<Vec<(Showchart, Option<Vec<rig::Device>>)>>,
+    /// Whether the link watcher task is running (see `watch_links`).
+    watching: std::sync::atomic::AtomicBool,
 }
 
 /// How long a department page may stay silent before it counts as not linked (mirrors the Studio).
@@ -109,9 +114,71 @@ impl Show {
             output: Mutex::new(output.map(Arc::new)),
             edit_key: Mutex::new(None),
             history: Mutex::new(Vec::new()),
+            watching: std::sync::atomic::AtomicBool::new(false),
         });
+        show.watch_links();
         show.arm(0);
         Ok(show)
+    }
+
+    /// Keep an eye on the devices we send to, while the runtime is really sending: open the sockets of the
+    /// ones expected to talk back, ask the ones that can answer a probe every few seconds, publish what they
+    /// say as `feedback`, and publish a `link` message whenever a device's link state changes. Runs once;
+    /// stops by itself when the show is dropped.
+    fn watch_links(self: &Arc<Self>) {
+        use std::sync::atomic::Ordering;
+        if self.output.lock().unwrap().is_none() || self.watching.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let weak = Arc::downgrade(self);
+        tokio::spawn(async move {
+            let mut last: BTreeMap<String, String> = BTreeMap::new();
+            let mut probed: BTreeMap<String, i64> = BTreeMap::new();
+            let mut warned: std::collections::BTreeSet<String> = Default::default();
+            loop {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                let Some(show) = weak.upgrade() else { break };
+                let Some(out) = show.output.lock().unwrap().clone() else { continue };
+                if !out.sending() {
+                    continue;
+                }
+                let sink_show = Arc::downgrade(&show);
+                out.links().set_sink(Arc::new(move |m| {
+                    if let Some(s) = sink_show.upgrade() {
+                        s.publish(m);
+                    }
+                }));
+                let now = now_ms();
+                for dev in out.devices() {
+                    if output::Output::expects_feedback(dev) {
+                        match out.links().get(dev).await {
+                            Err(e) => {
+                                if warned.insert(dev.id.clone()) {
+                                    show.publish(json!({"type": "error", "message": e}));
+                                }
+                            }
+                            Ok(_) => {
+                                if let Some(p) = profiles::probe(&dev.kind) {
+                                    if now - probed.get(&dev.id).copied().unwrap_or(0) >= out.probe_every.as_millis() as i64 {
+                                        probed.insert(dev.id.clone(), now);
+                                        let _ = out.send_packets(dev, vec![p]).await;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if let Some(l) = out.link_state(dev) {
+                        let st = l["state"].as_str().unwrap_or("none").to_string();
+                        if last.get(&dev.id) != Some(&st) {
+                            if last.contains_key(&dev.id) || st != "none" {
+                                show.publish(json!({"type": "link", "ts": now, "device": dev.id, "label": dev.label, "state": st, "heard_ms_ago": l["heard_ms_ago"]}));
+                            }
+                            last.insert(dev.id.clone(), st);
+                        }
+                    }
+                }
+            }
+        });
     }
 
     /// Require `key` for sending shows, undoing sends and test-firing. `None` (or empty) leaves them open.
@@ -161,6 +228,9 @@ impl Show {
             let mut v = json!(d);
             if d.dept == "laser" {
                 v["armed"] = json!(out.is_armed(&d.id));
+            }
+            if let Some(l) = out.link_state(d) {
+                v["link"] = l;
             }
             v
         }).collect::<Vec<_>>())
@@ -411,6 +481,7 @@ impl Show {
             };
             *o = Some(Arc::new(next));
         }
+        self.watch_links();
         let hello = self.snapshot();
         self.publish(json!({"type": "show", "ts": now_ms(), "definition": hello["definition"], "devices": hello["devices"], "output": hello["output"], "undo_depth": hello["undo_depth"], "diff": d}));
         self.arm_from(generation, elapsed);
@@ -431,7 +502,7 @@ impl Show {
             m["status"] = json!("dry-run");
             m["note"] = json!("sending is off: start the runtime with --send");
         } else {
-            match output::deliver(&dev, &Action::new("test", json!({}))).await {
+            match out.deliver(&dev, &Action::new("test", json!({}))).await {
                 Ok(_) => m["status"] = json!("sent"),
                 Err(e) => {
                     m["status"] = json!("failed");
@@ -477,9 +548,10 @@ impl Show {
                 self.report(m);
             } else {
                 let show = Arc::clone(self);
+                let out = Arc::clone(&out);
                 tokio::spawn(async move {
                     let mut m = base;
-                    match output::send_packets(&dev, msgs).await {
+                    match out.send_packets(&dev, msgs).await {
                         Ok(_) => m["status"] = json!("sent"),
                         Err(e) => {
                             m["status"] = json!("failed");
@@ -562,8 +634,9 @@ impl Show {
                 }
                 let show = Arc::clone(self);
                 let action = action.clone();
+                let out = Arc::clone(&out);
                 tokio::spawn(async move {
-                    let result = output::deliver(&dev, &action).await;
+                    let result = out.deliver(&dev, &action).await;
                     let mut m = ident;
                     match result {
                         Ok(_) => m["status"] = json!("sent"),
@@ -949,7 +1022,7 @@ mod tests {
     }
 
     fn device(id: &str, kind: &str, port: u16) -> rig::Device {
-        rig::Device { id: id.into(), label: id.into(), kind: kind.into(), dept: rig::dept_of_type(kind).unwrap().into(), host: Some("127.0.0.1".into()), port: Some(port) }
+        rig::Device { id: id.into(), label: id.into(), kind: kind.into(), dept: rig::dept_of_type(kind).unwrap().into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None }
     }
 
     fn deliveries(rx: &mut broadcast::Receiver<Value>) -> Vec<Value> {
@@ -1323,6 +1396,127 @@ mod tests {
         assert_eq!((st, v["stopped"].clone()), (200, json!(["b1"])));
         assert_eq!(show.snapshot()["devices"][0]["armed"], false);
         assert_eq!(http(addr, "POST", "/devices/zz/arm?armed=1", "", "X-Pchi-Edit-Key: k\r\n").await.0, 404);
+    }
+
+    fn osc_bytes(addr: &str) -> Vec<u8> {
+        rosc::encoder::encode(&rosc::OscPacket::Message(rosc::OscMessage { addr: addr.into(), args: vec![rosc::OscType::String("X32".into())] })).unwrap()
+    }
+
+    /// Wait (up to 3 s) for a message that matches.
+    async fn wait_for(rx: &mut broadcast::Receiver<Value>, pred: impl Fn(&Value) -> bool) -> Option<Value> {
+        let end = tokio::time::Instant::now() + Duration::from_secs(3);
+        while let Ok(Ok(m)) = tokio::time::timeout_at(end, rx.recv()).await {
+            if pred(&m) {
+                return Some(m);
+            }
+        }
+        None
+    }
+
+    async fn free_port() -> u16 {
+        tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap().port()
+    }
+
+    fn timing() -> (Duration, Duration) {
+        (Duration::from_millis(100), Duration::from_millis(700))
+    }
+
+    #[tokio::test]
+    async fn a_tool_that_answers_its_probe_is_linked_and_is_lost_when_it_stops() {
+        let fake = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let port = fake.local_addr().unwrap().port();
+        // a fake X32: answers every /info to whoever asked
+        let answering = {
+            let fake = Arc::clone(&fake);
+            tokio::spawn(async move {
+                let mut buf = [0u8; 256];
+                while let Ok((_, from)) = fake.recv_from(&mut buf).await {
+                    let _ = fake.send_to(&osc_bytes("/info"), from).await;
+                }
+            })
+        };
+        let (every, timeout) = timing();
+        let out = Output::new(vec![device("x1", "x32", port)], true).with_timing(every, timeout);
+        let show = Show::start_with(quick(), EventStore::open_in_memory().unwrap(), Some(out)).unwrap();
+        let mut rx = show.subscribe();
+
+        let fb = wait_for(&mut rx, |m| m["type"] == "feedback").await.expect("feedback from the tool");
+        assert_eq!((fb["address"].as_str(), fb["device"].as_str(), fb["args"][0].as_str()), (Some("/info"), Some("x1"), Some("X32")));
+        // the link is announced, and is in the device list for anyone who joins later
+        assert!(wait_for(&mut rx, |m| m["type"] == "link" && m["state"] == "linked").await.is_some());
+        assert_eq!(show.snapshot()["devices"][0]["link"]["state"], "linked");
+
+        // the tool goes quiet: after the timeout the link is lost
+        answering.abort();
+        let lost = wait_for(&mut rx, |m| m["type"] == "link" && m["state"] == "lost").await.expect("lost");
+        assert_eq!(lost["device"], "x1");
+        assert_eq!(show.snapshot()["devices"][0]["link"]["state"], "lost");
+    }
+
+    #[tokio::test]
+    async fn a_tool_we_only_listen_to_is_heard_and_other_senders_are_ignored() {
+        let listen = free_port().await;
+        let mut d = device("e1", "eos", 9);
+        d.listen_port = Some(listen);
+        let (every, timeout) = timing();
+        let out = Output::new(vec![d], true).with_timing(every, timeout);
+        let show = Show::start_with(quick(), EventStore::open_in_memory().unwrap(), Some(out)).unwrap();
+        let mut rx = show.subscribe();
+        // expected to talk, has not yet
+        assert!(wait_for(&mut rx, |m| m["type"] == "link" && m["state"] == "silent").await.is_some());
+
+        // a stranger on another address is not the device
+        let stranger = tokio::net::UdpSocket::bind("127.0.0.2:0").await.unwrap();
+        stranger.send_to(&osc_bytes("/eos/out/ping"), format!("127.0.0.1:{listen}")).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(show.snapshot()["devices"][0]["link"]["state"], "silent");
+
+        // the device itself (127.0.0.1) is heard
+        let from_device = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        from_device.send_to(&osc_bytes("/eos/out/active/cue/1/2"), format!("127.0.0.1:{listen}")).await.unwrap();
+        let fb = wait_for(&mut rx, |m| m["type"] == "feedback").await.expect("feedback");
+        assert_eq!(fb["address"], "/eos/out/active/cue/1/2");
+        assert!(wait_for(&mut rx, |m| m["type"] == "link" && m["state"] == "heard").await.is_some());
+        // a tool we do not probe never becomes "lost" just because it is quiet
+        tokio::time::sleep(Duration::from_millis(1_000)).await;
+        assert_eq!(show.snapshot()["devices"][0]["link"]["state"], "heard");
+    }
+
+    #[tokio::test]
+    async fn a_chatty_tool_is_rate_limited_and_a_port_that_is_taken_is_reported() {
+        let listen = free_port().await;
+        let mut d = device("e1", "eos", 9);
+        d.listen_port = Some(listen);
+        let out = Output::new(vec![d], true).with_timing(timing().0, timing().1);
+        let show = Show::start_with(quick(), EventStore::open_in_memory().unwrap(), Some(out)).unwrap();
+        let mut rx = show.subscribe();
+        assert!(wait_for(&mut rx, |m| m["type"] == "link" && m["state"] == "silent").await.is_some());
+        let tool = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        for _ in 0..80 {
+            tool.send_to(&osc_bytes("/eos/out/meter"), format!("127.0.0.1:{listen}")).await.unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let got = std::iter::from_fn(|| rx.try_recv().ok()).filter(|m| m["type"] == "feedback").count();
+        assert!(got <= 20 && got > 0, "got {got}");
+
+        // a second show wanting a listen port that is already taken cannot have it, and the operator is told
+        let mut e1 = device("e1", "eos", 9);
+        e1.listen_port = Some(listen);
+        let mut e2 = device("e2", "eos", 9);
+        e2.listen_port = Some(listen);
+        let show2 = Show::start_with(quick(), EventStore::open_in_memory().unwrap(), Some(Output::new(vec![e1, e2], true).with_timing(timing().0, timing().1))).unwrap();
+        let mut rx2 = show2.subscribe();
+        // the first show still holds the port, so BOTH devices of show2 fail to listen on it
+        let err = wait_for(&mut rx2, |m| m["type"] == "error").await.expect("an error message");
+        assert!(err["message"].as_str().unwrap().contains("cannot listen on port"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn tools_that_give_no_feedback_show_none_and_a_dry_run_shows_no_link_at_all() {
+        let live = Show::start_with(quick(), EventStore::open_in_memory().unwrap(), Some(Output::new(vec![device("n1", "notch", 9)], true))).unwrap();
+        assert_eq!(live.snapshot()["devices"][0]["link"]["state"], "none");
+        let dry = Show::start_with(quick(), EventStore::open_in_memory().unwrap(), Some(Output::new(vec![device("n1", "notch", 9)], false))).unwrap();
+        assert!(dry.snapshot()["devices"][0].get("link").is_none());
     }
 
     #[tokio::test]

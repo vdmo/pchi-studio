@@ -527,3 +527,17 @@ button.go:disabled { background: #1b1d25; color: #7a7f92; border-color: #2f323e;
 .dev-arm { font-size: 12px; padding: 4px 9px; }
 .dev-arm.on { background: #78350f; border-color: #f59e0b; color: #fde68a; }
 .ready-chip.armed { border-color: #f59e0b; }
+
+/* --- link status and feedback --- */
+.ready-chip.nolinkdev { border-color: #ef4444; }
+.heard { margin: 6px 0; font-size: 12px; }
+.heard summary { cursor: pointer; color: #9aa0b4; }
+.heard ul { list-style: none; margin: 4px 0; padding: 0; font: 11.5px ui-monospace, monospace; }
+.heard li { padding: 2px 0; overflow-wrap: anywhere; }
+
+/* --- quick add, suggestions --- */
+.suggest { font: inherit; padding: 1px 8px; border-radius: 999px; background: #1e293b; border: 1px solid #3b82f6; color: #bfdbfe; cursor: pointer; }
+.quickadd h5 { margin: 6px 0 4px; }
+.quickadd form { display: flex; gap: 6px; }
+.quickadd form input { flex: 1; min-width: 0; }
+.quickadd .chips { display: flex; flex-wrap: wrap; gap: 6px; }
