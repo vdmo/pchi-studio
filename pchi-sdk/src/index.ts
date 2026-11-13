@@ -301,6 +301,8 @@ export interface ShowCue {
   /** Display length only; the action fires once, at at_ms. */
   length_ms?: number
   label?: string
+  /** Cue number as called by the stage manager: assigned once, then kept (see ensureCueNumbers). */
+  num?: number
   action: ShowAction
 }
 
@@ -350,6 +352,8 @@ export interface Showchart {
   guards?: Record<string, string>
   states: ShowState[]
   transitions: ShowTransition[]
+  /** Highest cue number handed out; never reused after a delete. */
+  cue_seq?: number
 }
 
 export const timerEvent = (ms: number) => `after:${ms}`

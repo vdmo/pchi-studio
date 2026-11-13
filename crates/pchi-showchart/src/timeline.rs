@@ -40,6 +40,9 @@ pub struct Cue {
     pub length_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// The cue number a stage manager calls (Q12, or 12.5 for one inserted later). Assigned once and kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub num: Option<f64>,
     pub action: Action,
 }
 
@@ -78,7 +81,7 @@ mod tests {
     use serde_json::json;
 
     fn cue(id: &str, at: u64, kind: &str) -> Cue {
-        Cue { id: id.into(), at_ms: at, length_ms: None, label: None, action: Action::new(kind, json!({})) }
+        Cue { id: id.into(), at_ms: at, length_ms: None, label: None, num: None, action: Action::new(kind, json!({})) }
     }
 
     #[test]

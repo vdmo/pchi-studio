@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { DEPTS, buildCueSheet, cueSheetCsv, cueTime, deptOf, removeCue, updateCue, type Showchart } from '@pchi/sdk'
+import { DEPTS, buildCueSheet, cueSheetCsv, cueTime, deptOf, duplicateCueNumbers, removeCue, updateCue, type Showchart } from '@pchi/sdk'
 import type { History } from './useHistory'
 
 interface Props {
@@ -30,6 +30,7 @@ export default function CueSheet({ chart, history, scene, onScene, onOpenTimelin
   const [dept, setDept] = useState<string | null>(null)
   const [q, setQ] = useState('')
   const blocks = useMemo(() => buildCueSheet(chart), [chart])
+  const dups = useMemo(() => duplicateCueNumbers(chart), [chart])
   const total = blocks.reduce((n, b) => n + b.rows.length, 0)
 
   const match = (r: { dept: string; label: string; kind: string; value: string; laneName: string }) => {
@@ -125,13 +126,29 @@ export default function CueSheet({ chart, history, scene, onScene, onOpenTimelin
                       <td colSpan={8} className="muted">Nothing happens in this scene yet.</td>
                     </tr>
                   )}
-                  {rows.map((r) => {
+                  {rows.map((r, i) => {
                     const d = deptOf(r.dept)
                     const editable = r.source === 'cue' && r.cueId !== undefined
                     const key = (f: string) => `cs:${r.scene}:${r.cueId}:${f}`
                     return (
-                      <tr key={`${r.scene}-${r.n}`} className={`cs-row ${r.source}`} style={{ ['--dept' as string]: d.color }}>
-                        <td className="c-q">Q{r.n}</td>
+                      <tr key={`${r.scene}-${r.cueId ?? `${r.source}-${i}`}`} className={`cs-row ${r.source}`} style={{ ['--dept' as string]: d.color }}>
+                        <td className="c-q">
+                          {editable ? (
+                            <label className={dups.has(r.num ?? -1) ? 'dup' : ''} title={dups.has(r.num ?? -1) ? 'Another cue has this number' : 'Cue number: kept when cues are added, moved or deleted. Use 12.5 to slot one in.'}>
+                              Q
+                              <input
+                                type="number"
+                                min={0.001}
+                                step={0.5}
+                                value={r.num ?? ''}
+                                aria-label={`Number of the cue at ${cueTime(r.at_ms)} in ${r.scene}`}
+                                onChange={(e) => e.target.value !== '' && Number(e.target.value) > 0 && commit(updateCue(chart, r.scene, r.cueId!, { num: Number(e.target.value) }), key('q'))}
+                              />
+                            </label>
+                          ) : (
+                            <span className="muted">–</span>
+                          )}
+                        </td>
                         <td className="c-t">
                           {editable ? (
                             <label title="Seconds after the scene starts">
@@ -140,7 +157,7 @@ export default function CueSheet({ chart, history, scene, onScene, onOpenTimelin
                                 min={0}
                                 step={0.25}
                                 value={(r.at_ms ?? 0) / 1000}
-                                aria-label={`Time of Q${r.n} in seconds`}
+                                aria-label={`Time of Q${r.num ?? ''} in seconds`}
                                 onChange={(e) => e.target.value !== '' && commit(updateCue(chart, r.scene, r.cueId!, { at_ms: Number(e.target.value) * 1000 }), key('t'))}
                               />
                               <small>{cueTime(r.at_ms)}</small>
@@ -156,21 +173,21 @@ export default function CueSheet({ chart, history, scene, onScene, onOpenTimelin
                         <td className="c-a" title={r.kind}>{KIND_NAME[r.kind] ?? r.kind}</td>
                         <td className="c-v">
                           {editable ? (
-                            <input value={r.value} aria-label={`Value of Q${r.n}`} placeholder="(blank)" onChange={(e) => commit(updateCue(chart, r.scene, r.cueId!, { value: e.target.value }), key('v'))} />
+                            <input value={r.value} aria-label={`Value of Q${r.num ?? ''}`} placeholder="(blank)" onChange={(e) => commit(updateCue(chart, r.scene, r.cueId!, { value: e.target.value }), key('v'))} />
                           ) : (
                             r.value
                           )}
                         </td>
                         <td className="c-n">
                           {editable ? (
-                            <input value={r.label} aria-label={`Note for Q${r.n}`} placeholder="note or cue name" onChange={(e) => commit(updateCue(chart, r.scene, r.cueId!, { label: e.target.value }), key('n'))} />
+                            <input value={r.label} aria-label={`Note for Q${r.num ?? ''}`} placeholder="note or cue name" onChange={(e) => commit(updateCue(chart, r.scene, r.cueId!, { label: e.target.value }), key('n'))} />
                           ) : (
                             <span className="muted">set in the Show tab</span>
                           )}
                         </td>
                         <td className="c-x">
                           {editable && (
-                            <button className="x" aria-label={`Delete Q${r.n}`} title="Delete this cue (Ctrl+Z undoes)" onClick={() => commit(removeCue(chart, r.scene, r.cueId!))}>×</button>
+                            <button className="x" aria-label={`Delete Q${r.num ?? ''}`} title="Delete this cue (Ctrl+Z undoes)" onClick={() => commit(removeCue(chart, r.scene, r.cueId!))}>×</button>
                           )}
                         </td>
                       </tr>

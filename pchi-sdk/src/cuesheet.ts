@@ -6,8 +6,8 @@ import { deptOf, transitionLabel, type ShowAction, type Showchart, type ShowCue 
 export type CueSource = 'enter' | 'cue' | 'exit'
 
 export interface CueRow {
-  /** Position in the whole sheet, 1-based. Derived from order, so inserting a cue renumbers the ones after it. */
-  n: number
+  /** The cue number (Q). Assigned once and kept: it never changes when cues are added, moved or deleted. Null for enter/exit actions, which are not called. */
+  num: number | null
   scene: string
   source: CueSource
   /** Seconds-from-scene-start in ms. Enter actions are 0; exit actions have no time. */
@@ -53,13 +53,12 @@ const firstValue = (a: ShowAction): { field: string; value: string } => {
 }
 
 export function buildCueSheet(chart: Showchart): SceneBlock[] {
-  let n = 0
   return sceneOrder(chart).map((id) => {
     const st = chart.states.find((s) => s.id === id)!
     const rows: CueRow[] = []
     const act = (source: CueSource, a: ShowAction, at: number | null) => {
       const { field, value } = firstValue(a)
-      return { n: ++n, scene: id, source, at_ms: at, laneName: source === 'cue' ? '' : source === 'enter' ? 'on enter' : 'on leave', dept: deptFor(a.kind), label: '', kind: a.kind, value, field } as CueRow
+      return { num: null, scene: id, source, at_ms: at, laneName: source === 'cue' ? '' : source === 'enter' ? 'on enter' : 'on leave', dept: deptFor(a.kind), label: '', kind: a.kind, value, field } as CueRow
     }
     for (const a of st.enter_actions ?? []) rows.push(act('enter', a, 0))
     const lanes = st.timeline?.lanes ?? []
@@ -72,6 +71,7 @@ export function buildCueSheet(chart: Showchart): SceneBlock[] {
       r.laneName = l.name || l.id
       r.dept = l.dept ?? deptFor(c.action.kind)
       r.cueId = c.id
+      r.num = c.num ?? null
       r.label = c.label ?? ''
       r.length_ms = c.length_ms
       rows.push(r)
@@ -93,7 +93,7 @@ function deptFor(kind: string): string {
   return 'other'
 }
 
-type CuePatch = { at_ms?: number; length_ms?: number | undefined; label?: string; value?: string }
+type CuePatch = { at_ms?: number; length_ms?: number | undefined; label?: string; value?: string; num?: number }
 
 /** A new chart with one cue changed. Unknown scene/cue returns the chart untouched. */
 export function updateCue(chart: Showchart, scene: string, cueId: string, patch: CuePatch): Showchart {
@@ -117,6 +117,7 @@ export function updateCue(chart: Showchart, scene: string, cueId: string, patch:
                   if (patch.length_ms === undefined || patch.length_ms <= 0) delete next.length_ms
                   else next.length_ms = Math.round(patch.length_ms)
                 }
+                if (patch.num !== undefined && Number.isFinite(patch.num) && patch.num > 0) next.num = Math.round(patch.num * 1000) / 1000
                 if (patch.label !== undefined) {
                   if (patch.label.trim() === '') delete next.label
                   else next.label = patch.label
@@ -161,7 +162,7 @@ export function cueSheetCsv(chart: Showchart): string {
     for (const r of sc.rows) {
       lines.push(
         [
-          `Q${r.n}`,
+          r.num === null ? '' : `Q${r.num}`,
           r.scene,
           fmtTime(r.at_ms),
           r.source === 'cue' ? 'in scene' : r.source === 'enter' ? 'on enter' : 'on leave',
@@ -178,4 +179,42 @@ export function cueSheetCsv(chart: Showchart): string {
     }
   }
   return lines.join('\r\n') + '\r\n'
+}
+
+/**
+ * Give every cue that has no number the next free one, in the order the show
+ * runs. Numbers already there are never touched, and a number from a deleted
+ * cue is not reused (the highest ever handed out is kept in `cue_seq`).
+ * Returns the same object when there is nothing to do, so it is safe to call on every change.
+ */
+export function ensureCueNumbers(chart: Showchart): Showchart {
+  const order = sceneOrder(chart)
+  let top = chart.cue_seq ?? 0
+  for (const s of chart.states) for (const l of s.timeline?.lanes ?? []) for (const c of l.cues) if (c.num !== undefined && c.num > top) top = Math.floor(c.num)
+  const missing = chart.states.some((s) => (s.timeline?.lanes ?? []).some((l) => l.cues.some((c) => c.num === undefined)))
+  if (!missing) return top === (chart.cue_seq ?? 0) || (chart.cue_seq ?? 0) > top ? chart : { ...chart, cue_seq: top }
+  const given = new Map<string, number>() // scene/cue id -> new number
+  for (const id of order) {
+    const st = chart.states.find((s) => s.id === id)!
+    const todo = (st.timeline?.lanes ?? [])
+      .flatMap((l, li) => l.cues.map((c) => ({ c, li, key: `${id}/${l.id}/${c.id}` })))
+      .filter((x) => x.c.num === undefined)
+      .sort((a, b) => a.c.at_ms - b.c.at_ms || a.li - b.li)
+    for (const x of todo) given.set(x.key, ++top)
+  }
+  return {
+    ...chart,
+    cue_seq: top,
+    states: chart.states.map((s) =>
+      !s.timeline ? s : { ...s, timeline: { ...s.timeline, lanes: s.timeline.lanes.map((l) => ({ ...l, cues: l.cues.map((c) => (c.num === undefined ? { ...c, num: given.get(`${s.id}/${l.id}/${c.id}`) } : c)) })) } },
+    ),
+  }
+}
+
+/** Cue numbers used by more than one cue (a call sheet should not have two Q12s). */
+export function duplicateCueNumbers(chart: Showchart): Set<number> {
+  const seen = new Set<number>()
+  const dup = new Set<number>()
+  for (const s of chart.states) for (const l of s.timeline?.lanes ?? []) for (const c of l.cues) if (c.num !== undefined) (seen.has(c.num) ? dup : seen).add(c.num)
+  return dup
 }

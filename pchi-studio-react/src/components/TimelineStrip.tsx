@@ -156,7 +156,7 @@ export default function TimelineStrip({ state, tl, elapsed, fired, exit, onOpen,
                   {l.cues.map((c) => {
                     const done = !!fired?.has(c.id)
                     const first = c.action.payload ? Object.values(c.action.payload)[0] : undefined
-                    const text = c.label ?? `${c.action.kind}${first !== undefined && first !== '' ? ` · ${String(first)}` : ''}`
+                    const text = `${c.num !== undefined ? `Q${c.num} ` : ''}${c.label ?? `${c.action.kind}${first !== undefined && first !== '' ? ` · ${String(first)}` : ''}`}`
                     const cls = !live ? 'upcoming' : done ? 'fired' : elapsed < c.at_ms ? 'upcoming' : 'due'
                     return (
                       <div

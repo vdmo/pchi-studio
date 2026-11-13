@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 
 const sdk = createRequire(import.meta.url)('../.sdk-test/sdk.cjs')
-const { runCommandText, newShowchart, buildCueSheet, sceneOrder, updateCue, removeCue, cueSheetCsv } = sdk
+const { runCommandText, newShowchart, buildCueSheet, sceneOrder, updateCue, removeCue, cueSheetCsv, ensureCueNumbers, duplicateCueNumbers } = sdk
 
 const show = () => {
   const r = runCommandText(
@@ -19,11 +19,9 @@ test('scenes are listed in the order the show runs them', () => {
   assert.deepEqual(sceneOrder(show()), ['PRESHOW', 'INTRO', 'DROP', 'FINALE'])
 })
 
-test('cues are in calling order: by time, ties by lane, numbered across the sheet', () => {
+test('cues are in calling order: by time, ties by lane', () => {
   const intro = buildCueSheet(show()).find((b) => b.id === 'INTRO')
   assert.deepEqual(intro.rows.map((r) => [r.at_ms, r.dept]), [[2000, 'visual'], [4000, 'lighting'], [4000, 'laser']])
-  const all = buildCueSheet(show()).flatMap((b) => b.rows).map((r) => r.n)
-  assert.deepEqual(all, all.map((_, i) => i + 1))
 })
 
 test('enter actions appear as read-only rows, and the scene says how it is left', () => {
@@ -65,4 +63,46 @@ test('CSV: one line per row, quotes escaped, formulas neutralised', () => {
   assert.match(csv, /'=HYPERLINK/)
   assert.match(csv, /"say ""hi"", ok"/)
   assert.ok(!/(^|,)=HYPERLINK/m.test(csv))
+})
+
+const numbered = () => ensureCueNumbers(show())
+const numsOf = (c) => buildCueSheet(c).flatMap((b) => b.rows).filter((r) => r.source === 'cue').map((r) => r.num)
+
+test('numbers are assigned once, in show order, and enter actions get none', () => {
+  const c = numbered()
+  assert.deepEqual(numsOf(c), [1, 2, 3])
+  assert.ok(buildCueSheet(c).flatMap((b) => b.rows).filter((r) => r.source !== 'cue').every((r) => r.num === null))
+  assert.equal(c.cue_seq, 3)
+  assert.equal(ensureCueNumbers(c), c, 'nothing to do returns the same object')
+})
+
+test('numbers stay fixed: adding, moving and deleting cues never renumbers the others', () => {
+  let c = numbered()
+  const before = Object.fromEntries(buildCueSheet(c).flatMap((b) => b.rows).filter((r) => r.cueId).map((r) => [r.cueId, r.num]))
+  // a new cue earlier in the show gets the next number, not 1
+  c = ensureCueNumbers(runCommandText('at 1 second lighting look red in intro', c).chart)
+  const after = Object.fromEntries(buildCueSheet(c).flatMap((b) => b.rows).filter((r) => r.cueId).map((r) => [r.cueId, r.num]))
+  for (const [id, n] of Object.entries(before)) assert.equal(after[id], n, id)
+  assert.equal(after['lighting-1000'], 4)
+  // moving a cue in time keeps its number
+  const moved = updateCue(c, 'INTRO', 'lighting-1000', { at_ms: 9000 })
+  assert.equal(buildCueSheet(moved).flatMap((b) => b.rows).find((r) => r.cueId === 'lighting-1000').num, 4)
+  // delete the highest, add another: the number is not reused
+  const gone = removeCue(c, 'INTRO', 'lighting-1000')
+  const again = ensureCueNumbers(runCommandText('at 1 second lighting look green in intro', gone).chart)
+  assert.equal(buildCueSheet(again).flatMap((b) => b.rows).find((r) => r.cueId === 'lighting-1000').num, 5)
+})
+
+test('a number can be set by hand (12.5 slots in), and duplicates are reported', () => {
+  let c = numbered()
+  c = updateCue(c, 'INTRO', 'lighting-4000', { num: 2.5 })
+  assert.deepEqual(numsOf(c), [1, 2.5, 3])
+  assert.equal(duplicateCueNumbers(c).size, 0)
+  c = updateCue(c, 'INTRO', 'lighting-4000', { num: 3 })
+  assert.deepEqual([...duplicateCueNumbers(c)], [3])
+  assert.deepEqual(numsOf(updateCue(c, 'INTRO', 'lighting-4000', { num: -4 })), [1, 3, 3], 'invalid numbers are ignored')
+})
+
+test('CSV carries the stored numbers', () => {
+  assert.match(cueSheetCsv(numbered()), /^Q1,INTRO/m)
 })

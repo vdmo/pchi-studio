@@ -392,3 +392,25 @@ button.go:disabled { background: #1b1d25; color: #7a7f92; border-color: #2f323e;
   .c-v input, .c-n input, .c-t input { border: 0; color: #000; background: transparent; }
   .cs-scene { break-after: avoid; } .cs-row { break-inside: avoid; }
 }
+
+.c-q { width: 86px; }
+.c-q label { display: inline-flex; align-items: center; gap: 2px; font: 600 12px ui-monospace, monospace; color: #fbbf24; }
+.c-q input { width: 54px; background: transparent; border-color: transparent; color: #fbbf24; font: 600 12px ui-monospace, monospace; padding: 2px 3px; }
+.c-q input:hover { border-color: #3a3d4a; }
+.c-q label.dup, .c-q label.dup input { color: #f87171; }
+.c-q label.dup input { border-color: #f87171; }
+
+/* --- unsaved marker, restore banner, shortcuts dialog --- */
+.dirty { font-size: 12px; color: #fbbf24; white-space: nowrap; }
+.icon-btn { min-width: 30px; padding: 4px 0; border-radius: 50%; font-weight: 700; }
+.restore { position: fixed; z-index: 40; top: 56px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 14px; max-width: calc(100vw - 32px); background: #1b1d25; border: 1px solid #fbbf2488; border-radius: 12px; box-shadow: 0 12px 36px rgba(0,0,0,.5); font-size: 13px; }
+.restore .primary { background: #3b82f6; border-color: #3b82f6; color: #fff; }
+.scrim { position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.55); }
+.dialog { width: min(560px, calc(100vw - 32px)); max-height: 82vh; display: flex; flex-direction: column; background: #1b1d25; border: 1px solid #2f323e; border-radius: 14px; box-shadow: 0 24px 70px rgba(0,0,0,.6); outline: none; }
+.dialog > header { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid #262a33; }
+.dialog > header h3 { margin: 0; font-size: 16px; }
+.dialog-body { overflow: auto; padding: 4px 16px 16px; }
+.dialog-body h5 { margin: 14px 0 6px; }
+.krow { display: flex; align-items: baseline; gap: 12px; padding: 4px 0; font-size: 13px; }
+.krow kbd { flex: 0 0 210px; }
+@media print { .restore, .scrim, .dirty { display: none !important; } }

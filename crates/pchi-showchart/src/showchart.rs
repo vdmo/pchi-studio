@@ -24,6 +24,9 @@ pub struct Showchart {
     /// Named guard expressions, e.g. {"energy_high": "energy > 0.7"}.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub guards: BTreeMap<String, String>,
+    /// Highest cue number ever handed out, so a deleted cue's number is never given to a new one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cue_seq: Option<u64>,
     pub states: Vec<State>,
     pub transitions: Vec<Transition>,
 }
