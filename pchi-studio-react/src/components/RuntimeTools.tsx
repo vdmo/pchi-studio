@@ -96,6 +96,7 @@ export default function RuntimeTools({ getFile, locked = false, undoDepth = 0 }:
     setSend({ mode, busy: true })
     const r = await post(mode, true)
     if (!r) return setSend({ mode, error: 'The runtime did not answer. Is it running?' })
+    if (r.status === 403 && !r.body?.locked) return setSend({ mode, error: String(r.body?.error ?? 'You may not do that.') })
     if (r.status === 403) {
       setEditKey('')
       return setSend({ mode, needKey: true, keyWrong: true })
@@ -109,6 +110,7 @@ export default function RuntimeTools({ getFile, locked = false, undoDepth = 0 }:
     const mode = send.mode
     setSend((s) => s && { ...s, busy: true })
     const r = await post(mode, false)
+    if (r?.status === 403 && !r.body?.locked) return setSend((x) => x && { ...x, busy: false, error: String(r.body?.error ?? 'You may not do that.') })
     if (r?.status === 403) {
       setEditKey('')
       return setSend({ mode, needKey: true, keyWrong: true })
@@ -306,6 +308,18 @@ export default function RuntimeTools({ getFile, locked = false, undoDepth = 0 }:
                   </ul>
                 </>
               )}
+              {(report.decisions ?? []).length > 0 && (
+                <>
+                  <h5>Who did what</h5>
+                  <ul className="rt-diff">
+                    {(report.decisions as any[]).map((d, i) => (
+                      <li key={i} className={d.gate === 'ALLOW' ? '' : 'mod'}>
+                        {new Date(d.ts ?? 0).toLocaleTimeString()} · <b>{d.by}</b>: {d.gate === 'DENY' ? '(refused) ' : d.gate === 'ESCALATE' ? '(proposed) ' : ''}{d.text}
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
               <p className="muted">Timing is measured on the runtime from the moment a scene is entered; a late cue means the runtime was busy, not that the device was late.</p>
             </>
           )}
@@ -319,14 +333,14 @@ export default function RuntimeTools({ getFile, locked = false, undoDepth = 0 }:
 export async function tryCue(id: string, value: string): Promise<{ ok: boolean; status?: string; sentAs?: string; error?: string }> {
   const go = () => api(`/devices/${encodeURIComponent(id)}/try`, { method: 'POST', body: JSON.stringify({ value }), headers: { 'Content-Type': 'application/json' } }).catch(() => null)
   let r = await go()
-  if (r?.status === 403) {
-    const k = window.prompt('This runtime needs the operator key to send a cue by hand:')
+  if (r?.status === 403 && r.body?.locked) {
+    const k = window.prompt('This runtime needs your key to send a cue by hand:')
     if (!k) return { ok: false, error: 'Not sent: the operator key is needed.' }
     setEditKey(k.trim())
     r = await go()
   }
   if (!r) return { ok: false, error: 'The runtime did not answer.' }
-  if (r.status === 403) {
+  if (r.status === 403 && r.body?.locked) {
     setEditKey('')
     return { ok: false, error: 'That key was not accepted.' }
   }
@@ -339,14 +353,14 @@ export async function tryCue(id: string, value: string): Promise<{ ok: boolean; 
 export async function armLaser(id: string, armed: boolean): Promise<{ ok: boolean; error?: string }> {
   const go = () => api(`/devices/${encodeURIComponent(id)}/arm?armed=${armed ? 1 : 0}`, { method: 'POST' }).catch(() => null)
   let r = await go()
-  if (r?.status === 403) {
-    const k = window.prompt('This runtime needs the operator key to arm a laser:')
+  if (r?.status === 403 && r.body?.locked) {
+    const k = window.prompt('This runtime needs your key to arm a laser:')
     if (!k) return { ok: false, error: 'Not armed: the operator key is needed.' }
     setEditKey(k.trim())
     r = await go()
   }
   if (!r) return { ok: false, error: 'The runtime did not answer.' }
-  if (r.status === 403) {
+  if (r.status === 403 && r.body?.locked) {
     setEditKey('')
     return { ok: false, error: 'That key was not accepted.' }
   }
@@ -364,14 +378,14 @@ export async function stopLasers(): Promise<{ ok: boolean; notes: string[]; erro
 export async function decideProposal(id: number, verb: 'approve' | 'reject'): Promise<{ ok: boolean; error?: string }> {
   const go = () => api(`/proposals/${id}/${verb}`, { method: 'POST' }).catch(() => null)
   let r = await go()
-  if (r?.status === 403 && !r.body?.agent) {
-    const k = window.prompt(`This runtime needs the operator key to ${verb} a proposal:`)
+  if (r?.status === 403 && r.body?.locked) {
+    const k = window.prompt(`This runtime needs your key to ${verb} a proposal:`)
     if (!k) return { ok: false, error: 'The operator key is needed.' }
     setEditKey(k.trim())
     r = await go()
   }
   if (!r) return { ok: false, error: 'The runtime did not answer.' }
-  if (r.status === 403) {
+  if (r.status === 403 && r.body?.locked) {
     setEditKey('')
     return { ok: false, error: 'That key was not accepted.' }
   }
@@ -385,3 +399,24 @@ export async function testFire(id: string): Promise<{ status: string; error?: st
   if (!r.ok) return { status: 'failed', error: String(r.body?.error ?? `refused (${r.status})`) }
   return { status: String(r.body?.status), error: r.body?.error }
 }
+
+export type WhoAmI = { name: string; role: string; signed_in: boolean; locked: boolean; can: string[] }
+
+/** Who the runtime takes this tab to be, and what that person may do. */
+export async function whoami(): Promise<WhoAmI | null> {
+  const r = await api('/whoami').catch(() => null)
+  return r?.ok ? (r.body as unknown as WhoAmI) : null
+}
+
+/** Sign in with your own key (given by whoever runs the show). Returns who you are, or null if the key is not known. */
+export async function signIn(key: string): Promise<WhoAmI | null> {
+  setEditKey(key.trim())
+  const me = await whoami()
+  if (!me?.signed_in) {
+    setEditKey('')
+    return null
+  }
+  return me
+}
+
+export const signOut = () => setEditKey('')

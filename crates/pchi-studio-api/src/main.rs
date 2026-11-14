@@ -30,6 +30,9 @@ struct Cli {
     /// Carry on the run recorded in --db instead of starting a new one: the scene the show was in, its context and the cues still ahead. Cues that came due while the runtime was down are skipped (and listed), lasers start disarmed, and departments report READY again.
     #[arg(long, requires = "db")]
     resume: bool,
+    /// Named people and their roles, a JSON list of {"name", "role", "key"}: operator (everything), editor (edit, approve, undo, try, test), lso (arm lasers; try and test lasers only), guest (look only), agent (a named agent: proposes only). Each person signs in with their own key (Studio's Sign in). The file holds the keys: protect it. See docs/roles.md.
+    #[arg(long, value_name = "FILE", env = "PCHI_ROSTER")]
+    roster: Option<String>,
     /// Write a signed, hash-chained receipt for every decision (edits, arming, GO, refusals, proposals) into this folder, in the format scripts/verify_governance_chain.py checks offline. The folder keeps the signing key too: protect it like the show file.
     #[arg(long, env = "PCHI_GOVERNANCE")]
     governance: Option<String>,
@@ -85,6 +88,14 @@ async fn main() -> anyhow::Result<()> {
         Show::start_with(chart, store, output).map_err(anyhow::Error::msg)?
     };
     show.set_edit_key(cli.edit_key.clone());
+    if let Some(path) = &cli.roster {
+        let roster = pchi_studio_api::governance::Roster::parse(&std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?).map_err(anyhow::Error::msg).with_context(|| format!("roster {path}"))?;
+        println!("roster: {} people: {}", roster.len(), roster.summary());
+        if !roster.has_role("operator") && cli.edit_key.as_deref().map_or(true, str::is_empty) {
+            eprintln!("warning: nobody on the roster is an operator and there is no --edit-key: nobody can run the show or send edits");
+        }
+        show.set_roster(roster);
+    }
     if let Some(dir) = &cli.governance {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {dir}"))?;
         let (key, log) = (format!("{dir}/governance_key.hex"), format!("{dir}/governance_log.jsonl"));

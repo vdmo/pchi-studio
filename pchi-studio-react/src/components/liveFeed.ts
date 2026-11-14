@@ -9,9 +9,18 @@ export const feedToken = () => {
   }
 }
 
+/** The key this tab signed in with (kept in this tab's session only). The runtime uses it to know who you are. */
+export const signedInKey = () => {
+  try {
+    return sessionStorage.getItem('pchi.editkey') ?? ''
+  } catch {
+    return ''
+  }
+}
+
 export const feedUrl = () => {
-  const t = feedToken()
-  return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/ws${t ? `?token=${encodeURIComponent(t)}` : ''}`
+  const params = [['token', feedToken()], ['edit_key', signedInKey()]].filter(([, v]) => v).map(([k, v]) => `${k}=${encodeURIComponent(v)}`)
+  return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/ws${params.length ? '?' + params.join('&') : ''}`
 }
 
 /** What one department (or device) last said about itself. */

@@ -51,7 +51,7 @@ pub mod rehearse;
 pub mod rig;
 
 use futures_util::{SinkExt, StreamExt};
-use governance::{Actor, Proposal};
+use governance::{Actor, Perm, Proposal};
 use output::{Output, Plan};
 use pchi_eventstore::{recorder, EventStore};
 use pchi_showchart::{timer_event, Action, ScheduledCue, ShowEngine, Showchart};
@@ -95,6 +95,8 @@ pub struct Show {
     resumed: Mutex<Option<Value>>,
     /// Who may do what, agent proposals, and the signed receipts (see the `governance` module).
     gov: governance::Gov,
+    /// Named people and their roles (empty: the single operator key, or an open show).
+    roster: Mutex<governance::Roster>,
 }
 
 /// How long a department page may stay silent before it counts as not linked (mirrors the Studio).
@@ -132,6 +134,7 @@ impl Show {
             watching: std::sync::atomic::AtomicBool::new(false),
             resumed: Mutex::new(None),
             gov: Default::default(),
+            roster: Mutex::new(Default::default()),
         })
     }
 
@@ -256,6 +259,60 @@ impl Show {
         *self.edit_key.lock().unwrap() = key.filter(|k| !k.is_empty());
     }
 
+    /// Name the people who may sign in, each with their own key and a role. With a roster, running the show
+    /// (GO, inputs) needs the right too, and the operator key still works as an operator.
+    pub fn set_roster(&self, roster: governance::Roster) {
+        *self.roster.lock().unwrap() = roster;
+    }
+
+    pub fn roster_active(&self) -> bool {
+        !self.roster.lock().unwrap().is_empty()
+    }
+
+    /// Whether a key (the operator key or a roster) is needed to change anything.
+    pub fn is_locked(&self) -> bool {
+        self.edit_key.lock().unwrap().is_some() || self.roster_active()
+    }
+
+    /// Who a caller really is. `declared` is what they said about themselves (the actor header): an agent stays an
+    /// agent whatever key it holds; a roster key gives that person's name and role (their own label is ignored);
+    /// the operator key gives an operator; with nothing valid, a locked show sees nobody and an open show a person.
+    pub fn identify(&self, key: Option<&str>, declared: Actor) -> Actor {
+        if declared.is_agent() {
+            return declared;
+        }
+        if let Some(k) = key {
+            if let Some(found) = self.roster.lock().unwrap().find(k) {
+                return found;
+            }
+            if self.edit_key.lock().unwrap().as_deref() == Some(k) {
+                return declared;
+            }
+        }
+        if self.is_locked() {
+            Actor::Anonymous
+        } else {
+            declared
+        }
+    }
+
+    /// May `actor` do `perm`? `device_dept` is the department of the device it concerns: the laser safety officer
+    /// may only try or test lasers.
+    pub fn allow(&self, actor: &Actor, perm: Perm, device_dept: Option<&str>) -> bool {
+        match actor {
+            Actor::Agent(_) => false,
+            Actor::Member { role, .. } => governance::role_allows(role, perm) && (role != "lso" || !matches!(perm, Perm::Try | Perm::Test) || device_dept == Some("laser")),
+            Actor::Person(_) => true,
+            // an operator-key-only show leaves GO open to the button box; a roster does not
+            Actor::Anonymous => perm == Perm::Go && !self.roster_active(),
+        }
+    }
+
+    /// The department of a rig device, if there is one with that id.
+    pub fn device_dept(&self, id: &str) -> Option<String> {
+        self.output.lock().unwrap().as_ref().and_then(|o| o.devices().iter().find(|d| d.id == id).map(|d| d.dept.clone()))
+    }
+
     /// Whether `provided` may edit: always when no key is set.
     pub fn edit_ok(&self, provided: Option<&str>) -> bool {
         match &*self.edit_key.lock().unwrap() {
@@ -285,7 +342,8 @@ impl Show {
             "output": out.as_ref().map(|o| if o.sending() { "live" } else { "dry-run" }),
             // the server's clock now, so a client can tell how old each readiness report is without trusting its own clock
             "server_ts": now_ms(),
-            "edit_locked": self.edit_key.lock().unwrap().is_some(),
+            "edit_locked": self.is_locked(),
+            "roster": self.roster_active(),
             "resumed": self.resumed.lock().unwrap().clone(),
             "undo_depth": self.history.lock().unwrap().len(),
             "governed": self.gov.log.get().is_some(),
@@ -729,6 +787,11 @@ impl Show {
     /// Write one decision to the signed log: `gate` is ALLOW, DENY or ESCALATE (waiting on a person).
     /// Returns the receipt id, or None when receipts are not turned on. Never call with the inner lock held.
     pub fn receipt(&self, rule: &str, gate: &str, actor: &Actor, text: &str) -> Option<String> {
+        {
+            let g = self.inner.lock().unwrap();
+            let show_id = g.engine.chart.id.clone().unwrap_or_else(|| "show".into());
+            let _ = g.store.append(now_ms(), "runtime", Some(&show_id), "show.decision", &json!({"ts": now_ms(), "rule": rule, "gate": gate, "by": actor.name(), "text": text}));
+        }
         let log = self.gov.log.get()?;
         Some(log.record(rule, gate, &format!("{}: {}", actor.name(), text), &self.state_hash()).receipt_id)
     }
@@ -856,6 +919,7 @@ impl Show {
             "cues": cues,
             "problems": problems,
             "edits": of("show.edit"),
+            "decisions": of("show.decision"),
             "summary": {
                 "cues_fired": cues.len(),
                 "deliveries": deliveries.len(),
@@ -977,6 +1041,7 @@ pub fn router_with_token(show: Arc<Show>, token: Option<String>) -> Router {
             if !authorized(&a.token, &q, &h) { return (StatusCode::UNAUTHORIZED, Json(json!({"error": "token required"}))); }
             (StatusCode::OK, Json(a.show.preflight()))
         }))
+        .route("/whoami", get(get_whoami))
         .route("/rehearse", post(post_rehearse))
         .route("/proposals", get(get_proposals))
         .route("/proposals/:id/:verb", post(post_decide))
@@ -999,49 +1064,72 @@ fn authorized(token: &Option<String>, q: &HashMap<String, String>, h: &HeaderMap
 
 type Reply = (StatusCode, Json<Value>);
 
-/// Who is asking: `X-Pchi-Actor: agent:<name>` (or `?actor=`), otherwise a person.
+/// What a client says about itself: `X-Pchi-Actor: agent:<name>` (or `?actor=`), otherwise a person.
+/// A declaration only: who they really are comes from `Show::identify`.
 fn actor_of(q: &HashMap<String, String>, h: &HeaderMap) -> Actor {
     Actor::from_headers(h, q.get("actor").map(String::as_str))
 }
 
-/// An agent asked for something only a person may do: refuse, and write the refusal down.
-fn refuse_agent(show: &Show, actor: &Actor, rule: &str, what: &str) -> Reply {
-    let receipt = show.receipt(rule, "DENY", actor, &format!("refused: agents may not {what}"));
-    (StatusCode::FORBIDDEN, Json(json!({"error": format!("agents may not {what}: they can propose a show edit for a person to approve"), "denied": true, "agent": true, "receipt": receipt})))
+/// Who is really asking: the roster person or operator the key belongs to, an agent, or nobody.
+fn who(a: &App, q: &HashMap<String, String>, h: &HeaderMap) -> Actor {
+    a.show.identify(edit_key_of(q, h), actor_of(q, h))
 }
 
-/// The operator's key is missing or wrong: refuse, and write the refusal down.
-fn refuse_key(show: &Show, actor: &Actor, rule: &str, what: &str) -> Reply {
-    show.receipt(rule, "DENY", actor, &format!("refused: {what} needs the operator key"));
-    locked()
+/// Refuse, and write the refusal down. Says why in the words the person needs.
+fn refuse(show: &Show, actor: &Actor, rule: &str, what: &str) -> Reply {
+    match actor {
+        Actor::Agent(_) => {
+            let receipt = show.receipt(rule, "DENY", actor, &format!("refused: agents may not {what}"));
+            (StatusCode::FORBIDDEN, Json(json!({"error": format!("agents may not {what}: they can propose a show edit for a person to approve"), "denied": true, "agent": true, "receipt": receipt})))
+        }
+        Actor::Anonymous => {
+            show.receipt(rule, "DENY", actor, &format!("refused: {what} needs a key"));
+            locked()
+        }
+        _ => {
+            let receipt = show.receipt(rule, "DENY", actor, &format!("refused: {} may not {what}", actor.role()));
+            (StatusCode::FORBIDDEN, Json(json!({"error": format!("{} may not {what}", actor.name()), "denied": true, "role": actor.role(), "receipt": receipt})))
+        }
+    }
 }
 
-/// For routes only a person with the key may use (agents are refused first).
-fn person_with_key(a: &App, actor: &Actor, q: &HashMap<String, String>, h: &HeaderMap, rule: &str, what: &str) -> Result<(), Reply> {
-    if actor.is_agent() {
-        return Err(refuse_agent(&a.show, actor, rule, what));
+/// Let `actor` through, or refuse (and record it).
+fn gate(a: &App, actor: &Actor, perm: Perm, rule: &str, what: &str, device: Option<&str>) -> Result<(), Reply> {
+    let dept = device.and_then(|d| a.show.device_dept(d));
+    if a.show.allow(actor, perm, dept.as_deref()) {
+        Ok(())
+    } else {
+        Err(refuse(&a.show, actor, rule, what))
     }
-    if !a.show.edit_ok(edit_key_of(q, h)) {
-        return Err(refuse_key(&a.show, actor, rule, what));
-    }
-    Ok(())
 }
 
 fn unauthorized() -> Reply {
     (StatusCode::UNAUTHORIZED, Json(json!({"error": "token required"})))
 }
 
+/// `GET /whoami`: who the runtime takes the caller to be, and what they may do. Reads the same key as everything else.
+async fn get_whoami(State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap) -> impl IntoResponse {
+    if !authorized(&a.token, &q, &h) {
+        return unauthorized();
+    }
+    let actor = who(&a, &q, &h);
+    let can: Vec<&str> = governance::ALL_PERMS.iter().filter(|(p, _)| a.show.allow(&actor, *p, Some("laser"))).map(|(_, n)| *n).collect();
+    (StatusCode::OK, Json(json!({"name": actor.name(), "role": actor.role(), "signed_in": !matches!(actor, Actor::Anonymous), "locked": a.show.is_locked(), "can": can})))
+}
+
 /// `POST /show` (a show file, as Studio saves it) replaces the running show's definition;
 /// `?dry=1` only reports what would change. See `Show::replace`.
-/// From an agent (`X-Pchi-Actor: agent:...`) a real send is stored as a proposal for a person to approve.
+/// From an agent a real send is stored as a proposal for a person to approve.
 async fn post_show(State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap, body: String) -> impl IntoResponse {
     if !authorized(&a.token, &q, &h) {
         return unauthorized();
     }
-    let actor = actor_of(&q, &h);
+    let actor = who(&a, &q, &h);
     let dry = q.get("dry").is_some_and(|v| v == "1" || v == "true");
-    if !actor.is_agent() && !a.show.edit_ok(edit_key_of(&q, &h)) {
-        return refuse_key(&a.show, &actor, "show.edit", "sending a show");
+    if !actor.is_agent() {
+        if let Err(r) = gate(&a, &actor, Perm::Edit, "show.edit", "send a show", None) {
+            return r;
+        }
     }
     let (chart, devices) = match rig::load(&body) {
         Ok(x) => x,
@@ -1064,13 +1152,13 @@ async fn post_show(State(a): State<App>, q: Query<HashMap<String, String>>, h: H
     }
 }
 
-/// The operator's key, from `X-Pchi-Edit-Key` or `?edit_key=`.
+/// The caller's key, from `X-Pchi-Edit-Key` or `?edit_key=`.
 fn edit_key_of<'a>(q: &'a HashMap<String, String>, h: &'a HeaderMap) -> Option<&'a str> {
     h.get("x-pchi-edit-key").and_then(|v| v.to_str().ok()).or_else(|| q.get("edit_key").map(String::as_str))
 }
 
 fn locked() -> Reply {
-    (StatusCode::FORBIDDEN, Json(json!({"error": "the operator key is required for this", "locked": true})))
+    (StatusCode::FORBIDDEN, Json(json!({"error": "a key is required for this", "locked": true})))
 }
 
 /// `POST /show/undo` (`?dry=1` to preview): put the show back as it was before the last send.
@@ -1078,14 +1166,12 @@ async fn post_undo(State(a): State<App>, q: Query<HashMap<String, String>>, h: H
     if !authorized(&a.token, &q, &h) {
         return unauthorized();
     }
-    let actor = actor_of(&q, &h);
+    let actor = who(&a, &q, &h);
     let dry = q.get("dry").is_some_and(|v| v == "1" || v == "true");
-    if !dry {
-        if let Err(r) = person_with_key(&a, &actor, &q, &h, "show.undo", "undo a send") {
+    if !(dry && actor.is_agent()) {
+        if let Err(r) = gate(&a, &actor, Perm::Undo, "show.undo", "undo a send", None) {
             return r;
         }
-    } else if !actor.is_agent() && !a.show.edit_ok(edit_key_of(&q, &h)) {
-        return locked();
     }
     match a.show.undo(!dry) {
         Ok(v) => {
@@ -1098,13 +1184,13 @@ async fn post_undo(State(a): State<App>, q: Query<HashMap<String, String>>, h: H
     }
 }
 
-/// `POST /devices/<id>/try` {"value": "3"}: one cue to one device through its profile. Needs the operator key.
+/// `POST /devices/<id>/try` {"value": "3"}: one cue to one device through its profile.
 async fn post_try(State(a): State<App>, Path(id): Path<String>, q: Query<HashMap<String, String>>, h: HeaderMap, Json(body): Json<Value>) -> impl IntoResponse {
     if !authorized(&a.token, &q, &h) {
         return unauthorized();
     }
-    let actor = actor_of(&q, &h);
-    if let Err(r) = person_with_key(&a, &actor, &q, &h, "device.try", "send a cue to a device") {
+    let actor = who(&a, &q, &h);
+    if let Err(r) = gate(&a, &actor, Perm::Try, "device.try", "send a cue to a device", Some(&id)) {
         return r;
     }
     let value = body["value"].as_str().unwrap_or("");
@@ -1117,26 +1203,26 @@ async fn post_try(State(a): State<App>, Path(id): Path<String>, q: Query<HashMap
     }
 }
 
-/// `POST /laser/stop`: the hard stop. Needs the feed token (if any) but NOT the operator key: anyone on the crew can stop, agents included.
+/// `POST /laser/stop`: the hard stop. Needs the feed token (if any) but no key and no role: anyone on the crew can stop, agents included.
 async fn post_laser_stop(State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap) -> impl IntoResponse {
     if !authorized(&a.token, &q, &h) {
         return unauthorized();
     }
-    let actor = actor_of(&q, &h);
+    let actor = who(&a, &q, &h);
     let v = a.show.laser_stop();
     a.show.receipt("laser.stop", "ALLOW", &actor, &format!("hard stop: disarmed {} laser(s)", v["stopped"].as_array().map_or(0, |s| s.len())));
     (StatusCode::OK, Json(v))
 }
 
-/// `POST /devices/<id>/arm?armed=1|0`: arming needs the operator key and a person; disarming never does (agents may disarm).
+/// `POST /devices/<id>/arm?armed=1|0`: arming needs the right (an operator, or the laser safety officer); disarming never does.
 async fn post_arm(State(a): State<App>, Path(id): Path<String>, q: Query<HashMap<String, String>>, h: HeaderMap) -> impl IntoResponse {
     if !authorized(&a.token, &q, &h) {
         return unauthorized();
     }
-    let actor = actor_of(&q, &h);
+    let actor = who(&a, &q, &h);
     let armed = q.get("armed").is_some_and(|v| v == "1" || v == "true");
     if armed {
-        if let Err(r) = person_with_key(&a, &actor, &q, &h, "laser.arm", "arm a laser") {
+        if let Err(r) = gate(&a, &actor, Perm::Arm, "laser.arm", "arm a laser", None) {
             return r;
         }
     }
@@ -1154,8 +1240,8 @@ async fn post_test(State(a): State<App>, Path(id): Path<String>, q: Query<HashMa
     if !authorized(&a.token, &q, &h) {
         return unauthorized();
     }
-    let actor = actor_of(&q, &h);
-    if let Err(r) = person_with_key(&a, &actor, &q, &h, "device.test", "test-fire a device") {
+    let actor = who(&a, &q, &h);
+    if let Err(r) = gate(&a, &actor, Perm::Test, "device.test", "test-fire a device", Some(&id)) {
         return r;
     }
     match a.show.test_fire(&id).await {
@@ -1191,18 +1277,18 @@ async fn get_proposals(State(a): State<App>, q: Query<HashMap<String, String>>, 
     (StatusCode::OK, Json(a.show.proposals()))
 }
 
-/// `POST /proposals/<id>/approve|reject`: a person with the operator key decides.
+/// `POST /proposals/<id>/approve|reject`: a person with the right (an operator or an editor) decides.
 async fn post_decide(State(a): State<App>, Path((id, verb)): Path<(u32, String)>, q: Query<HashMap<String, String>>, h: HeaderMap) -> impl IntoResponse {
     if !authorized(&a.token, &q, &h) {
         return unauthorized();
     }
-    let actor = actor_of(&q, &h);
+    let actor = who(&a, &q, &h);
     let (rule, what) = match verb.as_str() {
         "approve" => ("show.edit", "approve a proposal"),
         "reject" => ("show.reject", "reject a proposal"),
         _ => return (StatusCode::NOT_FOUND, Json(json!({"error": "use approve or reject"}))),
     };
-    if let Err(r) = person_with_key(&a, &actor, &q, &h, rule, what) {
+    if let Err(r) = gate(&a, &actor, Perm::Approve, rule, what, None) {
         return r;
     }
     let r = if verb == "approve" { a.show.approve(id, &actor) } else { a.show.reject(id, &actor) };
@@ -1244,9 +1330,9 @@ async fn post_input(State(a): State<App>, q: Query<HashMap<String, String>>, h: 
     let Some(event) = body["event"].as_str() else {
         return (StatusCode::BAD_REQUEST, Json(json!({"error": "send {\"event\": \"NAME\"}"})));
     };
-    let actor = actor_of(&q, &h);
-    if actor.is_agent() {
-        return refuse_agent(&a.show, &actor, "show.go", "run the show (send an input)");
+    let actor = who(&a, &q, &h);
+    if let Err(r) = gate(&a, &actor, Perm::Go, "show.go", "run the show (send an input)", None) {
+        return r;
     }
     let applied = a.show.apply("http", event);
     if applied {
@@ -1259,8 +1345,8 @@ async fn ws_upgrade(ws: WebSocketUpgrade, State(a): State<App>, q: Query<HashMap
     if !authorized(&a.token, &q, &h) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+    let actor = who(&a, &q, &h);
     let show = a.show;
-    let actor = actor_of(&q, &h);
     ws.on_upgrade(move |socket| client(socket, show, actor))
 }
 
@@ -1298,10 +1384,11 @@ async fn client(socket: WebSocket, show: Arc<Show>, actor: Actor) {
 fn handle_client(show: &Arc<Show>, actor: &Actor, text: &str) {
     let Ok(v) = serde_json::from_str::<Value>(text) else { return };
     let kind = v["type"].as_str();
-    // an agent may report readiness, but it may not run the show
-    if actor.is_agent() && matches!(kind, Some("input") | Some("context") | Some("reset")) {
-        show.receipt("show.go", "DENY", actor, &format!("refused: agents may not run the show ({})", kind.unwrap_or("")));
-        show.publish(json!({"type": "error", "message": "agents may not run the show: they can propose a show edit for a person to approve"}));
+    // anyone may report readiness, but running the show needs the right to
+    if matches!(kind, Some("input") | Some("context") | Some("reset")) && !show.allow(actor, Perm::Go, None) {
+        show.receipt("show.go", "DENY", actor, &format!("refused: {} may not run the show ({})", actor.role(), kind.unwrap_or("")));
+        let why = if actor.is_agent() { "agents may not run the show: they can propose a show edit for a person to approve".to_string() } else if matches!(actor, Actor::Anonymous) { "sign in with your key to run the show".to_string() } else { format!("{} may not run the show", actor.name()) };
+        show.publish(json!({"type": "error", "message": why}));
         return;
     }
     match kind {
@@ -2457,5 +2544,141 @@ mod tests {
         assert_eq!(show.snapshot()["definition"], serde_json::to_value(quick()).unwrap(), "a rehearsal must not change the show");
         assert!(show.snapshot()["proposals"].as_array().unwrap().is_empty());
         assert_eq!(http(addr, "POST", "/rehearse", "not json", AGENT).await.0, 400);
+    }
+
+    // ---- roles: named people, each with their own key and what that key allows ----
+
+    const ROSTER: &str = r#"{"people": [
+        {"name": "Alex", "role": "operator", "key": "alex-key-123"},
+        {"name": "Eddie", "role": "editor", "key": "eddie-key-123"},
+        {"name": "Sam", "role": "lso", "key": "sam-key-1234"},
+        {"name": "Gus", "role": "guest", "key": "gus-key-1234"},
+        {"name": "Nova", "role": "agent", "key": "nova-key-123"}]}"#;
+
+    fn k(key: &str) -> String {
+        format!("X-Pchi-Edit-Key: {key}\r\n")
+    }
+
+    /// A show with a laser (b1) and a lighting desk (e1), the roster above, the legacy operator key "legacy-key", and receipts.
+    async fn rostered(name: &str) -> (Arc<Show>, std::net::SocketAddr) {
+        let dir = std::env::temp_dir().join(format!("pchi-roles-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = Output::new(vec![device("b1", "beyond", 9), device("e1", "eos", 9)], false);
+        let show = Show::start_with(quick(), EventStore::open_in_memory().unwrap(), Some(out)).unwrap();
+        show.set_edit_key(Some("legacy-key".into()));
+        show.set_roster(governance::Roster::parse(ROSTER).unwrap());
+        show.set_governance(primeswarm_pchi::GovernanceLog::open(dir.join("key.hex").to_str().unwrap(), dir.join("log.jsonl").to_str().unwrap()).unwrap());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = router_with_token(Arc::clone(&show), None);
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (show, addr)
+    }
+
+    #[test]
+    fn a_roster_must_be_sound() {
+        let bad = |t: &str| governance::Roster::parse(t).err().unwrap_or_default();
+        assert!(bad(r#"[{"name":"A","role":"boss","key":"12345678"}]"#).contains("role 'boss'"));
+        assert!(bad(r#"[{"name":"A","role":"guest","key":"short"}]"#).contains("at least 8"));
+        assert!(bad(r#"[{"name":"","role":"guest","key":"12345678"}]"#).contains("no name"));
+        assert!(bad(r#"[{"name":"A","role":"guest","key":"12345678"},{"name":"a","role":"guest","key":"87654321"}]"#).contains("listed twice"));
+        assert!(bad(r#"[{"name":"A","role":"guest","key":"12345678"},{"name":"B","role":"guest","key":"12345678"}]"#).contains("same key"));
+        assert!(bad("nope").contains("not valid JSON"));
+        let ok = governance::Roster::parse(ROSTER).unwrap();
+        assert_eq!(ok.len(), 5);
+        assert!(ok.has_role("lso") && ok.summary().contains("Eddie (editor)"));
+        assert!(governance::Roster::parse(r#"[{"name":"A","role":"operator","key":"12345678"}]"#).is_ok(), "a bare list works too");
+    }
+
+    #[tokio::test]
+    async fn each_role_may_do_what_it_is_given_and_no_more() {
+        let (_show, addr) = rostered("matrix").await;
+        let who = |key: &str| {
+            let h = k(key);
+            async move { http(addr, "GET", "/whoami", "", &h).await.1 }
+        };
+        let body = serde_json::to_string(&quick()).unwrap();
+        let go = r#"{"event":"START"}"#;
+        let status = |key: &'static str, method: &'static str, path: &'static str, b: &'static str| {
+            let h = k(key);
+            let b = b.to_string();
+            async move { http(addr, method, path, &b, &h).await.0 }
+        };
+
+        // who the runtime takes each key to be
+        assert_eq!(who("alex-key-123").await["name"], "Alex (operator)");
+        assert_eq!(who("legacy-key").await["role"], "operator", "the single operator key still works");
+        let nobody = http(addr, "GET", "/whoami", "", "").await.1;
+        assert_eq!((nobody["signed_in"].clone(), nobody["can"].clone()), (json!(false), json!([])));
+        assert_eq!(who("gus-key-1234").await["can"], json!([]));
+        assert_eq!(who("eddie-key-123").await["can"], json!(["edit", "approve", "undo", "try", "test"]));
+        assert_eq!(who("sam-key-1234").await["can"], json!(["arm", "try", "test"]));
+        // a label on the request cannot change who you are
+        let (_, w) = http(addr, "GET", "/whoami", "", "X-Pchi-Edit-Key: eddie-key-123\r\nX-Pchi-Actor: person:Alex\r\n").await;
+        assert_eq!(w["name"], "Eddie (editor)");
+        // and an agent stays an agent whatever key it holds
+        let (_, w) = http(addr, "GET", "/whoami", "", &format!("{AGENT}{}", k("alex-key-123"))).await;
+        assert_eq!(w["role"], "agent");
+
+        // nobody signed in: nothing, and GO needs a key too once there is a roster
+        assert_eq!(http(addr, "POST", "/input", go, "").await.0, 403);
+        assert_eq!(http(addr, "POST", "/show", &body, "").await.0, 403);
+        // a guest may look but not touch
+        let (st, v) = http(addr, "POST", "/input", go, &k("gus-key-1234")).await;
+        assert_eq!((st, v["role"].clone(), v["denied"].clone()), (403, json!("guest"), json!(true)), "{v}");
+        assert_eq!(status("gus-key-1234", "POST", "/rehearse", "{}").await, 400, "rehearse is open to a guest (an empty body is just a bad request)");
+        assert_eq!(status("gus-key-1234", "POST", "/devices/b1/arm?armed=0", "").await, 200, "anyone may disarm");
+        assert_eq!(status("gus-key-1234", "POST", "/laser/stop", "").await, 200, "anyone may stop the lasers");
+
+        // an editor edits and decides proposals, but does not run the show or arm a laser
+        assert_eq!(http(addr, "POST", "/show", &body, &k("eddie-key-123")).await.0, 200);
+        assert_eq!(status("eddie-key-123", "POST", "/input", go).await, 403);
+        assert_eq!(status("eddie-key-123", "POST", "/devices/b1/arm?armed=1", "").await, 403);
+        assert_eq!(http(addr, "POST", "/devices/e1/try", r#"{"value":"1"}"#, &k("eddie-key-123")).await.0, 200);
+
+        // the laser safety officer arms and tests lasers, and nothing else
+        assert_eq!(status("sam-key-1234", "POST", "/devices/b1/arm?armed=1", "").await, 200);
+        assert_eq!(http(addr, "POST", "/devices/b1/try", r#"{"value":"x"}"#, &k("sam-key-1234")).await.0, 200);
+        assert_eq!(http(addr, "POST", "/devices/e1/try", r#"{"value":"1"}"#, &k("sam-key-1234")).await.0, 403, "not a laser");
+        assert_eq!(status("sam-key-1234", "POST", "/devices/e1/test", "").await, 403);
+        assert_eq!(status("sam-key-1234", "POST", "/input", go).await, 403);
+        assert_eq!(http(addr, "POST", "/show", &body, &k("sam-key-1234")).await.0, 403);
+
+        // the operator does all of it
+        assert_eq!(status("alex-key-123", "POST", "/input", go).await, 200);
+        assert_eq!(status("alex-key-123", "POST", "/devices/b1/arm?armed=1", "").await, 200);
+    }
+
+    #[tokio::test]
+    async fn a_named_agent_proposes_under_its_own_name_and_a_person_of_the_right_role_approves() {
+        let (show, addr) = rostered("agent").await;
+        let mut edited = quick();
+        move_cue(&mut edited, "INTRO", "lighting", 3_000);
+        let (st, v) = http(addr, "POST", "/show", &serde_json::to_string(&edited).unwrap(), &k("nova-key-123")).await;
+        assert_eq!((st, v["proposal"]["actor"].clone()), (202, json!("agent:Nova")), "{v}");
+        assert_eq!(http(addr, "POST", "/input", r#"{"event":"START"}"#, &k("nova-key-123")).await.0, 403);
+        // a guest cannot approve; an editor can; the receipt says who
+        assert_eq!(http(addr, "POST", "/proposals/1/approve", "", &k("gus-key-1234")).await.0, 403);
+        assert_eq!(http(addr, "POST", "/proposals/1/approve", "", &k("eddie-key-123")).await.0, 200);
+        assert_eq!(show.snapshot()["definition"], serde_json::to_value(&edited).unwrap());
+        let r = receipts(&show);
+        assert!(r.iter().any(|(ru, g, m)| ru == "show.edit" && g == "ALLOW" && m.starts_with("Eddie (editor): approved proposal #1 from agent:Nova")), "{r:?}");
+        assert!(r.iter().any(|(ru, g, m)| ru == "show.edit" && g == "DENY" && m.contains("Gus (guest)") || ru == "show.edit" && g == "DENY" && m.contains("guest may not")), "{r:?}");
+    }
+
+    #[tokio::test]
+    async fn the_run_report_says_who_did_what() {
+        let (show, addr) = rostered("report").await;
+        assert_eq!(http(addr, "POST", "/input", r#"{"event":"START"}"#, &k("alex-key-123")).await.0, 200);
+        assert_eq!(http(addr, "POST", "/devices/b1/arm?armed=1", "", &k("sam-key-1234")).await.0, 200);
+        assert_eq!(http(addr, "POST", "/devices/b1/arm?armed=1", "", &k("gus-key-1234")).await.0, 403);
+        let d = show.run_report()["decisions"].as_array().unwrap().clone();
+        let line = |rule: &str, gate: &str| d.iter().find(|x| x["rule"] == rule && x["gate"] == gate).map(|x| x["by"].as_str().unwrap().to_string());
+        assert_eq!(line("show.go", "ALLOW").as_deref(), Some("Alex (operator)"));
+        assert_eq!(line("laser.arm", "ALLOW").as_deref(), Some("Sam (lso)"));
+        assert_eq!(line("laser.arm", "DENY").as_deref(), Some("Gus (guest)"));
     }
 }

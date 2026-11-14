@@ -64,7 +64,8 @@ file, and keep a copy of the verifying key (printed at startup) somewhere the ru
 
 - **The actor is a declaration, not a login.** It holds back honest agents and gives the record its names. An agent that
   is handed the operator key and lies about who it is can still act as a person. Keep the key away from agents.
-  Per-person identity and roles are the next step.
+  With a roster (`roles.md`) people are identified by their own keys, and an agent can be given a roster entry of its own so
+  its name is verified too; a bare `X-Pchi-Actor: agent:` declaration is still only a declaration.
 - Receipts prove what the runtime decided and in what order. They cannot prove that the runtime itself was not replaced
   or that the machine's clock was right.
 - A runtime started without `--governance` still holds agents back (the policy always applies) but writes nothing down.

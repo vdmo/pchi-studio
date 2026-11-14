@@ -6,7 +6,7 @@ import CommandBar from './CommandBar'
 import TimelineStrip, { useStripLayout } from './TimelineStrip'
 import { sceneInfo } from './sceneInfo'
 import LiveCallSheet from './LiveCallSheet'
-import RuntimeTools, { armLaser, decideProposal, stopLasers, testFire, tryCue } from './RuntimeTools'
+import RuntimeTools, { armLaser, decideProposal, signIn, signOut, stopLasers, testFire, tryCue, whoami, type WhoAmI } from './RuntimeTools'
 import { STALE_MS, feedUrl, type Ready } from './liveFeed'
 import { fmt } from './TimelineStrip'
 import {
@@ -108,6 +108,9 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
   const [undoDepth, setUndoDepth] = useState(0) // sends that can still be undone
   const [proposals, setProposals] = useState<{ id: number; actor: string; status: string; changes: string[]; notes: string[] }[]>([]) // edits an agent proposed
   const [governed, setGoverned] = useState(false) // the runtime writes signed receipts
+  const [me, setMe] = useState<WhoAmI | null>(null) // who the runtime takes this tab to be
+  const [authTick, setAuthTick] = useState(0) // bumped on sign in / out: the feed reconnects so the runtime knows who is pressing GO
+  const [signErr, setSignErr] = useState('')
   const [decideErr, setDecideErr] = useState('')
   const [armed, setArmed] = useState(false) // GO pressed once while a department is on hold
   const [trail, setTrail] = useState<{ ts: number; text: string }[]>([])
@@ -217,7 +220,11 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
       window.clearTimeout(timer)
       ws.current?.close()
     }
-  }, [])
+  }, [authTick])
+
+  useEffect(() => {
+    if (status === 'online') whoami().then(setMe)
+  }, [status, authTick])
 
   // timed transitions leaving the current state, with whether each would fire right now
   const timerRows = useMemo(
@@ -551,6 +558,33 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
           </form>
         )}
         {getFile && <RuntimeTools getFile={getFile} locked={locked} undoDepth={undoDepth} />}
+        {(locked || me?.signed_in) && (
+          <p className="muted gov-badge who" role="status">
+            {me?.signed_in ? (
+              <>
+                Signed in as <b>{me.name}</b>
+                {me.can.length ? ' · may ' + me.can.join(', ') : ' · look only'}{' '}
+                <button className="ghost" onClick={() => { signOut(); setMe(null); setAuthTick((t) => t + 1) }}>Sign out</button>
+              </>
+            ) : (
+              <>
+                Not signed in{' '}
+                <button
+                  onClick={async () => {
+                    const k = window.prompt('Your key (from whoever runs the show):')
+                    if (!k) return
+                    const who = await signIn(k)
+                    setSignErr(who ? '' : 'That key is not known to this runtime.')
+                    if (who) { setMe(who); setAuthTick((t) => t + 1) }
+                  }}
+                >
+                  Sign in
+                </button>
+              </>
+            )}
+            {signErr && <span role="alert"> {signErr}</span>}
+          </p>
+        )}
         {governed && <p className="muted gov-badge" title="Every edit, arming, GO and refusal is written to a signed, hash-chained log you can verify offline">Signed receipts are on</p>}
         {proposals.some((p) => p.status === 'pending') && (
           <section className="proposals" aria-label="Edits waiting for a person">

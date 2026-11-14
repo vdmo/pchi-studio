@@ -25,8 +25,14 @@ use std::sync::{Mutex, OnceLock};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Actor {
+    /// Someone who passed the operator key (or anyone, when the show is not locked). Full powers.
     Person(Option<String>),
+    /// An agent: declared by header, or a roster entry with the role "agent".
     Agent(String),
+    /// A named person from the roster, identified by their own key, with a role.
+    Member { name: String, role: String },
+    /// Locked show, no valid key.
+    Anonymous,
 }
 
 fn clean(s: &str) -> String {
@@ -66,6 +72,18 @@ impl Actor {
             Actor::Person(Some(n)) => format!("person:{n}"),
             Actor::Person(None) => "operator".into(),
             Actor::Agent(n) => format!("agent:{n}"),
+            Actor::Member { name, role } => format!("{name} ({role})"),
+            Actor::Anonymous => "unidentified".into(),
+        }
+    }
+
+    /// The role this actor acts in, for messages.
+    pub fn role(&self) -> &str {
+        match self {
+            Actor::Person(_) => "operator",
+            Actor::Agent(_) => "agent",
+            Actor::Member { role, .. } => role,
+            Actor::Anonymous => "none",
         }
     }
 }
@@ -106,5 +124,113 @@ impl Gov {
     }
     pub fn all_json(&self) -> Value {
         Value::Array(self.proposals.lock().unwrap().iter().map(Proposal::json).collect())
+    }
+}
+
+/// What can be asked of a running show. Disarming a laser, STOP LASERS, rehearsing and reading need no permission.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Perm {
+    /// Press GO, send inputs and context, reset.
+    Go,
+    /// Send an edited show (or preview one).
+    Edit,
+    /// Approve or reject an agent's proposal.
+    Approve,
+    Undo,
+    /// Arm a laser.
+    Arm,
+    /// Send a cue to a device by hand.
+    Try,
+    /// Test-fire a device.
+    Test,
+}
+
+pub const ALL_PERMS: [(Perm, &str); 7] = [(Perm::Go, "go"), (Perm::Edit, "edit"), (Perm::Approve, "approve"), (Perm::Undo, "undo"), (Perm::Arm, "arm"), (Perm::Try, "try"), (Perm::Test, "test")];
+
+/// The roles a roster may give. An "lso" (laser safety officer) may only try or test lasers.
+pub const ROLES: [&str; 5] = ["operator", "editor", "lso", "guest", "agent"];
+
+pub fn role_allows(role: &str, perm: Perm) -> bool {
+    match role {
+        "operator" => true,
+        "editor" => matches!(perm, Perm::Edit | Perm::Approve | Perm::Undo | Perm::Try | Perm::Test),
+        "lso" => matches!(perm, Perm::Arm | Perm::Try | Perm::Test),
+        _ => false, // guest, and agent (which proposes instead)
+    }
+}
+
+/// One person (or one named agent) and the key that identifies them.
+pub struct Member {
+    pub name: String,
+    pub role: String,
+    key_hash: String,
+}
+
+/// Who may sign in, from a roster file: `[{"name": "Alex", "role": "operator", "key": "..."}]`
+/// (or `{"people": [...]}`). Keys are compared by hash and never sent anywhere; the file itself holds them, so protect it.
+#[derive(Default)]
+pub struct Roster {
+    members: Vec<Member>,
+}
+
+fn key_hash(key: &str) -> String {
+    primeswarm_pchi::governance::hash_state(&Value::String(key.to_string()))
+}
+
+impl Roster {
+    pub fn parse(text: &str) -> Result<Roster, String> {
+        let v: Value = serde_json::from_str(text).map_err(|e| format!("the roster is not valid JSON: {e}"))?;
+        let list = v.get("people").unwrap_or(&v).as_array().ok_or("the roster must be a list of people")?;
+        let mut members: Vec<Member> = Vec::new();
+        for (i, p) in list.iter().enumerate() {
+            let name = clean(p["name"].as_str().unwrap_or(""));
+            let role = p["role"].as_str().unwrap_or("").trim().to_ascii_lowercase();
+            let key = p["key"].as_str().unwrap_or("");
+            if name.is_empty() {
+                return Err(format!("person {} has no name", i + 1));
+            }
+            if !ROLES.contains(&role.as_str()) {
+                return Err(format!("{name}: role '{role}' is not one of {}", ROLES.join(", ")));
+            }
+            if key.len() < 8 {
+                return Err(format!("{name}: the key must be at least 8 characters"));
+            }
+            let hash = key_hash(key);
+            if members.iter().any(|m| m.name.eq_ignore_ascii_case(&name)) {
+                return Err(format!("{name} is listed twice"));
+            }
+            if members.iter().any(|m| m.key_hash == hash) {
+                return Err(format!("{name} has the same key as someone else: each person needs their own"));
+            }
+            members.push(Member { name, role, key_hash: hash });
+        }
+        Ok(Roster { members })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.members.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.members.len()
+    }
+
+    pub fn has_key(&self, key: &str) -> bool {
+        self.find(key).is_some()
+    }
+
+    /// Who this key belongs to: a member, or a named agent when the role is "agent".
+    pub fn find(&self, key: &str) -> Option<Actor> {
+        let h = key_hash(key);
+        self.members.iter().find(|m| m.key_hash == h).map(|m| if m.role == "agent" { Actor::Agent(m.name.clone()) } else { Actor::Member { name: m.name.clone(), role: m.role.clone() } })
+    }
+
+    /// "Alex (operator), Sam (lso)" for the startup line.
+    pub fn summary(&self) -> String {
+        self.members.iter().map(|m| format!("{} ({})", m.name, m.role)).collect::<Vec<_>>().join(", ")
+    }
+
+    pub fn has_role(&self, role: &str) -> bool {
+        self.members.iter().any(|m| m.role == role)
     }
 }
