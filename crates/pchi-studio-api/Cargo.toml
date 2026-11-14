@@ -8,6 +8,10 @@ description = "Runs a showchart and serves its live state to Studio over HTTP + 
 name = "pchi-studio-api"
 path = "src/main.rs"
 
+[[bin]]
+name = "pchi-gearcheck"
+path = "src/bin/gearcheck.rs"
+
 [dependencies]
 pchi-showchart = { path = "../pchi-showchart" }
 pchi-eventstore = { path = "../pchi-eventstore" }

@@ -42,6 +42,7 @@ use axum::{
     Json, Router,
 };
 pub mod diff;
+pub mod gearcheck;
 pub mod governance;
 pub mod links;
 pub mod output;

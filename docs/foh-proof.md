@@ -48,6 +48,7 @@ two runtimes started by mistake, and a database on a failing disk.
 ## 4. What only real equipment can prove: the checklist
 
 Do these once per tool, on the real thing or its software version, with the PA muted / the laser safe.
+The guided way is `pchi-gearcheck my-show.pchi --update-doc docs/foh-proof.md` (see `gear-check.md`): it walks each device, asks for the safety word, and ticks only what you confirmed.
 Write the result next to each line; an unticked line is an unproven claim.
 
 For each tool:
