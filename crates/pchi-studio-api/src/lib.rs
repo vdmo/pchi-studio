@@ -45,16 +45,19 @@ pub mod diff;
 pub mod gearcheck;
 pub mod governance;
 pub mod inputs;
+pub mod midi;
 pub mod links;
 pub mod output;
 pub mod preflight;
 pub mod profiles;
 pub mod rehearse;
+pub mod timecode;
 pub mod rig;
 
 use futures_util::{SinkExt, StreamExt};
 use governance::{said_suffix, Actor, Perm, Proposal};
 use output::{Output, Plan};
+use timecode::{Fps, Step as TcStep};
 use pchi_eventstore::{recorder, EventStore};
 use pchi_showchart::{timer_event, Action, ScheduledCue, ShowEngine, Showchart};
 use serde_json::{json, Value};
@@ -62,6 +65,14 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::broadcast;
+
+/// Something the timecode made due.
+enum TcDue {
+    /// A cue of the scene's timecode-locked timeline, with the timecode (ms) its scene clock reads zero at.
+    Cue(ScheduledCue, f64),
+    /// A `tc:` transition's event.
+    Event(String),
+}
 
 /// What happened to an input fed to the show.
 #[derive(Clone, Debug, PartialEq)]
@@ -121,7 +132,11 @@ pub struct Show {
     /// Named people and their roles (empty: the single operator key, or an open show).
     roster: Mutex<governance::Roster>,
     /// OSC inputs listening for button presses (see `inputs`).
-    inputs: Mutex<Vec<Arc<inputs::Input>>>,
+    inputs: Mutex<Vec<Arc<dyn inputs::InputInfo>>>,
+    /// The timecode being heard (from MIDI Time Code or OSC), if any.
+    tc: Mutex<timecode::Clock>,
+    /// When a timecode message last went out to clients (they get at most five a second).
+    tc_published: std::sync::atomic::AtomicI64,
 }
 
 /// How long a department page may stay silent before it counts as not linked (mirrors the Studio).
@@ -161,6 +176,8 @@ impl Show {
             gov: Default::default(),
             roster: Mutex::new(Default::default()),
             inputs: Mutex::new(Vec::new()),
+            tc: Mutex::new(timecode::Clock::default()),
+            tc_published: std::sync::atomic::AtomicI64::new(0),
         })
     }
 
@@ -292,7 +309,7 @@ impl Show {
     }
 
     /// Keep an OSC input so its counters can be shown.
-    pub fn add_input(&self, input: Arc<inputs::Input>) {
+    pub fn add_input(&self, input: Arc<dyn inputs::InputInfo>) {
         self.inputs.lock().unwrap().push(input);
     }
 
@@ -380,6 +397,7 @@ impl Show {
             "edit_locked": self.is_locked(),
             "roster": self.roster_active(),
             "inputs": self.inputs_json(),
+            "timecode": self.timecode_json(),
             "resumed": self.resumed.lock().unwrap().clone(),
             "undo_depth": self.history.lock().unwrap().len(),
             "governed": self.gov.log.get().is_some(),
@@ -461,7 +479,7 @@ impl Show {
     /// Like `apply`, but says why nothing happened when the scene has not yet run its minimum: an input (not the
     /// show's own timer) that would move the scene on too early is HELD, meaning ignored, recorded and reported.
     pub fn apply_checked(self: &Arc<Self>, source: &str, event: &str) -> Applied {
-        if source != "timer" {
+        if source != "timer" && source != "timecode" {
             let held = {
                 let g = self.inner.lock().unwrap();
                 let min = g.engine.chart.state(&g.engine.current_state).and_then(|s| s.min_ms);
@@ -573,7 +591,9 @@ impl Show {
     fn arm_from(self: &Arc<Self>, generation: u64, elapsed: u64) {
         let (timers, cues) = {
             let g = self.inner.lock().unwrap();
-            (g.engine.pending_timers(), g.engine.pending_cues())
+            // a scene locked to timecode has its cues fired by the timecode (see `timecode_update`), not by this clock
+            let locked = g.engine.chart.state(&g.engine.current_state).and_then(|s| s.timeline.as_ref()).is_some_and(|t| t.tc_start.is_some());
+            (g.engine.pending_timers(), if locked { Vec::new() } else { g.engine.pending_cues() })
         };
         for ms in timers.into_iter().filter(|&ms| elapsed == 0 || ms > elapsed) {
             let show = Arc::clone(self);
@@ -777,7 +797,18 @@ impl Show {
             (g.engine.chart.clone(), g.engine.current_state.clone())
         };
         let ready: BTreeMap<String, Value> = self.readiness.lock().unwrap().clone();
-        let checks = preflight::run(&chart, out.as_deref(), &ready, &state);
+        let mut checks = preflight::run(&chart, out.as_deref(), &ready, &state);
+        let uses_tc = chart.states.iter().any(|s| s.timeline.as_ref().is_some_and(|t| t.tc_start.is_some())) || chart.transitions.iter().any(|t| t.event.as_deref().is_some_and(|e| e.starts_with("tc:")));
+        if uses_tc {
+            let tc = self.timecode_json();
+            let text = match tc["state"].as_str() {
+                Some("running") => format!("timecode {} is running ({} fps, from {})", tc["position"].as_str().unwrap_or("?"), tc["fps"].as_str().unwrap_or("?"), tc["source"].as_str().unwrap_or("?")),
+                Some("stopped") => format!("timecode is stopped at {} (or its source went quiet): cues locked to it will not fire until it runs", tc["position"].as_str().unwrap_or("?")),
+                _ => "this show locks cues or scene changes to timecode, but no timecode has been heard: start the source, or add an MTC or OSC timecode input".to_string(),
+            };
+            let level = if tc["state"] == "running" { "ok" } else { "warn" };
+            checks.push(preflight::Check { level, area: "timecode", text, device: None, scene: None });
+        }
         json!({"summary": preflight::summary(&checks), "checks": checks})
     }
 
@@ -833,6 +864,101 @@ impl Show {
         let dev = devices.unwrap_or_else(|| self.output.lock().unwrap().as_ref().map(|o| o.devices().to_vec()).unwrap_or_default());
         let records = self.inner.lock().unwrap().store.all().map_err(|e| e.to_string())?;
         rehearse::run(&records, &chart, &dev, now_ms())
+    }
+
+    /// What the timecode is doing, for clients: {state: none|running|stopped, position, fps, source, heard_ms_ago}.
+    pub fn timecode_json(&self) -> Value {
+        let c = self.tc.lock().unwrap();
+        let st = c.status(now_ms());
+        let position = st.fps.map(|f| {
+            let frames = (st.position_ms / f.frame_ms()).round().max(0.0) as u64;
+            timecode::Tc::from_frames(frames, f).display()
+        });
+        json!({"state": st.state, "position_ms": st.position_ms, "position": position, "fps": st.fps.map(|f| f.label()), "source": c.source, "heard_ms_ago": st.heard_ms_ago})
+    }
+
+    /// A new timecode position from a source (MIDI Time Code, an OSC message). Cues of the running scene that is locked to
+    /// timecode, and `tc:` transitions out of it, fire as the position passes them. A jump (a locate) fires nothing: it is
+    /// reported, with how many cues were jumped over, and going back lets cues fire again as the position passes them.
+    pub fn timecode_update(self: &Arc<Self>, position_ms: f64, fps: Fps, source: &str) {
+        let now = now_ms();
+        let step = self.tc.lock().unwrap().observe(position_ms, fps, now, source);
+        match step {
+            TcStep::Forward { from, to } => self.tc_advance(from, to, fps),
+            TcStep::Jump { from, to } => {
+                let skipped = if to > from { self.tc_due(from, to, fps, false).len() } else { 0 };
+                let (scene, show_id) = {
+                    let g = self.inner.lock().unwrap();
+                    (g.engine.current_state.clone(), g.engine.chart.id.clone().unwrap_or_else(|| "show".into()))
+                };
+                let m = json!({"type": "tc-jump", "ts": now, "from_ms": from, "to_ms": to, "scene": scene, "skipped": skipped, "source": source});
+                let _ = self.inner.lock().unwrap().store.append(now, source, Some(&show_id), "show.tc_jump", &m);
+                self.publish(m);
+            }
+            _ => {}
+        }
+        // clients get the position at most five times a second
+        let last = self.tc_published.load(std::sync::atomic::Ordering::Relaxed);
+        if now - last >= 200 && self.tc_published.compare_exchange(last, now, std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed).is_ok() {
+            let mut m = self.timecode_json();
+            m["type"] = json!("timecode");
+            m["ts"] = json!(now);
+            self.publish(m);
+        }
+    }
+
+    /// What the timecode passing `(from, to]` makes due in the running scene, earliest first, cues before transitions at the same
+    /// position. With `inclusive` the start counts too (for a scene just entered at that position).
+    fn tc_due(&self, from: f64, to: f64, fps: Fps, inclusive: bool) -> Vec<(f64, TcDue)> {
+        let g = self.inner.lock().unwrap();
+        let scene = g.engine.current_state.clone();
+        let inside = |p: f64| (p > from || (inclusive && p >= from)) && p <= to;
+        let mut due: Vec<(f64, TcDue)> = Vec::new();
+        if let Some(tl) = g.engine.chart.state(&scene).and_then(|s| s.timeline.as_ref()) {
+            if let Some(start) = tl.tc_start.as_deref().and_then(|t| timecode::written_to_ms(t, fps).ok()) {
+                for c in g.engine.pending_cues() {
+                    let p = start + c.at_ms as f64;
+                    if inside(p) {
+                        due.push((p, TcDue::Cue(c, start)));
+                    }
+                }
+            }
+        }
+        for t in g.engine.chart.transitions.iter().filter(|t| t.source == scene) {
+            if let Some(ev) = t.event.as_deref().filter(|e| e.starts_with("tc:")) {
+                if let Ok(p) = timecode::written_to_ms(&ev[3..], fps) {
+                    if inside(p) {
+                        due.push((p, TcDue::Event(ev.to_string())));
+                    }
+                }
+            }
+        }
+        due.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal).then_with(|| matches!(a.1, TcDue::Event(_)).cmp(&matches!(b.1, TcDue::Event(_)))));
+        due
+    }
+
+    /// The position moved forward normally from `from` to `to`: fire what it passed, following the show if it changes scene.
+    fn tc_advance(self: &Arc<Self>, from: f64, to: f64, fps: Fps) {
+        let (mut lo, mut inclusive) = (from, false);
+        for _ in 0..50 {
+            let mut moved_at = None;
+            for (pos, item) in self.tc_due(lo, to, fps, inclusive) {
+                match item {
+                    TcDue::Cue(cue, start) => self.fire_cue_at(&cue, Some((pos - start).round() as i64)),
+                    TcDue::Event(ev) => {
+                        if self.apply_checked("timecode", &ev) == Applied::Moved {
+                            moved_at = Some(pos);
+                            break;
+                        }
+                    }
+                }
+            }
+            match moved_at {
+                // the scene changed at `pos`: the new scene's timecode cues from that moment on are due too
+                Some(pos) => (lo, inclusive) = (pos, true),
+                None => return,
+            }
+        }
     }
 
     /// Turn on signed receipts: every decision from now on is written to `log`.
@@ -1005,6 +1131,11 @@ impl Show {
 
     /// Publish (and record) the action of a timeline cue that has come due.
     fn fire_cue(self: &Arc<Self>, cue: &ScheduledCue) {
+        self.fire_cue_at(cue, None)
+    }
+
+    /// `tc_actual_ms`: for a cue fired by timecode, how far into the scene the timecode was (the run report's "actual").
+    fn fire_cue_at(self: &Arc<Self>, cue: &ScheduledCue, tc_actual_ms: Option<i64>) {
         let ts = now_ms();
         let event = cue.action.to_event();
         {
@@ -1012,9 +1143,9 @@ impl Show {
             let show_id = g.engine.chart.id.clone().unwrap_or_else(|| "show".into());
             let _ = g.store.append(ts, &show_id, None, &cue.action.kind, &event);
             // what the show planned against what happened, for the run report
-            let actual = (ts - g.entered_at).max(0);
+            let actual = tc_actual_ms.unwrap_or_else(|| (ts - g.entered_at).max(0));
             let rec = json!({"scene": g.engine.current_state, "lane": cue.lane, "cue": cue.cue, "num": cue.num, "kind": cue.action.kind,
-                             "planned_ms": cue.at_ms, "actual_ms": actual, "drift_ms": actual - cue.at_ms as i64});
+                             "planned_ms": cue.at_ms, "actual_ms": actual, "drift_ms": actual - cue.at_ms as i64, "timecode": tc_actual_ms.is_some()});
             let _ = g.store.append(ts, "runtime", Some(&show_id), "show.cue", &rec);
         }
         self.publish(json!({"type": "action", "ts": ts, "event": event, "lane": cue.lane, "cue": cue.cue}));
@@ -2982,5 +3113,220 @@ mod tests {
         assert_eq!(show.snapshot()["state"], "INTRO", "INTRO must run 5 s first");
         let r = receipts(&show);
         assert!(r.iter().any(|(ru, g, m)| ru == "show.go" && g == "DENY" && m.contains("/drop sent 'DROP' held: INTRO must run")), "{r:?}");
+    }
+
+    // ---- timecode: cues and scene changes locked to an outside clock ----
+
+    /// INTRO locked to 00:01:00:00 (cues at 0, 0.4 and 0.8 s), leaving on 00:01:05:00; DROP locked to the same moment.
+    fn timecoded() -> Showchart {
+        let mut c = quick();
+        c.states.iter_mut().find(|s| s.id == "INTRO").unwrap().timeline.as_mut().unwrap().tc_start = Some("00:01:00:00".into());
+        let drop = c.states.iter_mut().find(|s| s.id == "DROP").unwrap();
+        drop.timeline.as_mut().unwrap().tc_start = Some("00:01:05:00".into());
+        c.transitions.push(pchi_showchart::Transition::on("INTRO", "DROP", "tc:00:01:05:00"));
+        c
+    }
+
+    fn cue_ids(rx: &mut broadcast::Receiver<Value>) -> Vec<String> {
+        std::iter::from_fn(|| rx.try_recv().ok()).filter(|m| m["type"] == "action").filter_map(|m| m["cue"].as_str().map(String::from)).collect()
+    }
+
+    fn feed(show: &Arc<Show>, positions: &[f64]) {
+        for p in positions {
+            show.timecode_update(*p, Fps::F25, "test");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_scene_locked_to_timecode_fires_its_cues_as_the_timecode_passes_them_not_on_the_runtime_clock() {
+        let show = Show::start(timecoded(), EventStore::open_in_memory().unwrap()).unwrap();
+        let mut rx = show.subscribe();
+        show.apply("studio", "START");
+        // the runtime's own clock would have fired all three by now: timecode has not moved, so nothing fires
+        tokio::time::sleep(Duration::from_millis(1_000)).await;
+        assert!(cue_ids(&mut rx).is_empty(), "a locked scene waits for its timecode");
+        // timecode arrives and plays through the cues
+        feed(&show, &[59_960.0, 60_000.0]);
+        assert_eq!(cue_ids(&mut rx), ["v1"], "the cue at the lock position fires as it is reached");
+        feed(&show, &[60_040.0, 60_080.0, 60_120.0, 60_160.0, 60_200.0, 60_240.0, 60_280.0, 60_320.0, 60_360.0, 60_400.0, 60_400.0, 60_440.0]);
+        assert_eq!(cue_ids(&mut rx), ["l1"], "once, at 0.4 s: repeating the same position fires nothing more");
+        feed(&show, &[60_480.0, 60_520.0, 60_560.0, 60_600.0, 60_640.0, 60_680.0, 60_720.0, 60_760.0, 60_800.0]);
+        assert_eq!(cue_ids(&mut rx), ["z1"]);
+        // the run report says it was timecode, and how far into the scene the timecode was
+        let report = show.run_report();
+        let fired: Vec<&Value> = report["cues"].as_array().unwrap().iter().filter(|c| c["timecode"] == true).collect();
+        assert_eq!(fired.len(), 3);
+        assert!(fired.iter().all(|c| c["drift_ms"].as_i64().unwrap().abs() < 40), "{fired:?}");
+    }
+
+    #[tokio::test]
+    async fn a_timecode_transition_changes_scene_and_the_new_scenes_cues_are_due_in_the_same_step() {
+        let mut c = timecoded();
+        c.states.iter_mut().find(|s| s.id == "INTRO").unwrap().min_ms = Some(60_000); // people must wait; the timecode need not
+        let show = Show::start(c, EventStore::open_in_memory().unwrap()).unwrap();
+        let mut rx = show.subscribe();
+        show.apply("studio", "START");
+        feed(&show, &[64_960.0, 65_040.0]);
+        assert_eq!(show.snapshot()["state"], "DROP", "tc:00:01:05:00 moved the show");
+        assert!(cue_ids(&mut rx).contains(&"v2".to_string()), "DROP's first cue is at its lock position, which this step passed");
+        // the move is the show's own clock, so the scene minimum did not hold it
+        assert!(!show.events().iter().any(|e| e["type"] == "show.held"));
+    }
+
+    #[tokio::test]
+    async fn a_locate_fires_nothing_and_says_what_it_jumped_over_and_going_back_lets_cues_fire_again() {
+        let show = Show::start(timecoded(), EventStore::open_in_memory().unwrap()).unwrap();
+        let mut rx = show.subscribe();
+        show.apply("studio", "START");
+        feed(&show, &[59_960.0, 60_000.0]);
+        assert_eq!(cue_ids(&mut rx), ["v1"]);
+        // the operator locates the playback forward past two cues
+        feed(&show, &[62_000.0]);
+        assert!(cue_ids(&mut rx).is_empty(), "a jump fires nothing");
+        let msgs: Vec<Value> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        let _ = msgs;
+        assert!(show.events().iter().any(|e| e["type"] == "show.tc_jump" && e["payload"]["skipped"] == 2), "{:?}", show.events().iter().filter(|e| e["type"] == "show.tc_jump").collect::<Vec<_>>());
+        // and back: playing through the cues again fires them
+        feed(&show, &[60_300.0, 60_340.0, 60_380.0, 60_420.0]);
+        assert_eq!(cue_ids(&mut rx), ["l1"]);
+        feed(&show, &[60_000.0]);
+        feed(&show, &[60_040.0]);
+        let _ = cue_ids(&mut rx);
+        // rewound to the start, v1 fires again as the position passes it
+        feed(&show, &[59_700.0, 59_900.0, 60_000.0]);
+        assert!(cue_ids(&mut rx).contains(&"v1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn the_show_says_whether_timecode_is_running_and_the_doors_check_asks_for_it() {
+        let show = Show::start(timecoded(), EventStore::open_in_memory().unwrap()).unwrap();
+        let level = |show: &Show| show.preflight()["checks"].as_array().unwrap().iter().find(|c| c["area"] == "timecode").map(|c| c["level"].as_str().unwrap().to_string());
+        assert_eq!(show.snapshot()["timecode"]["state"], "none");
+        assert_eq!(level(&show).as_deref(), Some("warn"), "a show that locks to timecode with none heard");
+        feed(&show, &[1_000.0, 1_040.0]);
+        let tc = show.snapshot()["timecode"].clone();
+        assert_eq!((tc["state"].clone(), tc["fps"].clone(), tc["position"].clone()), (json!("running"), json!("25"), json!("00:00:01:01")), "{tc}");
+        assert_eq!(level(&show).as_deref(), Some("ok"));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(show.snapshot()["timecode"]["state"], "stopped");
+        assert_eq!(level(&show).as_deref(), Some("warn"));
+        // a show that does not use timecode is not nagged about it
+        let plain = Show::start(quick(), EventStore::open_in_memory().unwrap()).unwrap();
+        assert_eq!(level(&plain), None);
+    }
+
+    #[test]
+    fn timecode_written_in_a_show_must_be_readable() {
+        let mut c = timecoded();
+        c.states.iter_mut().find(|s| s.id == "INTRO").unwrap().timeline.as_mut().unwrap().tc_start = Some("one minute".into());
+        c.transitions.last_mut().unwrap().event = Some("tc:1:2".into());
+        let errs = c.validate().iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; ");
+        assert!(errs.contains("'one minute' (INTRO timeline) is not a timecode") && errs.contains("'1:2' (transition INTRO -> DROP) is not a timecode"), "{errs}");
+        assert!(timecoded().validate().is_empty());
+    }
+
+    // ---- MIDI and OSC as sources: presses, values and timecode ----
+
+    fn midi_deck(show: &Arc<Show>, bindings: &str) -> Arc<midi::MidiInput> {
+        let spec: midi::MidiSpec = serde_json::from_str(&format!(r#"{{"name":"Pedal","bindings":[{bindings}]}}"#)).unwrap();
+        midi::check(std::slice::from_ref(&spec)).unwrap();
+        let input = midi::MidiInput::new(spec);
+        show.add_input(Arc::clone(&input) as Arc<dyn inputs::InputInfo>);
+        input
+    }
+
+    #[tokio::test]
+    async fn midi_notes_programs_and_controllers_press_set_values_and_stop_lasers() {
+        let (show, _) = governed("midi").await;
+        show.set_edit_key(None);
+        let pedal = midi_deck(&show, r#"{"note":60,"channel":1,"event":"START"},{"note":61,"event":"DROP"},{"cc":7,"context":"volume","scale":[0,1]},{"cc":64,"event":"NOPE"},{"note":62,"action":"laser.stop"},{"pc":3,"event":"UNUSED"}"#);
+        // wrong channel: not this binding
+        midi::handle(&show, &pedal, &[0x91, 60, 100]);
+        assert_eq!(show.snapshot()["state"], "PRESHOW");
+        midi::handle(&show, &pedal, &[0x90, 60, 100]);
+        assert_eq!(show.snapshot()["state"], "INTRO");
+        // note-off and velocity-0 note-on are releases
+        midi::handle(&show, &pedal, &[0x80, 61, 0]);
+        midi::handle(&show, &pedal, &[0x95, 61, 0]);
+        assert_eq!(show.snapshot()["state"], "INTRO");
+        midi::handle(&show, &pedal, &[0x95, 61, 90]);
+        assert_eq!(show.snapshot()["state"], "DROP", "any channel when none is given");
+        // a controller is a value
+        midi::handle(&show, &pedal, &[0xB0, 7, 127]);
+        assert_eq!(show.snapshot()["context"]["volume"], json!(1.0));
+        midi::handle(&show, &pedal, &[0xB0, 7, 0]);
+        assert_eq!(show.snapshot()["context"]["volume"], json!(0.0));
+        // the hard stop
+        show.set_armed("b1", true).unwrap();
+        midi::handle(&show, &pedal, &[0x90, 62, 127]);
+        assert_eq!(show.snapshot()["devices"][0]["armed"], false);
+        // unbound messages are counted
+        midi::handle(&show, &pedal, &[0xB0, 99, 5]);
+        let j = inputs::InputInfo::json(&*pedal);
+        assert_eq!(j["unbound"], 2, "the wrong-channel note and the controller nobody bound");
+        assert!(show.snapshot()["inputs"][0]["listen"].as_str().unwrap().starts_with("MIDI"));
+        let r = receipts(&show);
+        assert!(r.iter().any(|(ru, g, m)| ru == "show.go" && g == "ALLOW" && m.starts_with("Pedal (button): MIDI note 60 ch1 sent 'START'")), "{r:?}");
+        assert!(r.iter().any(|(ru, _, m)| ru == "laser.stop" && m.contains("MIDI note 62")), "{r:?}");
+    }
+
+    #[tokio::test]
+    async fn midi_time_code_drives_a_locked_scene() {
+        let (show, _) = governed("mtc").await;
+        show.set_edit_key(None);
+        show.replace(timecoded(), None, true).unwrap();
+        let mut rx = show.subscribe();
+        // a pedal with no timecode binding ignores MTC
+        let plain = midi_deck(&show, r#"{"note":60,"event":"START"}"#);
+        for b in timecode::quarter_frames(timecode::Tc::new(0, 0, 59, 22, Fps::F25).unwrap()) {
+            midi::handle(&show, &plain, &[0xF1, b]);
+        }
+        assert_eq!(show.snapshot()["timecode"]["state"], "none");
+        // a playback machine sends MTC: each full sequence is a position two frames on
+        let mtc = midi_deck(&show, r#"{"timecode":"mtc"}"#);
+        show.apply("studio", "START");
+        let mut at = timecode::Tc::new(0, 0, 59, 22, Fps::F25).unwrap();
+        for _ in 0..12 {
+            for b in timecode::quarter_frames(at) {
+                midi::handle(&show, &mtc, &[0xF1, b]);
+            }
+            at = at.plus_frames(2);
+        }
+        let tc = show.snapshot()["timecode"].clone();
+        assert_eq!((tc["state"].clone(), tc["fps"].clone(), tc["source"].clone()), (json!("running"), json!("25"), json!("mtc")), "{tc}");
+        assert_eq!(cue_ids(&mut rx), ["v1", "l1", "z1"], "the three INTRO cues fired as MTC passed 00:01:00:00, :10 and :20");
+        // a full-frame message locates: it is a jump, so nothing fires
+        midi::handle(&show, &mtc, &[0xF0, 0x7F, 0x7F, 0x01, 0x01, 0x20, 1, 4, 0, 0xF7]);
+        assert!(cue_ids(&mut rx).is_empty());
+        assert!(show.events().iter().any(|e| e["type"] == "show.tc_jump"));
+    }
+
+    #[tokio::test]
+    async fn osc_timecode_in_text_numbers_or_seconds_drives_the_show_too() {
+        let (show, _) = governed("osctc").await;
+        show.set_edit_key(None);
+        show.replace(timecoded(), None, true).unwrap();
+        let mut rx = show.subscribe();
+        show.apply("studio", "START");
+        let spec = inputs::parse(r#"[{"name":"Playback","listen":"127.0.0.1:0","bindings":[{"address":"/tc","timecode":true,"fps":25}]}]"#).unwrap().remove(0);
+        let input = inputs::start(&show, spec).await.unwrap();
+        let to = input.bound.lock().unwrap().unwrap();
+        send_osc(to, "/tc", vec![rosc::OscType::String("00:00:59:24".into())]).await;
+        send_osc(to, "/tc", vec![rosc::OscType::String("00:01:00:01".into())]).await;
+        assert_eq!(cue_ids(&mut rx), ["v1"], "text form");
+        send_osc(to, "/tc", vec![rosc::OscType::Int(0), rosc::OscType::Int(1), rosc::OscType::Int(0), rosc::OscType::Int(11)]).await;
+        assert_eq!(cue_ids(&mut rx), ["l1"], "hours, minutes, seconds, frames");
+        send_osc(to, "/tc", vec![rosc::OscType::Float(60.84)]).await;
+        assert_eq!(cue_ids(&mut rx), ["z1"], "a number of seconds");
+        assert_eq!(show.snapshot()["timecode"]["source"], "osc:Playback");
+        // a message that is not a timecode changes nothing
+        send_osc(to, "/tc", vec![rosc::OscType::String("nonsense".into())]).await;
+        assert_eq!(show.snapshot()["timecode"]["position_ms"].as_f64().unwrap().round(), 60_840.0);
+        // the binding file must be sound
+        assert!(inputs::parse(r#"[{"name":"A","listen":"127.0.0.1:1","bindings":[{"address":"/t","timecode":true,"fps":12}]}]"#).is_err());
+        assert!(inputs::parse(r#"[{"name":"A","listen":"127.0.0.1:1","bindings":[{"address":"/t","timecode":true,"event":"X"}]}]"#).is_err());
+        let f = inputs::parse_file(r#"{"inputs":[{"name":"Deck","listen":"127.0.0.1:1","bindings":[{"address":"/a","event":"X"}]}],"midi":[{"name":"Pedal","bindings":[{"note":60,"event":"X"}]}]}"#).unwrap();
+        assert_eq!((f.inputs.len(), f.midi.len()), (1, 1));
+        assert!(inputs::parse_file(r#"{"inputs":[{"name":"Deck","listen":"127.0.0.1:1","bindings":[{"address":"/a","event":"X"}]}],"midi":[{"name":"deck","bindings":[{"note":60,"event":"X"}]}]}"#).is_err(), "names are unique across OSC and MIDI");
     }
 }

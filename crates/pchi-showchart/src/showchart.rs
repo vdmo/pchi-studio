@@ -49,6 +49,8 @@ pub enum ValidationError {
     InvalidGuard { event: String, guard: String, reason: String },
     #[error("state '{state}' has a timer after {after_ms} ms but must run at least {min_ms} ms: the timer would be cut short")]
     TimerBeforeMinimum { state: String, after_ms: u64, min_ms: u64 },
+    #[error("'{text}' ({place}) is not a timecode: write it HH:MM:SS:FF, for example 01:02:03:12")]
+    BadTimecode { place: String, text: String },
     #[error("state '{0}' is unreachable from the initial state")]
     Unreachable(String),
 }
@@ -111,6 +113,21 @@ impl Showchart {
             if let (Some(after_ms), Some(min_ms)) = (t.after_ms, self.state(&t.source).and_then(|s| s.min_ms)) {
                 if after_ms < min_ms {
                     errs.push(ValidationError::TimerBeforeMinimum { state: t.source.clone(), after_ms, min_ms });
+                }
+            }
+        }
+        // timecode written in the show must be readable
+        for s in &self.states {
+            if let Some(tc) = s.timeline.as_ref().and_then(|t| t.tc_start.as_deref()) {
+                if !crate::timeline::valid_timecode(tc) {
+                    errs.push(ValidationError::BadTimecode { place: format!("{} timeline", s.id), text: tc.to_string() });
+                }
+            }
+        }
+        for t in &self.transitions {
+            if let Some(tc) = t.event.as_deref().and_then(|e| e.strip_prefix("tc:")) {
+                if !crate::timeline::valid_timecode(tc) {
+                    errs.push(ValidationError::BadTimecode { place: format!("transition {} -> {}", t.source, t.target), text: tc.to_string() });
                 }
             }
         }

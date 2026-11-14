@@ -568,3 +568,5 @@ button.go:disabled { background: #1b1d25; color: #7a7f92; border-color: #2f323e;
 .rehearsal-note ul { margin: 2px 0 0; padding-left: 18px; }
 .rt-said { display: block; margin: 10px 0 0; font-size: 13px; }
 .rt-said input { display: block; width: 100%; margin-top: 4px; }
+
+.tc-warn { color: var(--warn, #c9871a); }

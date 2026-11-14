@@ -332,7 +332,15 @@ export interface ShowLane {
 }
 
 /** Lanes of cues that play while a state is active (executed by the runtime). */
+/** Whether text reads as a timecode, HH:MM:SS:FF (`;` before the frames for drop-frame). */
+export const validTimecode = (text: string): boolean => {
+  const p = text.trim().split(/[:;]/)
+  return p.length === 4 && p.every((x) => /^\d{1,3}$/.test(x)) && Number(p[1]) <= 59 && Number(p[2]) <= 59 && Number(p[3]) <= 29
+}
+
 export interface ShowTimeline {
+  /** Lock the timeline to timecode: the written timecode at which the scene's clock reads zero. */
+  tc_start?: string
   duration_ms?: number
   lanes: ShowLane[]
 }
@@ -535,6 +543,12 @@ export function validateShowchart(c: Showchart): string[] {
       if (seen.has(k)) errs.push(`state '${t.source}' has two unguarded transitions on '${trig}' (the second can never fire)`)
       seen.add(k)
     }
+  }
+  for (const s of c.states) {
+    if (s.timeline?.tc_start !== undefined && !validTimecode(s.timeline.tc_start)) errs.push(`'${s.timeline.tc_start}' (${s.id} timeline) is not a timecode: write it HH:MM:SS:FF, for example 01:02:03:12`)
+  }
+  for (const t of c.transitions) {
+    if (t.event?.startsWith('tc:') && !validTimecode(t.event.slice(3))) errs.push(`'${t.event.slice(3)}' (transition ${t.source} -> ${t.target}) is not a timecode: write it HH:MM:SS:FF, for example 01:02:03:12`)
   }
   for (const t of c.transitions) {
     const min = c.states.find((s) => s.id === t.source)?.min_ms

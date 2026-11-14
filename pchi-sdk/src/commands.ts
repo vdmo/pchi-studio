@@ -14,6 +14,7 @@ import { hintFor } from './suggest'
 import {
   DEPTS,
   guardError,
+  validTimecode,
   type ShowAction,
   type ShowContext,
   type ShowCue,
@@ -46,6 +47,8 @@ export type ShowCommand =
   | { op: 'setTimelineLength'; state: string; duration_ms: number }
   /** A scene must run at least this long before an input can move it on (null removes the minimum). */
   | { op: 'setMinimum'; state: string; ms: number | null }
+  /** Lock a scene's timeline to timecode (HH:MM:SS:FF is where its clock reads zero); null unlocks it. */
+  | { op: 'setTimecodeLock'; state: string; tc: string | null }
   | { op: 'clearTimeline'; state: string }
   | { op: 'undo' }
   | { op: 'redo' }
@@ -89,6 +92,8 @@ export const COMMAND_EXAMPLES = [
   'remove the laser cue at 4 seconds in intro',
   'set intro length to 20 seconds',
   'hold intro for at least 8 seconds',
+  'lock intro to timecode 00:01:00:00',
+  'from intro to drop at timecode 00:01:05:00',
   'undo',
 ]
 
@@ -348,6 +353,20 @@ export function applyCommand(chart: Showchart, cmd: ShowCommand): { chart: Showc
     case 'clearTimeline':
       return applyTimeline(c, cmd)
 
+    case 'setTimecodeLock': {
+      need(cmd.state)
+      c.states = c.states.map((st) => {
+        if (st.id !== cmd.state) return st
+        const tl = st.timeline ?? { lanes: [] }
+        const { tc_start: _old, ...rest } = tl
+        return { ...st, timeline: cmd.tc === null ? rest : { ...rest, tc_start: cmd.tc } }
+      })
+      return {
+        chart: c,
+        summary: cmd.tc === null ? `Unlock ${cmd.state} from timecode: its cues run on the runtime's clock again` : `Lock ${cmd.state} to timecode ${cmd.tc}: its cues fire when the timecode reaches that position plus their time`,
+      }
+    }
+
     case 'setMinimum': {
       need(cmd.state)
       if (cmd.ms !== null) {
@@ -600,6 +619,12 @@ function parseTransition(text: string, chart: Showchart, notes: string[]): ShowC
     guard = normalizeGuard(chart, gm[1])
     rest = rest.slice(0, gm.index)
   }
+  const tm = rest.match(/\s+at\s+(?:the\s+)?timecode\s+(\S+)$/i)
+  if (tm && tm.index !== undefined) {
+    if (!validTimecode(tm[1])) throw new CommandError(`I couldn't read the timecode "${tm[1]}".`, 'Write it HH:MM:SS:FF, for example at timecode 00:01:05:00')
+    event = `tc:${tm[1]}`
+    rest = rest.slice(0, tm.index)
+  }
   const dm = rest.match(/\s+after\s+(\S+)\s*(ms|milliseconds?|s|secs?|seconds?|m|mins?|minutes?)$/i)
   if (dm && dm.index !== undefined) {
     const ms = duration(dm[1], dm[2])
@@ -644,7 +669,7 @@ function parseTransition(text: string, chart: Showchart, notes: string[]): ShowC
       op: 'addTransition',
       source,
       target,
-      ...(e ? { event: norm(e) } : {}),
+      ...(e ? { event: e.startsWith('tc:') ? e : norm(e) } : {}),
       ...(after_ms !== undefined ? { after_ms } : {}),
       ...(guard !== undefined ? { guard } : {}),
     }
@@ -884,6 +909,17 @@ function parseTimelineFragment(text: string, chart: Showchart, notes: string[], 
   // clear the timeline
   let m = match(/^(?:clear|empty|reset)\s+(?:the\s+)?(?:(.+?)\s+)?timeline(?:\s+(?:of|in|for)\s+(?:the\s+)?(.+))?$/i)
   if (m) return [{ op: 'clearTimeline', state: needState(stateNamed(m[2] ?? m[1])) }]
+
+  // timecode lock: "lock intro to timecode 00:01:00:00", "intro starts at timecode 00:01:00:00", "unlock intro from timecode"
+  m =
+    match(/^(?:lock|sync|chase)\s+(?:the\s+)?(.+?)\s+(?:to|at|on|with)\s+(?:the\s+)?timecode\s+(\S+)$/i) ??
+    match(/^(?:the\s+)?(.+?)\s+(?:starts|begins|runs)\s+(?:at|on|from)\s+(?:the\s+)?timecode\s+(\S+)$/i)
+  if (m) {
+    if (!validTimecode(m[2])) throw new CommandError(`I couldn't read the timecode "${m[2]}".`, 'Write it HH:MM:SS:FF, for example 00:01:00:00')
+    return [{ op: 'setTimecodeLock', state: needState(stateNamed(m[1])), tc: m[2] }]
+  }
+  m = match(/^(?:unlock|unsync|unchase|free)\s+(?:the\s+)?(.+?)(?:\s+(?:from|of)\s+(?:the\s+)?timecode)?$/i)
+  if (m) return [{ op: 'setTimecodeLock', state: needState(stateNamed(m[1])), tc: null }]
 
   // minimum: "hold intro for at least 8 seconds", "intro must run at least 8 seconds", "set intro minimum to 8 seconds", "no minimum for intro"
   m =

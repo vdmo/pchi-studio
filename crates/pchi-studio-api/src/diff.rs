@@ -65,6 +65,14 @@ pub fn diff(old: &Showchart, new: &Showchart, old_dev: &[Device], new_dev: &[Dev
             }
         }
     }
+    for n in &new.states {
+        if let Some(o) = old.states.iter().find(|o| o.id == n.id) {
+            let tc = |s: &pchi_showchart::State| s.timeline.as_ref().and_then(|t| t.tc_start.clone());
+            if tc(o) != tc(n) {
+                d.changes.push(format!("~ scene {}: timecode lock {} → {}", n.id, tc(o).unwrap_or_else(|| "none".into()), tc(n).unwrap_or_else(|| "none".into())));
+            }
+        }
+    }
     let tkey = |t: &pchi_showchart::Transition| format!("{} → {} ({})", t.source, t.target, t.event.clone().or(t.after_ms.map(|a| format!("after {}", secs(a)))).unwrap_or_default());
     for t in &new.transitions {
         if !old.transitions.iter().any(|o| tkey(o) == tkey(t)) {

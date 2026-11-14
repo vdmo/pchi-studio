@@ -27,6 +27,7 @@ pchi-studio-api my-show.pchi --inputs inputs.json
 |---|---|
 | `"event": "NEXT"` | sends that event to the show, like pressing GO. A message whose first argument is `0` or `false` (the button being released) is ignored; add `"press": false` to act on every message |
 | `"context": "energy"` | sets that context value to the message's first argument (a fader, a sensor). Only changes are applied |
+| `"timecode": true` | feeds timecode (see `timecode-and-midi.md`): the message is a string, four numbers or seconds |
 | `"action": "laser.stop"` | the hard stop: disarms every laser and sends BEYOND's blackout. The safe direction, so it is never held or refused |
 
 Nothing else can be bound. An input **cannot arm a laser, edit the show, undo, try a cue, or send anything but these**. It acts
@@ -51,7 +52,7 @@ what was ignored (other senders, over the rate cap, refused). `GET /inputs` retu
 
 ## What it does not do yet
 
-- **MIDI.** A MIDI input needs a system MIDI library, so it goes with the timecode work (MIDI, LTC, Art-Net, sACN).
+- **MIDI** is in `timecode-and-midi.md` (an optional build). **LTC, Art-Net and sACN** are not done.
 - **Wildcards and arguments in addresses** (`/scene/*`, the scene number in the address). Each address is bound exactly.
 - **Changing inputs while running.** They are read at startup.
 - **Authentication.** An allow list limits who may press, but anything that can spoof a sender address on your network can still

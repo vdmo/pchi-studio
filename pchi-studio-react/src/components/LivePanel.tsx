@@ -108,6 +108,7 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
   const [undoDepth, setUndoDepth] = useState(0) // sends that can still be undone
   const [proposals, setProposals] = useState<{ id: number; actor: string; status: string; changes: string[]; notes: string[]; said?: string; rehearsal?: { different: boolean; verdict: string; lines: string[] } | null }[]>([]) // edits an agent proposed
   const [governed, setGoverned] = useState(false) // the runtime writes signed receipts
+  const [tc, setTc] = useState<{ state: string; position: string | null; fps: string | null; source: string } | null>(null) // timecode being heard
   const [oscIn, setOscIn] = useState<OscInput[]>([]) // OSC inputs listening for button presses
   const [me, setMe] = useState<WhoAmI | null>(null) // who the runtime takes this tab to be
   const [authTick, setAuthTick] = useState(0) // bumped on sign in / out: the feed reconnects so the runtime knows who is pressing GO
@@ -155,6 +156,7 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
             setUndoDepth(Number(msg.undo_depth ?? 0))
             setGoverned(!!msg.governed)
             setOscIn(Array.isArray(msg.inputs) ? (msg.inputs as OscInput[]) : [])
+            setTc((msg.timecode as typeof tc) ?? null)
             setProposals(Array.isArray(msg.proposals) ? (msg.proposals as typeof proposals) : [])
             setDef(msg.definition as Showchart)
             setState(String(msg.state))
@@ -206,6 +208,12 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
             if (p) setProposals((ps) => [...ps.filter((x) => x.id !== p.id), p].sort((a, b) => a.id - b.id))
             break
           }
+          case 'timecode':
+            setTc({ state: String(msg.state), position: (msg.position as string) ?? null, fps: (msg.fps as string) ?? null, source: String(msg.source ?? '') })
+            break
+          case 'tc-jump':
+            setTrail((t) => [...t.slice(-49), { ts: Number(msg.ts), text: `timecode jumped ${(Number(msg.from_ms) / 1000).toFixed(1)} → ${(Number(msg.to_ms) / 1000).toFixed(1)} s in ${msg.scene}${Number(msg.skipped) ? `: ${msg.skipped} cue(s) jumped over, not fired` : ''}` }])
+            break
           case 'held':
             setTrail((t) => [...t.slice(-49), { ts: Number(msg.ts), text: `${msg.event} held in ${msg.scene}: ${(Number(msg.remaining_ms) / 1000).toFixed(1)} s more (${msg.source})` }])
             break
@@ -598,6 +606,17 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
             {signErr && <span role="alert"> {signErr}</span>}
           </p>
         )}
+        {(() => {
+          const lockedTc = def?.states.find((x) => x.id === state)?.timeline?.tc_start
+          const usesTc = !!def && (def.states.some((x) => x.timeline?.tc_start) || def.transitions.some((x) => x.event?.startsWith('tc:')))
+          if (!usesTc && (!tc || tc.state === 'none')) return null
+          return (
+            <p className={`muted gov-badge ${usesTc && tc?.state !== 'running' ? 'tc-warn' : ''}`} role="status" title="Cues locked to timecode fire as the timecode passes them; a jump fires nothing">
+              Timecode · {!tc || tc.state === 'none' ? 'none heard yet' : `${tc.position ?? '?'} · ${tc.fps} fps · ${tc.state}${tc.source ? ` · from ${tc.source}` : ''}`}
+              {lockedTc ? ` · ${state} is locked to ${lockedTc}` : ''}
+            </p>
+          )
+        })()}
         {oscIn.map((i) => (
           <p key={i.name} className="muted gov-badge" title="Presses arriving by OSC. It can only press GO and the show's own events, set a value, or hit STOP LASERS.">
             OSC in · <b>{i.name}</b> {i.listen.split(':').pop() ? ':' + i.listen.split(':').pop() : ''} · {i.bindings} binding{i.bindings === 1 ? '' : 's'} ·{' '}

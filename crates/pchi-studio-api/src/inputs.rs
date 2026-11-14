@@ -35,6 +35,16 @@ pub struct Binding {
     /// "laser.stop": the hard stop.
     #[serde(default)]
     pub action: Option<String>,
+    /// Feed timecode: the message carries a position, as a string "HH:MM:SS:FF", four numbers (hours, minutes, seconds, frames,
+    /// and optionally the frame rate), or a single number of seconds.
+    #[serde(default)]
+    pub timecode: bool,
+    /// For a timecode binding: the frame rate when the message does not say (24, 25, 29.97, 30). Default 25.
+    #[serde(default)]
+    pub fps: Option<f64>,
+    /// For a timecode binding at 29.97: drop-frame.
+    #[serde(default)]
+    pub drop: bool,
     /// For events and actions: ignore a message whose first argument is 0 or false (the button being released). Default true.
     #[serde(default = "yes")]
     pub press: bool,
@@ -55,10 +65,41 @@ pub struct InputSpec {
     pub bindings: Vec<Binding>,
 }
 
-/// Read and check an inputs file: `{"inputs": [...]}` or a bare list.
-pub fn parse(text: &str) -> Result<Vec<InputSpec>, String> {
+/// Anything that can show its counters in the Live tab: an OSC input or a MIDI input.
+pub trait InputInfo: Send + Sync {
+    fn json(&self) -> Value;
+}
+
+impl InputInfo for Input {
+    fn json(&self) -> Value {
+        Input::json(self)
+    }
+}
+
+/// An inputs file: OSC inputs under `"inputs"`, MIDI under `"midi"`. (A bare list is OSC inputs.)
+pub struct InputsFile {
+    pub inputs: Vec<InputSpec>,
+    pub midi: Vec<crate::midi::MidiSpec>,
+}
+
+pub fn parse_file(text: &str) -> Result<InputsFile, String> {
     let v: Value = serde_json::from_str(text).map_err(|e| format!("the inputs file is not valid JSON: {e}"))?;
-    let list = v.get("inputs").unwrap_or(&v).clone();
+    let (osc, midi) = if v.is_array() { (v.clone(), json!([])) } else { (v.get("inputs").cloned().unwrap_or(json!([])), v.get("midi").cloned().unwrap_or(json!([]))) };
+    let inputs = parse_list(osc)?;
+    let midi: Vec<crate::midi::MidiSpec> = serde_json::from_value(midi).map_err(|e| format!("the midi list is not in the expected shape: {e}"))?;
+    crate::midi::check(&midi)?;
+    if let Some(m) = midi.iter().find(|m| inputs.iter().any(|i| i.name.trim().eq_ignore_ascii_case(m.name.trim()))) {
+        return Err(format!("two inputs are named {}", m.name));
+    }
+    Ok(InputsFile { inputs, midi })
+}
+
+/// Read and check the OSC inputs of a file: `{"inputs": [...]}` or a bare list.
+pub fn parse(text: &str) -> Result<Vec<InputSpec>, String> {
+    parse_file(text).map(|f| f.inputs)
+}
+
+fn parse_list(list: Value) -> Result<Vec<InputSpec>, String> {
     let specs: Vec<InputSpec> = serde_json::from_value(list).map_err(|e| format!("the inputs file is not in the expected shape: {e}"))?;
     let mut names: Vec<String> = Vec::new();
     for s in &specs {
@@ -87,9 +128,14 @@ pub fn parse(text: &str) -> Result<Vec<InputSpec>, String> {
                 return Err(format!("{name}: {} is bound twice", b.address));
             }
             seen.push(&b.address);
-            let kinds = b.event.is_some() as u8 + b.context.is_some() as u8 + b.action.is_some() as u8;
+            let kinds = b.event.is_some() as u8 + b.context.is_some() as u8 + b.action.is_some() as u8 + b.timecode as u8;
             if kinds != 1 {
-                return Err(format!("{name}: {} must have exactly one of event, context or action", b.address));
+                return Err(format!("{name}: {} must have exactly one of event, context, action or timecode", b.address));
+            }
+            if let Some(f) = b.fps {
+                if crate::timecode::Fps::from_number(f, b.drop).is_none() {
+                    return Err(format!("{name}: fps {f} is not one of 23.976, 24, 25, 29.97, 30"));
+                }
             }
             if let Some(a) = &b.action {
                 if a != "laser.stop" {
@@ -159,7 +205,8 @@ pub async fn start(show: &Arc<Show>, spec: InputSpec) -> Result<Arc<Input>, Stri
     let socket = UdpSocket::bind(&spec.listen).await.map_err(|e| format!("{}: cannot listen on {}: {e} (is something else using that port?)", spec.name, spec.listen))?;
     let input = Input::new(spec);
     *input.bound.lock().unwrap() = socket.local_addr().ok();
-    show.add_input(Arc::clone(&input));
+    let info: Arc<dyn InputInfo> = Arc::clone(&input) as Arc<dyn InputInfo>;
+    show.add_input(info);
     let weak = Arc::downgrade(show);
     let me = Arc::clone(&input);
     let allow: Vec<IpAddr> = me.spec.allow.iter().filter_map(|a| a.parse().ok()).collect();
@@ -235,6 +282,10 @@ pub fn handle(show: &Arc<Show>, input: &Input, bytes: &[u8]) {
                 }
                 Applied::Ignored => {}
             }
+        } else if b.timecode {
+            if let Some((pos, fps)) = timecode_from_args(&args, b) {
+                show.timecode_update(pos, fps, &source);
+            }
         } else if let Some(key) = &b.context {
             let v = first.unwrap_or(Value::Bool(true));
             let mut last = input.last_context.lock().unwrap();
@@ -246,6 +297,27 @@ pub fn handle(show: &Arc<Show>, input: &Input, bytes: &[u8]) {
             }
         }
     }
+}
+
+/// A position in milliseconds and its frame rate, from the arguments of a timecode message.
+fn timecode_from_args(args: &[Value], b: &Binding) -> Option<(f64, crate::timecode::Fps)> {
+    use crate::timecode::{parse_fields, Fps, Tc};
+    let default_fps = b.fps.unwrap_or(25.0);
+    let num = |i: usize| args.get(i).and_then(Value::as_f64);
+    if let Some(text) = args.first().and_then(Value::as_str) {
+        let (h, m, s, f, drop) = parse_fields(text).ok()?;
+        let fps = Fps::from_number(default_fps, drop || b.drop)?;
+        return Tc::new(h, m, s, f, fps).ok().map(|t| (t.to_ms(), fps));
+    }
+    if args.len() >= 4 && (0..4).all(|i| num(i).is_some()) {
+        let fps = Fps::from_number(num(4).unwrap_or(default_fps), b.drop)?;
+        return Tc::new(num(0)? as u32, num(1)? as u32, num(2)? as u32, num(3)? as u32, fps).ok().map(|t| (t.to_ms(), fps));
+    }
+    if args.len() == 1 {
+        let secs = num(0)?;
+        return (secs >= 0.0).then(|| (secs * 1000.0, Fps::from_number(default_fps, b.drop).unwrap_or(Fps::F25)));
+    }
+    None
 }
 
 #[cfg(test)]

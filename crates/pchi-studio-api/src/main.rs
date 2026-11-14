@@ -36,6 +36,9 @@ struct Cli {
     /// OSC inputs, a JSON file: a Stream Deck, tablet or button box that presses GO, sets a context value or hits STOP LASERS (never arms or edits). Listening beyond this machine needs an allow list of sender addresses. See docs/osc-input.md.
     #[arg(long, value_name = "FILE", env = "PCHI_INPUTS")]
     inputs: Option<String>,
+    /// List the MIDI input ports this machine has (needs a build with --features midi) and exit.
+    #[arg(long)]
+    midi_ports: bool,
     /// Write a signed, hash-chained receipt for every decision (edits, arming, GO, refusals, proposals) into this folder, in the format scripts/verify_governance_chain.py checks offline. The folder keeps the signing key too: protect it like the show file.
     #[arg(long, env = "PCHI_GOVERNANCE")]
     governance: Option<String>,
@@ -50,6 +53,16 @@ struct Cli {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    if cli.midi_ports {
+        let ports = pchi_studio_api::midi::list_ports();
+        if ports.is_empty() {
+            println!("no MIDI input ports found (or this build has no MIDI support: build with --features midi)");
+        }
+        for p in ports {
+            println!("{p}");
+        }
+        return Ok(());
+    }
     let (chart, devices) = rig::load(&std::fs::read_to_string(&cli.file).with_context(|| format!("reading {}", cli.file))?)
         .map_err(anyhow::Error::msg)
         .with_context(|| format!("parsing {}", cli.file))?;
@@ -109,8 +122,13 @@ async fn main() -> anyhow::Result<()> {
         show.receipt("show.start", "ALLOW", &pchi_studio_api::governance::Actor::Person(None), &format!("runtime {how}{}", if cli.send { " with sending ON" } else { " (dry-run)" }));
     }
     if let Some(path) = &cli.inputs {
-        let specs = pchi_studio_api::inputs::parse(&std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?).map_err(anyhow::Error::msg).with_context(|| format!("inputs {path}"))?;
-        for spec in specs {
+        let file = pchi_studio_api::inputs::parse_file(&std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?).map_err(anyhow::Error::msg).with_context(|| format!("inputs {path}"))?;
+        for spec in file.midi {
+            let n = spec.bindings.len();
+            let input = pchi_studio_api::midi::start(&show, spec).map_err(anyhow::Error::msg)?;
+            println!("input: {} on MIDI port {} ({n} binding(s))", input.spec.name, pchi_studio_api::inputs::InputInfo::json(&*input)["listen"].as_str().unwrap_or(""));
+        }
+        for spec in file.inputs {
             let n = spec.bindings.len();
             let from = if spec.allow.is_empty() { "this machine only".to_string() } else { format!("from {}", spec.allow.join(", ")) };
             let input = pchi_studio_api::inputs::start(&show, spec).await.map_err(anyhow::Error::msg)?;

@@ -16,6 +16,20 @@ pub struct Timeline {
     pub duration_ms: Option<u64>,
     #[serde(default)]
     pub lanes: Vec<Lane>,
+    /// Lock this timeline to timecode: the written timecode (`HH:MM:SS:FF`) at which the scene's clock reads zero. Its cues
+    /// then fire when the timecode reaches that position plus their offset, instead of on the runtime's own clock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tc_start: Option<String>,
+}
+
+/// Whether `text` reads as a timecode: four numbers, `HH:MM:SS:FF` (or `;` before the frames for drop-frame).
+pub fn valid_timecode(text: &str) -> bool {
+    let parts: Vec<&str> = text.trim().split([':', ';']).collect();
+    parts.len() == 4
+        && parts.iter().all(|p| !p.is_empty() && p.len() <= 3 && p.chars().all(|c| c.is_ascii_digit()))
+        && parts[1].parse::<u32>().is_ok_and(|m| m <= 59)
+        && parts[2].parse::<u32>().is_ok_and(|s| s <= 59)
+        && parts[3].parse::<u32>().is_ok_and(|f| f <= 29)
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -99,6 +113,7 @@ mod tests {
     fn scheduled_sorts_by_time_and_keeps_lane_order_on_ties() {
         let t = Timeline {
             duration_ms: None,
+            tc_start: None,
             lanes: vec![
                 Lane { id: "lights".into(), name: "Lights".into(), dept: Some("lighting".into()), device: None, cues: vec![cue("l1", 2000, "lighting.look"), cue("l0", 0, "lighting.look")] },
                 Lane { id: "laser".into(), name: "Laser".into(), dept: None, device: None, cues: vec![cue("z1", 2000, "laser.cue")] },

@@ -25,6 +25,11 @@ rosc = "0.10"
 clap = { version = "4", features = ["derive", "env"] }
 anyhow = "1.0"
 primeswarm-pchi = { path = "../../primeswarm-pchi" }
+midir = { version = "0.10", optional = true }
+
+[features]
+# Read MIDI ports (notes, controllers, MIDI Time Code). Needs the system MIDI library: libasound2-dev on Linux.
+midi = ["dep:midir"]
 
 [dev-dependencies]
 tokio = { version = "1.34", features = ["test-util"] }

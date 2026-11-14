@@ -190,3 +190,40 @@ test('a timer cannot be added that is shorter than the scene minimum', () => {
   assert.match(r.error, /must run at least 8000 ms/)
   assert.ok(runCommandText('from intro to drop after 8 seconds', held).ok)
 })
+
+test('a scene can be locked to timecode and unlocked by sentence', () => {
+  const tcOf = (c) => c.states.find((s) => s.id === 'INTRO').timeline?.tc_start
+  for (const t of ['lock intro to timecode 00:01:00:00', 'intro starts at timecode 00:01:00:00', 'sync the intro with timecode 00:01:00:00']) {
+    const r = runCommandText(t, show())
+    assert.ok(r.ok, `${t}: ${r.error}`)
+    assert.equal(tcOf(r.chart), '00:01:00:00', t)
+  }
+  const locked = runCommandText('lock intro to timecode 00:01:00:00', show())
+  assert.match(locked.steps[0].summary, /Lock INTRO to timecode 00:01:00:00/)
+  const free = runCommandText('unlock intro from timecode', locked.chart)
+  assert.ok(free.ok && tcOf(free.chart) === undefined)
+  // the cues already in the scene stay when it is locked
+  const withCue = runCommandText('at 2 seconds lighting look blue in intro', show()).chart
+  const both = runCommandText('lock intro to timecode 01:00:10:00', withCue).chart
+  assert.equal(both.states.find((s) => s.id === 'INTRO').timeline.lanes.flatMap((l) => l.cues).length, 1)
+  const bad = runCommandText('lock intro to timecode soon', show())
+  assert.equal(bad.ok, false)
+  assert.match(bad.error, /couldn't read the timecode/)
+})
+
+test('a transition can be placed on a timecode', () => {
+  const r = runCommandText('from intro to drop at timecode 00:01:05:00', show())
+  assert.ok(r.ok, r.error)
+  const t = r.chart.transitions.find((x) => x.source === 'INTRO' && x.target === 'DROP' && x.event?.startsWith('tc:'))
+  assert.equal(t.event, 'tc:00:01:05:00', 'the timecode is kept as written, not turned into a name')
+  assert.deepEqual(sdk.validateShowchart(r.chart).filter((e) => /timecode/.test(e)), [])
+  assert.equal(runCommandText('from intro to drop at timecode 1:2', show()).ok, false)
+})
+
+test('a show with unreadable timecode does not validate', () => {
+  const c = runCommandText('lock intro to timecode 00:01:00:00', show()).chart
+  c.states.find((s) => s.id === 'INTRO').timeline.tc_start = 'one minute'
+  assert.match(sdk.validateShowchart(c).join(';'), /'one minute' \(INTRO timeline\) is not a timecode/)
+  assert.equal(sdk.validTimecode('01:02:03;04'), true)
+  assert.equal(sdk.validTimecode('01:61:03:04'), false)
+})
