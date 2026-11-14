@@ -33,6 +33,9 @@ struct Cli {
     /// Write a signed, hash-chained receipt for every decision (edits, arming, GO, refusals, proposals) into this folder, in the format scripts/verify_governance_chain.py checks offline. The folder keeps the signing key too: protect it like the show file.
     #[arg(long, env = "PCHI_GOVERNANCE")]
     governance: Option<String>,
+    /// Don't run: play this edited show file against the run recorded in --db and print what would differ (path, cues that would be cut off, timing). Needs no gear.
+    #[arg(long, value_name = "FILE", requires = "db")]
+    rehearse: Option<String>,
     /// Really send cues to the rig's devices (UDP/OSC to each device's host and port). Without it, deliveries are only reported as "dry-run".
     #[arg(long)]
     send: bool,
@@ -48,6 +51,20 @@ async fn main() -> anyhow::Result<()> {
         Some(p) => EventStore::open(p).with_context(|| format!("opening {p}"))?,
         None => EventStore::open_in_memory()?,
     };
+    if let Some(cand) = &cli.rehearse {
+        let (cchart, cdev) = rig::load(&std::fs::read_to_string(cand).with_context(|| format!("reading {cand}"))?).map_err(anyhow::Error::msg).with_context(|| format!("parsing {cand}"))?;
+        let dev = cdev.or(devices).unwrap_or_default();
+        let records = store.all()?;
+        let until = records.last().map_or(0, |r| r.timestamp);
+        let r = pchi_studio_api::rehearse::run(&records, &cchart, &dev, until).map_err(anyhow::Error::msg)?;
+        println!("{}", r["summary"]["verdict"].as_str().unwrap_or(""));
+        for l in r["summary"]["lines"].as_array().into_iter().flatten() {
+            println!("  {}", l.as_str().unwrap_or(""));
+        }
+        println!("recorded path:  {}", r["recorded_path"].as_array().into_iter().flatten().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(" → "));
+        println!("rehearsed path: {}", r["rehearsed_path"].as_array().into_iter().flatten().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(" → "));
+        return Ok(());
+    }
     let routed = devices.as_ref().map(|d| d.len());
     if cli.send && routed.is_none() {
         eprintln!("warning: --send has no effect: {} has no rig (open it in Studio, add devices and Save as .pchi)", cli.file);

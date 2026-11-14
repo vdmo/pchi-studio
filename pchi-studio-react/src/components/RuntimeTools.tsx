@@ -69,6 +69,15 @@ export default function RuntimeTools({ getFile, locked = false, undoDepth = 0 }:
   const [report, setReport] = useState<Record<string, any> | { error: string } | null>(null)
   const [keyText, setKeyText] = useState('')
   const [doors, setDoors] = useState<{ summary?: { go: boolean; fail: number; warn: number; ok: number }; checks?: DoorCheck[]; error?: string; busy?: boolean } | null>(null)
+  type Rehearsal = { run: { length_ms: number; inputs: number; edited_live: number }; recorded_path: string[]; rehearsed_path: string[]; summary: { different: boolean; verdict: string; lines: string[] } }
+  const [rehearse, setRehearse] = useState<{ r?: Rehearsal; error?: string; busy?: boolean } | null>(null)
+  const openRehearse = async () => {
+    setRehearse({ busy: true })
+    const r = await api('/rehearse', { method: 'POST', body: JSON.stringify(getFile()), headers: { 'Content-Type': 'application/json' } }).catch(() => null)
+    if (!r) return setRehearse({ error: 'The runtime did not answer. Is it running?' })
+    if (!r.ok) return setRehearse({ error: String(r.body?.error ?? `Could not rehearse (${r.status})`) })
+    setRehearse({ r: r.body as unknown as Rehearsal })
+  }
   const openDoors = async () => {
     setDoors({ busy: true })
     const r = await api('/preflight').catch(() => null)
@@ -121,6 +130,7 @@ export default function RuntimeTools({ getFile, locked = false, undoDepth = 0 }:
         <button onClick={() => open('send')} title="Show what would change in the running show, then send it">{locked ? '🔒 ' : ''}Send show to runtime…</button>
         {undoDepth > 0 && <button onClick={() => open('undo')} title="Put the running show back as it was before the last send">Undo last send ({undoDepth})</button>}
         <button onClick={openDoors} title="Check the whole show against the rig and each tool before the doors open">Doors check</button>
+        <button onClick={openRehearse} title="Play this edited show against what already happened in the run, without sending anything">Rehearse</button>
         <button onClick={openReport} title="How the run went: cue timing, failed sends, edits made mid-show">Run report</button>
       </div>
 
@@ -183,6 +193,35 @@ export default function RuntimeTools({ getFile, locked = false, undoDepth = 0 }:
               <button onClick={() => setSend(null)}>Close</button>
             </div>
           )}
+        </Dialog>
+      )}
+
+      {rehearse && (
+        <Dialog title="Rehearse against the run so far" onClose={() => setRehearse(null)}>
+          {rehearse.busy && <p className="muted">Playing it through…</p>}
+          {rehearse.error && <p className="rt-err" role="alert">{rehearse.error}</p>}
+          {rehearse.r && (
+            <>
+              <p className={`doors-sum ${rehearse.r.summary.different ? 'nogo' : 'go'}`} role="status">
+                {rehearse.r.summary.verdict}
+                <span className="muted"> · {sec(rehearse.r.run.length_ms)} of run, {rehearse.r.run.inputs} recorded press{rehearse.r.run.inputs === 1 ? '' : 'es'} replayed</span>
+              </p>
+              {rehearse.r.summary.lines.length > 0 && (
+                <ul className="doors-list warn">
+                  {rehearse.r.summary.lines.map((l, i) => (
+                    <li key={i}>{l}</li>
+                  ))}
+                </ul>
+              )}
+              <p className="muted">Real run: {rehearse.r.recorded_path.join(' → ')}</p>
+              <p className="muted">This show: {rehearse.r.rehearsed_path.join(' → ')}</p>
+              {rehearse.r.run.edited_live > 0 && <p className="muted">The real run was edited {rehearse.r.run.edited_live} time(s) while it ran, so its cue lists are what was running at the time.</p>}
+              <p className="muted">Nothing was sent. Presses are replayed as they were: people might have pressed differently with a different show.</p>
+            </>
+          )}
+          <div className="rt-actions">
+            <button onClick={() => setRehearse(null)}>Close</button>
+          </div>
         </Dialog>
       )}
 

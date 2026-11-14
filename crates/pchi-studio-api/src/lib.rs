@@ -47,6 +47,7 @@ pub mod links;
 pub mod output;
 pub mod preflight;
 pub mod profiles;
+pub mod rehearse;
 pub mod rig;
 
 use futures_util::{SinkExt, StreamExt};
@@ -697,6 +698,14 @@ impl Show {
         self.inner.lock().unwrap().engine.current_state.clone()
     }
 
+    /// Play `chart` against the run recorded so far, on a virtual clock, and say what would differ. Changes nothing.
+    /// With no rig of its own the candidate is checked against the running rig.
+    pub fn rehearse(&self, chart: Showchart, devices: Option<Vec<rig::Device>>) -> Result<Value, String> {
+        let dev = devices.unwrap_or_else(|| self.output.lock().unwrap().as_ref().map(|o| o.devices().to_vec()).unwrap_or_default());
+        let records = self.inner.lock().unwrap().store.all().map_err(|e| e.to_string())?;
+        rehearse::run(&records, &chart, &dev, now_ms())
+    }
+
     /// Turn on signed receipts: every decision from now on is written to `log`.
     pub fn set_governance(&self, log: primeswarm_pchi::GovernanceLog) {
         let _ = self.gov.log.set(log);
@@ -968,6 +977,7 @@ pub fn router_with_token(show: Arc<Show>, token: Option<String>) -> Router {
             if !authorized(&a.token, &q, &h) { return (StatusCode::UNAUTHORIZED, Json(json!({"error": "token required"}))); }
             (StatusCode::OK, Json(a.show.preflight()))
         }))
+        .route("/rehearse", post(post_rehearse))
         .route("/proposals", get(get_proposals))
         .route("/proposals/:id/:verb", post(post_decide))
         .route("/governance/export", get(get_governance))
@@ -1154,6 +1164,22 @@ async fn post_test(State(a): State<App>, Path(id): Path<String>, q: Query<HashMa
             (StatusCode::OK, Json(v))
         }
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e}))),
+    }
+}
+
+/// `POST /rehearse` (a show file): what the edited show would have done with the run so far. Read-only, so it needs no
+/// operator key and agents may use it: it is how an agent checks an idea before proposing it.
+async fn post_rehearse(State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap, body: String) -> impl IntoResponse {
+    if !authorized(&a.token, &q, &h) {
+        return unauthorized();
+    }
+    let (chart, devices) = match rig::load(&body) {
+        Ok(x) => x,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))),
+    };
+    match a.show.rehearse(chart, devices) {
+        Ok(v) => (StatusCode::OK, Json(v)),
+        Err(e) => (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"error": e}))),
     }
 }
 
@@ -2409,5 +2435,27 @@ mod tests {
         let (a, p) = (Actor::parse(Some("Agent:Nova")), Actor::parse(Some("person:Alex")));
         assert_eq!((a.name(), p.name(), Actor::parse(None).name()), ("agent:Nova".to_string(), "person:Alex".to_string(), "operator".to_string()));
         assert!(Actor::parse(Some("agent")).is_agent() && !Actor::parse(Some("robot")).is_agent());
+    }
+
+    #[tokio::test]
+    async fn rehearsing_is_read_only_so_an_agent_may_try_an_idea_before_proposing_it() {
+        let (show, addr) = governed("rehearse").await;
+        show.apply("studio", "START");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let same = serde_json::to_string(&quick()).unwrap();
+        // no operator key, and an agent: still allowed, and it changes nothing
+        let (st, v) = http(addr, "POST", "/rehearse", &same, AGENT).await;
+        assert_eq!(st, 200, "{v}");
+        assert_eq!(v["recorded_path"], json!(["PRESHOW", "INTRO"]));
+        assert_eq!(v["run"]["inputs"], 1);
+        // a cue pushed far past anything the run has reached: it has not fired, and the show is untouched
+        let mut later = quick();
+        move_cue(&mut later, "INTRO", "lighting", 60_000);
+        let (st, v) = http(addr, "POST", "/rehearse", &serde_json::to_string(&later).unwrap(), AGENT).await;
+        assert_eq!(st, 200);
+        assert_eq!(v["summary"]["different"], true, "{v}");
+        assert_eq!(show.snapshot()["definition"], serde_json::to_value(quick()).unwrap(), "a rehearsal must not change the show");
+        assert!(show.snapshot()["proposals"].as_array().unwrap().is_empty());
+        assert_eq!(http(addr, "POST", "/rehearse", "not json", AGENT).await.0, 400);
     }
 }
