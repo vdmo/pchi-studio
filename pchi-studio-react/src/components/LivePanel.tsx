@@ -6,6 +6,7 @@ import CommandBar from './CommandBar'
 import TimelineStrip, { useStripLayout } from './TimelineStrip'
 import { sceneInfo } from './sceneInfo'
 import LiveCallSheet from './LiveCallSheet'
+import RoleBanner from './RoleBanner'
 import RuntimeTools, { armLaser, decideProposal, getInputs, pollAction, signIn, signOut, stopLasers, testFire, tryCue, whoami, type OscInput, type Poll, type WhoAmI } from './RuntimeTools'
 import { STALE_MS, feedUrl, type Ready } from './liveFeed'
 import { fmt } from './TimelineStrip'
@@ -425,6 +426,7 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile, onAddCa
       )}
 
       <Card title="Show" className="right">
+        <RoleBanner />
         <p className="bigstate">{state || '—'}</p>
         <div className="seg lv-seg" role="group" aria-label="Live view">
           <button className={view === 'operate' ? 'on' : ''} aria-pressed={view === 'operate'} onClick={() => setView('operate')}>Operate</button>

@@ -34,6 +34,7 @@ clap = { version = "4", features = ["derive", "env"] }
 anyhow = "1.0"
 regex = "1"
 tokio-tungstenite = "0.24"
+tower = { version = "0.4", features = ["util"] }
 sha2 = "0.10"
 base64 = "0.22"
 pbkdf2 = "0.12"

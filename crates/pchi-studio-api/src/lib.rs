@@ -45,6 +45,7 @@ pub mod audience;
 pub mod diff;
 pub mod drill;
 pub mod dmx;
+pub mod failover;
 pub mod fixtures;
 pub mod gearcheck;
 pub mod governance;
@@ -57,6 +58,7 @@ pub mod ltc;
 pub mod output;
 pub mod preflight;
 pub mod profiles;
+pub mod recording;
 pub mod rehearse;
 pub mod timecode;
 pub mod rig;
@@ -100,6 +102,12 @@ impl Applied {
             _ => None,
         }
     }
+}
+
+/// What a session is kept under: a hash of its token, so neither memory dumps nor the sessions file hold a token that works.
+fn session_id(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(token.as_bytes()))
 }
 
 fn now_ms() -> i64 {
@@ -154,8 +162,14 @@ pub struct Show {
     /// Signed-in sessions: a short-lived token stands in for the person's key, so the key is typed once and not kept.
     sessions: Mutex<HashMap<String, (Actor, i64)>>,
     session_hours: std::sync::atomic::AtomicU64,
+    /// Where sessions are kept so a restart does not sign everyone out (only a hash of each token is written).
+    sessions_file: Mutex<Option<String>>,
     /// Recent failed sign-ins: (start of the minute, count). Too many in a minute and sign-in waits.
     signin_fails: Mutex<(i64, u32)>,
+    /// Failover: which takeover this run is on (0 until a standby takes over; a standby that does so is one higher), who took over from it, and the secret a standby proves itself with.
+    epoch: std::sync::atomic::AtomicU64,
+    fenced: Mutex<Option<Value>>,
+    failover_key: Mutex<Option<String>>,
 }
 
 /// How long a department page may stay silent before it counts as not linked (mirrors the Studio).
@@ -204,7 +218,11 @@ impl Show {
             poll_pub: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
             session_hours: std::sync::atomic::AtomicU64::new(8),
+            sessions_file: Mutex::new(None),
             signin_fails: Mutex::new((0, 0)),
+            epoch: std::sync::atomic::AtomicU64::new(0),
+            fenced: Mutex::new(None),
+            failover_key: Mutex::new(None),
         })
     }
 
@@ -226,6 +244,12 @@ impl Show {
                 recorder::SHOW_CONTEXT => {
                     if let Some(k) = r.payload["key"].as_str() {
                         engine.set_context(k, r.payload["value"].clone());
+                    }
+                }
+                "show.edit" => {
+                    // a live edit replaced the show: carry on with the show as it was then
+                    if let Some(c) = r.payload.get("chart").and_then(|c| serde_json::from_value::<Showchart>(c.clone()).ok()) {
+                        engine.chart = c;
                     }
                 }
                 recorder::SHOW_INPUT => {
@@ -262,6 +286,15 @@ impl Show {
         show.watch_links();
         show.arm_from(0, elapsed);
         Ok((show, info))
+    }
+
+    /// The show a recorded run started with and the rig it last had, read from the log alone (a standby has no other source that
+    /// is certain to be current: the show file it was started with may be older than the live edits).
+    pub fn logged_show(records: &[pchi_eventstore::EventRecord]) -> Result<(Showchart, Option<Vec<rig::Device>>), String> {
+        let start = records.iter().rposition(|r| r.event_type == recorder::RUN_START).ok_or("the log holds no run yet")?;
+        let chart: Showchart = serde_json::from_value(records[start].payload["chart"].clone()).map_err(|e| format!("the logged show is unreadable: {e}"))?;
+        let devices = records[start..].iter().rev().filter(|r| r.event_type == "show.edit").find_map(|r| r.payload.get("devices").and_then(|d| serde_json::from_value::<Vec<rig::Device>>(d.clone()).ok()));
+        Ok((chart, devices))
     }
 
     /// Keep an eye on the devices we send to, while the runtime is really sending: open the sockets of the
@@ -345,14 +378,75 @@ impl Show {
     }
 
     fn session_actor(&self, token: &str) -> Option<Actor> {
+        let id = session_id(token);
         let mut s = self.sessions.lock().unwrap();
-        match s.get(token) {
+        match s.get(&id) {
             Some((a, exp)) if *exp > now_ms() => Some(a.clone()),
             Some(_) => {
-                s.remove(token);
+                s.remove(&id);
                 None
             }
             None => None,
+        }
+    }
+
+    /// Keep sessions in this file (only a hash of each token, so reading the file does not let anyone in), and load the ones it holds:
+    /// a restart then does not sign everyone out. A session is dropped when it has expired, when its person is no longer on the roster
+    /// or has a different role, and when it was the operator key's and that key is gone. Call after the roster and edit key are set.
+    /// Returns how many were restored.
+    pub fn use_sessions_file(&self, path: &str) -> Result<usize, String> {
+        *self.sessions_file.lock().unwrap() = Some(path.to_string());
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(format!("reading {path}: {e}")),
+        };
+        let v: Value = serde_json::from_str(&text).map_err(|e| format!("{path} is not a sessions file: {e}"))?;
+        let now = now_ms();
+        let mut kept = 0;
+        {
+            let roster = self.roster.lock().unwrap();
+            let has_key = self.edit_key.lock().unwrap().is_some();
+            let mut s = self.sessions.lock().unwrap();
+            for e in v["sessions"].as_array().into_iter().flatten() {
+                let (Some(id), Some(exp)) = (e["id"].as_str(), e["expires"].as_i64()) else { continue };
+                if exp <= now {
+                    continue;
+                }
+                let actor = match (e["kind"].as_str(), e["name"].as_str(), e["role"].as_str()) {
+                    (Some("member"), Some(n), Some(r)) if roster.still_valid(n, r, now) => Actor::Member { name: n.into(), role: r.into() },
+                    (Some("operator"), _, _) if has_key => Actor::Person(None),
+                    _ => continue,
+                };
+                s.insert(id.to_string(), (actor, exp));
+                kept += 1;
+            }
+        }
+        self.save_sessions();
+        Ok(kept)
+    }
+
+    /// Write the live sessions to the sessions file, if there is one (a temporary file renamed over it; owner-only on Linux and macOS).
+    fn save_sessions(&self) {
+        let Some(path) = self.sessions_file.lock().unwrap().clone() else { return };
+        let now = now_ms();
+        let list: Vec<Value> = self.sessions.lock().unwrap().iter().filter(|(_, (_, e))| *e > now).filter_map(|(id, (a, e))| match a {
+            Actor::Member { name, role } => Some(json!({"id": id, "expires": e, "kind": "member", "name": name, "role": role})),
+            Actor::Person(None) => Some(json!({"id": id, "expires": e, "kind": "operator"})),
+            _ => None,
+        }).collect();
+        let tmp = format!("{path}.tmp");
+        let body = serde_json::to_string(&json!({"sessions": list})).unwrap_or_default();
+        let written = std::fs::write(&tmp, body).and_then(|_| {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+            }
+            std::fs::rename(&tmp, &path)
+        });
+        if let Err(e) = written {
+            self.publish(json!({"type": "error", "message": format!("could not save sessions to {path}: {e}")}));
         }
     }
 
@@ -395,15 +489,17 @@ impl Show {
         {
             let mut s = self.sessions.lock().unwrap();
             s.retain(|_, (_, e)| *e > now);
-            s.insert(token.clone(), (actor.clone(), expires));
+            s.insert(session_id(&token), (actor.clone(), expires));
         }
+        self.save_sessions();
         self.receipt("auth.signin", "ALLOW", &actor, "signed in");
         Ok(json!({"token": token, "expires_in_s": hours * 3600, "name": actor.name(), "role": actor.role()}))
     }
 
     /// End a session at once.
     pub fn sign_out(&self, token: &str) -> bool {
-        let gone = self.sessions.lock().unwrap().remove(token);
+        let gone = self.sessions.lock().unwrap().remove(&session_id(token));
+        self.save_sessions();
         if let Some((a, _)) = &gone {
             self.receipt("auth.signout", "ALLOW", a, "signed out");
         }
@@ -511,6 +607,7 @@ impl Show {
             "captures": Value::Array(self.captures.lock().unwrap().iter().cloned().collect()),
             "polls": self.polls_json(),
             "resumed": self.resumed.lock().unwrap().clone(),
+            "role": self.role_json(),
             "undo_depth": self.history.lock().unwrap().len(),
             "governed": self.gov.log.get().is_some(),
             "proposals": self.gov.pending_json(),
@@ -569,6 +666,11 @@ impl Show {
         Ok(())
     }
 
+    /// The log as records (for a recording).
+    pub fn records(&self) -> Vec<pchi_eventstore::EventRecord> {
+        self.inner.lock().unwrap().store.all().unwrap_or_default()
+    }
+
     pub fn events(&self) -> Vec<Value> {
         let g = self.inner.lock().unwrap();
         g.store
@@ -591,6 +693,9 @@ impl Show {
     /// Like `apply`, but says why nothing happened when the scene has not yet run its minimum: an input (not the
     /// show's own timer) that would move the scene on too early is HELD, meaning ignored, recorded and reported.
     pub fn apply_checked(self: &Arc<Self>, source: &str, event: &str) -> Applied {
+        if self.is_fenced() {
+            return Applied::Ignored; // another runtime is running the show
+        }
         if source != "timer" && source != "timecode" {
             let held = {
                 let g = self.inner.lock().unwrap();
@@ -803,7 +908,7 @@ impl Show {
             g.generation += 1;
             let show_id = g.engine.chart.id.clone().unwrap_or_else(|| "show".into());
             let ts = now_ms();
-            let _ = g.store.append(ts, "studio", Some(&show_id), "show.edit", &json!({"changes": d.changes, "notes": d.notes, "undo": is_undo}));
+            let _ = g.store.append(ts, "studio", Some(&show_id), "show.edit", &json!({"changes": d.changes, "notes": d.notes, "undo": is_undo, "chart": g.engine.chart, "devices": new_dev}));
             (d, g.generation, elapsed)
         };
         if devices.is_some() {
@@ -1354,6 +1459,92 @@ impl Show {
         }
     }
 
+    // ---- failover (see the `failover` module) ----
+
+    /// The secret a standby proves itself with, to read the log (`/replicate`) and to tell this runtime another has taken over (`/fence`).
+    pub fn set_failover_key(&self, key: Option<String>) {
+        *self.failover_key.lock().unwrap() = key.filter(|k| !k.is_empty());
+    }
+
+    pub fn failover_enabled(&self) -> bool {
+        self.failover_key.lock().unwrap().is_some()
+    }
+
+    pub fn failover_ok(&self, provided: Option<&str>) -> bool {
+        match (self.failover_key.lock().unwrap().as_deref(), provided) {
+            (Some(k), Some(p)) => k.len() == p.len() && k.bytes().zip(p.bytes()).fold(0u8, |a, (x, y)| a | (x ^ y)) == 0,
+            _ => false,
+        }
+    }
+
+    pub fn epoch(&self) -> u64 {
+        self.epoch.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn set_epoch(&self, e: u64) {
+        self.epoch.store(e, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn is_fenced(&self) -> bool {
+        self.fenced.lock().unwrap().is_some()
+    }
+
+    /// Whether this runtime is the one running the show, and which takeover it is on.
+    pub fn role_json(&self) -> Value {
+        let fenced = self.fenced.lock().unwrap().clone();
+        json!({"role": if fenced.is_some() { "fenced" } else { "active" }, "epoch": self.epoch(), "fenced_by": fenced, "failover": self.failover_enabled(), "ts": now_ms()})
+    }
+
+    /// Another runtime (a standby) says it has taken over at `epoch`. If that is newer than this one's, this runtime stops: it
+    /// sends nothing more, streams no lighting, disarms its lasers, ignores inputs and timers, and says so to every client.
+    /// Stopping is the only safe answer to "someone else is running the show"; the person decides what to do next.
+    pub fn fence(self: &Arc<Self>, epoch: u64, by: &str) -> Value {
+        if epoch <= self.epoch() {
+            return json!({"fenced": self.is_fenced(), "epoch": self.epoch(), "note": "not newer than this runtime's own epoch: ignored"});
+        }
+        if self.is_fenced() {
+            self.set_epoch(epoch);
+            return json!({"fenced": true, "epoch": epoch});
+        }
+        let ts = now_ms();
+        let info = json!({"by": by, "epoch": epoch, "ts": ts});
+        *self.fenced.lock().unwrap() = Some(info.clone());
+        self.set_epoch(epoch);
+        let out = self.output.lock().unwrap().clone();
+        if let Some(out) = out {
+            for l in out.lasers() {
+                out.set_armed(&l.id, false);
+            }
+            tokio::spawn(async move { out.silence().await });
+        }
+        self.inner.lock().unwrap().generation += 1; // timers armed before this do nothing
+        {
+            let g = self.inner.lock().unwrap();
+            let show_id = g.engine.chart.id.clone().unwrap_or_else(|| "show".into());
+            let _ = g.store.append(ts, "runtime", Some(&show_id), "show.fenced", &info);
+        }
+        self.publish(json!({"type": "fenced", "ts": ts, "by": by, "epoch": epoch}));
+        self.receipt("failover.fenced", "ALLOW", &Actor::Person(None), &format!("{by} took over the show (takeover {epoch}): this runtime stopped sending and disarmed its lasers"));
+        json!({"fenced": true, "epoch": epoch})
+    }
+
+    /// The log after record `after`, for a standby. `last_ts` is the timestamp the standby holds for record `after`: if the log
+    /// here has a different one, this is not the log the standby has been following and it must start again.
+    pub fn replicate_json(&self, after: i64, last_ts: Option<i64>) -> Result<Value, (u16, String)> {
+        let g = self.inner.lock().unwrap();
+        if after > 0 {
+            match (g.store.timestamp_of(after).map_err(|e| (500u16, e.to_string()))?, last_ts) {
+                (Some(t), Some(l)) if t == l => {}
+                (None, _) => return Err((409, format!("this runtime's log has no record {after}: the standby follows a different run"))),
+                _ => return Err((409, "the standby's copy no longer matches this runtime's log: start the standby again with an empty database".into())),
+            }
+        }
+        let recs = g.store.after(after, 500).map_err(|e| (500u16, e.to_string()))?;
+        let last = g.store.last_id().map_err(|e| (500u16, e.to_string()))?;
+        let list: Vec<Value> = recs.iter().map(|r| json!({"id": r.id, "ts": r.timestamp, "source": r.source, "target": r.target, "type": r.event_type, "payload": r.payload})).collect();
+        Ok(json!({"records": list, "last_id": last, "epoch": self.epoch(), "state": g.engine.current_state, "ts": now_ms(), "fenced": self.is_fenced()}))
+    }
+
     /// Whether a restarted runtime carried on a run (see `resume`).
     pub fn was_resumed(&self) -> bool {
         self.resumed.lock().unwrap().is_some()
@@ -1389,6 +1580,9 @@ impl Show {
 
     /// `tc_actual_ms`: for a cue fired by timecode, how far into the scene the timecode was (the run report's "actual").
     fn fire_cue_at(self: &Arc<Self>, cue: &ScheduledCue, tc_actual_ms: Option<i64>) {
+        if self.is_fenced() {
+            return;
+        }
         let ts = now_ms();
         let event = cue.action.to_event();
         {
@@ -1409,6 +1603,9 @@ impl Show {
     /// `delivery` message: status "sent", "dry-run", "no-device" or "failed". Never blocks the show.
     fn route(self: &Arc<Self>, ts: i64, action: &Action, lane: Option<&str>, cue: Option<&str>, dept: Option<&str>, device: Option<&str>) {
         let Some(out) = self.output.lock().unwrap().clone() else { return };
+        if self.is_fenced() {
+            return;
+        }
         let base = json!({"type": "delivery", "ts": ts, "kind": action.kind, "lane": lane, "cue": cue});
         fn with(base: &Value, extra: Value) -> Value {
             let mut m = base.clone();
@@ -1533,6 +1730,11 @@ pub fn router_with_token(show: Arc<Show>, token: Option<String>) -> Router {
         .route("/devices/:id/test", post(post_test))
         .route("/ready/:dept", post(post_ready))
         .route("/input", post(post_input))
+        .route("/recording", get(get_recording))
+        .route("/replay", get(get_replay).post(post_replay).layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024)))
+        .route("/role", get(get_role))
+        .route("/replicate", get(get_replicate))
+        .route("/fence", post(post_fence))
         .route("/ws", get(ws_upgrade))
         .with_state(App { show, token })
 }
@@ -1899,6 +2101,92 @@ async fn post_input(State(a): State<App>, q: Query<HashMap<String, String>>, h: 
         Applied::Ignored => {}
     }
     (StatusCode::OK, Json(json!({"applied": outcome == Applied::Moved})))
+}
+
+/// `GET /recording`: the latest run as a file to keep (see `recording`).
+async fn get_recording(State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap) -> impl IntoResponse {
+    if !authorized(&a.token, &q, &h) {
+        return unauthorized();
+    }
+    match recording::export(&a.show.records()) {
+        Ok(v) => (StatusCode::OK, Json(v)),
+        Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e}))),
+    }
+}
+
+/// `GET /replay`: the latest run laid out for scrubbing, with a check that it replays. `POST /replay` with a recording as the body
+/// does the same for a recording from a file; it changes nothing in the running show.
+async fn get_replay(State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap) -> impl IntoResponse {
+    if !authorized(&a.token, &q, &h) {
+        return unauthorized();
+    }
+    replay_reply(&a.show.records())
+}
+
+async fn post_replay(State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap, body: String) -> impl IntoResponse {
+    if !authorized(&a.token, &q, &h) {
+        return unauthorized();
+    }
+    match recording::parse(&body) {
+        Ok(records) => replay_reply(&records),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"error": e}))),
+    }
+}
+
+fn replay_reply(records: &[pchi_eventstore::EventRecord]) -> Reply {
+    match recording::view(records) {
+        Ok(mut v) => {
+            v["verify"] = recording::verify(records).unwrap_or_else(|e| json!({"matches": false, "verdict": e}));
+            (StatusCode::OK, Json(v))
+        }
+        Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e}))),
+    }
+}
+
+/// `GET /role`: whether this runtime is the one running the show (see `Show::role_json`).
+async fn get_role(State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap) -> impl IntoResponse {
+    if !authorized(&a.token, &q, &h) {
+        return unauthorized();
+    }
+    (StatusCode::OK, Json(a.show.role_json()))
+}
+
+fn failover_key_of(h: &HeaderMap) -> Option<&str> {
+    h.get("x-pchi-failover-key").and_then(|v| v.to_str().ok())
+}
+
+/// `GET /replicate?after=N&last_ts=T`: the log after record N, for a standby (needs the failover key).
+async fn get_replicate(State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap) -> impl IntoResponse {
+    if !authorized(&a.token, &q, &h) {
+        return unauthorized();
+    }
+    if !a.show.failover_enabled() {
+        return (StatusCode::NOT_FOUND, Json(json!({"error": "failover is off: start the runtime with --failover-key"})));
+    }
+    if !a.show.failover_ok(failover_key_of(&h)) {
+        return (StatusCode::FORBIDDEN, Json(json!({"error": "the failover key is wrong"})));
+    }
+    let after = q.get("after").and_then(|v| v.parse().ok()).unwrap_or(0i64);
+    let last_ts = q.get("last_ts").and_then(|v| v.parse().ok());
+    match a.show.replicate_json(after, last_ts) {
+        Ok(v) => (StatusCode::OK, Json(v)),
+        Err((code, e)) => (StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR), Json(json!({"error": e}))),
+    }
+}
+
+/// `POST /fence` {"epoch": N, "by": "name"}: a standby says it has taken over (needs the failover key).
+async fn post_fence(State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap, Json(body): Json<Value>) -> impl IntoResponse {
+    if !authorized(&a.token, &q, &h) {
+        return unauthorized();
+    }
+    if !a.show.failover_ok(failover_key_of(&h)) {
+        return (StatusCode::FORBIDDEN, Json(json!({"error": "the failover key is wrong or failover is off"})));
+    }
+    let Some(epoch) = body["epoch"].as_u64() else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "send {\"epoch\": N, \"by\": \"name\"}"})));
+    };
+    let by = body["by"].as_str().unwrap_or("a standby");
+    (StatusCode::OK, Json(a.show.fence(epoch, &by.chars().take(60).collect::<String>())))
 }
 
 async fn ws_upgrade(ws: WebSocketUpgrade, State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap) -> impl IntoResponse {
@@ -4233,7 +4521,7 @@ mod tests {
         let token = show.sign_in(&keys[0].1).unwrap()["token"].as_str().unwrap().to_string();
         assert!(matches!(show.identify_with(Some(&token), None, Actor::Person(None)), Actor::Member { .. }));
         // its time up: it is gone, and the sweep removes it
-        show.sessions.lock().unwrap().get_mut(&token).unwrap().1 = now_ms() - 1;
+        show.sessions.lock().unwrap().get_mut(&session_id(&token)).unwrap().1 = now_ms() - 1;
         assert_eq!(show.identify_with(Some(&token), None, Actor::Person(None)), Actor::Anonymous);
         assert!(show.sessions.lock().unwrap().is_empty());
         // a declared agent stays an agent whatever session it holds
@@ -4354,5 +4642,311 @@ mod tests {
         let (bad, text) = call("pchi_stop_lasers", json!({})).await;
         assert!(!bad && text.contains("stopped"), "{text}");
         assert!(receipts(&show).iter().any(|(ru, g, m)| ru == "laser.stop" && g == "ALLOW" && m.contains("agent:nova")));
+    }
+
+    // ---- failover ----
+
+    async fn serve_app(app: Router) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        (addr, tokio::spawn(async move { axum::serve(l, app).await.unwrap(); }))
+    }
+
+    async fn fo_get(addr: std::net::SocketAddr, path: &str, key: Option<&str>) -> (u16, Value) {
+        let h: Vec<(&str, &str)> = key.map(|k| vec![("X-Pchi-Failover-Key", k)]).unwrap_or_default();
+        failover::http(&addr.to_string(), "GET", path, &h, None).await.unwrap()
+    }
+
+    async fn fo_until(secs: u64, mut ok: impl FnMut() -> bool) -> bool {
+        let end = tokio::time::Instant::now() + Duration::from_secs(secs);
+        while tokio::time::Instant::now() < end {
+            if ok() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        ok()
+    }
+
+    fn standby_of(addr: std::net::SocketAddr, auto: bool) -> Arc<failover::Standby> {
+        let mut cfg = failover::Config::new(&addr.to_string(), "nova-b", "fk");
+        cfg.poll_every = Duration::from_millis(40);
+        cfg.takeover_after = Duration::from_millis(400);
+        cfg.auto = auto;
+        failover::Standby::new(cfg, EventStore::open_in_memory().unwrap(), failover::activation(Some(vec![device("b1", "beyond", 9)]), false, None, Box::new(|_| Ok(()))))
+    }
+
+    fn primary_show() -> Arc<Show> {
+        let p = Show::start_with(quick(), EventStore::open_in_memory().unwrap(), Some(Output::new(vec![device("b1", "beyond", 9)], false))).unwrap();
+        p.set_failover_key(Some("fk".into()));
+        p
+    }
+
+    #[tokio::test]
+    async fn a_standby_copies_the_log_and_takes_over_when_the_primary_goes_quiet() {
+        let primary = primary_show();
+        primary.apply("studio", "START"); // INTRO
+        primary.set_context("energy", json!(0.9));
+        let mut edited = quick();
+        move_cue(&mut edited, "INTRO", "laser", 1500);
+        primary.replace(edited, None, true).unwrap();
+        let (paddr, ptask) = serve_app(router(primary.clone())).await;
+
+        let sb = standby_of(paddr, true);
+        tokio::spawn(sb.clone().follow());
+        let (saddr, _) = serve_app(failover::standby_router(sb.clone())).await;
+
+        // it copies everything, and says it is a standby; every other request is refused as standby
+        assert!(fo_until(3, || sb.copied() as usize >= primary.events().len()).await, "copied {} of {}", sb.copied(), primary.events().len());
+        let (code, role) = fo_get(saddr, "/role", None).await;
+        assert_eq!((code, role["role"].as_str(), role["ready"].as_bool()), (200, Some("standby"), Some(true)), "{role}");
+        let (code, v) = fo_get(saddr, "/state", None).await;
+        assert_eq!(code, 503, "{v}");
+        assert!(!sb.is_active(), "a primary that answers is not replaced");
+
+        // the primary dies: after the silence the standby runs the show from where it was
+        ptask.abort();
+        assert!(fo_until(5, || sb.is_active()).await, "the standby did not take over");
+        let (code, state) = fo_get(saddr, "/state", None).await;
+        assert_eq!(code, 200, "{state}");
+        assert_eq!(state["state"], "INTRO");
+        assert_eq!(state["context"]["energy"], 0.9, "the context comes with it");
+        let lanes = &state["definition"]["states"].as_array().unwrap().iter().find(|s| s["id"] == "INTRO").unwrap()["timeline"]["lanes"];
+        assert!(lanes.to_string().contains("1500"), "the live edit came with it: {lanes}");
+        let (_, role) = fo_get(saddr, "/role", None).await;
+        assert_eq!((role["role"].as_str(), role["epoch"].as_u64()), (Some("active"), Some(1)), "{role}");
+        assert_eq!(state["devices"][0]["armed"], false, "lasers start disarmed after a takeover");
+        assert_eq!(state["resumed"]["state"], "INTRO");
+    }
+
+    #[tokio::test]
+    async fn a_standby_that_takes_over_stops_the_primary_even_if_it_comes_back() {
+        let primary = primary_show();
+        primary.apply("studio", "START");
+        primary.set_armed("b1", true).unwrap();
+        let (paddr, _p) = serve_app(router(primary.clone())).await;
+        let sb = standby_of(paddr, false); // manual
+        tokio::spawn(sb.clone().follow());
+        let (saddr, _s) = serve_app(failover::standby_router(sb.clone())).await;
+        assert!(fo_until(3, || sb.copied() as usize >= primary.events().len()).await);
+        // a manual standby does not take over by itself, only on the key's word
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert!(!sb.is_active());
+        let (code, _) = failover::http(&saddr.to_string(), "POST", "/takeover", &[], None).await.unwrap();
+        assert_eq!(code, 403, "taking over needs the key");
+        let (code, v) = failover::http(&saddr.to_string(), "POST", "/takeover", &[("X-Pchi-Failover-Key", "fk")], None).await.unwrap();
+        assert_eq!(code, 200, "{v}");
+        // the primary was healthy; it is told at once and stops
+        assert!(fo_until(3, || primary.is_fenced()).await, "the primary was not told");
+        let (_, role) = fo_get(paddr, "/role", None).await;
+        assert_eq!((role["role"].as_str(), role["epoch"].as_u64()), (Some("fenced"), Some(1)), "{role}");
+        assert_eq!(role["fenced_by"]["by"], "nova-b");
+        assert_eq!(primary.apply_checked("studio", "NEXT"), Applied::Ignored, "a fenced runtime ignores inputs");
+        assert_eq!(primary.current_state(), "INTRO");
+        let snap = primary.snapshot();
+        assert_eq!(snap["devices"][0]["armed"], false, "its lasers are disarmed");
+        assert_eq!(snap["role"]["role"], "fenced");
+        assert!(primary.events().iter().any(|e| e["type"] == "show.fenced"));
+        // an older takeover number cannot fence a runtime
+        let other = primary_show();
+        assert_eq!(other.fence(0, "x")["fenced"], false);
+        assert!(!other.is_fenced());
+    }
+
+    #[tokio::test]
+    async fn the_log_is_only_given_to_a_standby_with_the_key_and_only_for_the_log_it_follows() {
+        let primary = primary_show();
+        primary.apply("studio", "START");
+        let (paddr, _p) = serve_app(router(primary.clone())).await;
+        assert_eq!(fo_get(paddr, "/replicate?after=0", None).await.0, 403);
+        assert_eq!(fo_get(paddr, "/replicate?after=0", Some("wrong")).await.0, 403);
+        let (code, v) = fo_get(paddr, "/replicate?after=0", Some("fk")).await;
+        assert_eq!(code, 200);
+        assert!(v["records"].as_array().unwrap().len() >= 2);
+        assert_eq!(v["epoch"], 0);
+        let (code, _) = failover::http(&paddr.to_string(), "POST", "/fence", &[("X-Pchi-Failover-Key", "wrong")], Some("{\"epoch\":5}")).await.unwrap();
+        assert_eq!(code, 403);
+        assert!(!primary.is_fenced());
+        // a copy that does not match this log is refused, not extended
+        let (code, v) = fo_get(paddr, "/replicate?after=1&last_ts=12345", Some("fk")).await;
+        assert_eq!(code, 409, "{v}");
+        let (code, _) = fo_get(paddr, "/replicate?after=999999&last_ts=1", Some("fk")).await;
+        assert_eq!(code, 409);
+        // failover is off unless asked for
+        let plain = Show::start(quick(), EventStore::open_in_memory().unwrap()).unwrap();
+        let (paddr2, _q) = serve_app(router(plain)).await;
+        assert_eq!(fo_get(paddr2, "/replicate?after=0", Some("fk")).await.0, 404);
+    }
+
+    #[tokio::test]
+    async fn a_standby_with_the_wrong_key_does_not_take_over() {
+        let primary = primary_show();
+        primary.apply("studio", "START");
+        let (paddr, ptask) = serve_app(router(primary.clone())).await;
+        let mut cfg = failover::Config::new(&paddr.to_string(), "nova-b", "not-the-key");
+        cfg.poll_every = Duration::from_millis(40);
+        cfg.takeover_after = Duration::from_millis(200);
+        let sb = failover::Standby::new(cfg, EventStore::open_in_memory().unwrap(), failover::activation(None, false, None, Box::new(|_| Ok(()))));
+        tokio::spawn(sb.clone().follow());
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        ptask.abort();
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        assert!(!sb.is_active(), "a refused standby has nothing to run: that is a mistake to fix, not a death to cover");
+        let role = sb.role_json();
+        assert_eq!(role["stuck"], true);
+        assert!(role["problem"].as_str().unwrap().contains("failover key"), "{role}");
+    }
+
+    // ---- recording ----
+
+    async fn a_run_with_everything_in_it() -> Arc<Show> {
+        let show = Show::start_with(quick(), EventStore::open_in_memory().unwrap(), Some(Output::new(vec![device("b1", "beyond", 9)], false))).unwrap();
+        show.apply("studio", "START"); // INTRO: visual 0, lighting 0.4 s, laser 0.8 s
+        show.set_context("energy", json!(0.7));
+        tokio::time::sleep(Duration::from_millis(550)).await;
+        let mut edited = quick();
+        move_cue(&mut edited, "INTRO", "laser", 1500);
+        show.replace(edited, None, true).unwrap();
+        show.receipt("show.edit", "ALLOW", &Actor::Member { name: "Alex".into(), role: "operator".into() }, "sent an edited show");
+        show.apply("studio", "NOT-AN-EVENT");
+        show
+    }
+
+    #[tokio::test]
+    async fn a_run_is_exported_as_a_recording_that_reads_as_a_timeline_and_replays_exactly() {
+        let show = a_run_with_everything_in_it().await;
+        let (addr, _s) = serve_app(router(show.clone())).await;
+
+        let (code, rec) = fo_get(addr, "/recording", None).await;
+        assert_eq!(code, 200);
+        assert_eq!(rec["format"], "pchi-run/1");
+        assert_eq!(rec["records"][0]["type"], "run.start");
+        let n = rec["records"].as_array().unwrap().len();
+        assert!(n >= 6, "{n}");
+
+        let (code, v) = fo_get(addr, "/replay", None).await;
+        assert_eq!(code, 200, "{v}");
+        let kinds: Vec<&str> = v["frames"].as_array().unwrap().iter().filter_map(|f| f["kind"].as_str()).collect();
+        for k in ["scene", "context", "cue", "edit", "decision", "ignored"] {
+            assert!(kinds.contains(&k), "{k} missing from {kinds:?}");
+        }
+        assert_eq!(v["summary"]["path"], json!(["PRESHOW", "INTRO"]));
+        assert_eq!(v["summary"]["edits"], 1);
+        assert_eq!(v["summary"]["who"], json!(["Alex (operator)"]));
+        assert_eq!(v["scenes"][0]["scene"], "PRESHOW");
+        assert!(v["scenes"][1]["to_ms"].is_null(), "the scene still running has no end");
+        assert_eq!(v["verify"]["matches"], true, "{}", v["verify"]);
+        let frames = v["frames"].as_array().unwrap();
+        assert!(frames.windows(2).all(|w| w[0]["t"].as_i64() <= w[1]["t"].as_i64()), "in time order");
+        assert!(frames.iter().any(|f| f["kind"] == "edit" && f["text"].as_str().unwrap().contains("moved 0.8s")), "{frames:?}");
+
+        // as a file: it comes back the same, and a stranger's file can be looked at without touching the show
+        let text = serde_json::to_string(&rec).unwrap();
+        let records = recording::parse(&text).unwrap();
+        assert_eq!(records.len(), n);
+        let (code, again) = failover::http(&addr.to_string(), "POST", "/replay", &[], Some(&text)).await.unwrap();
+        assert_eq!(code, 200);
+        assert_eq!(again["frames"], v["frames"]);
+        assert_eq!(show.current_state(), "INTRO", "looking at a recording changes nothing");
+    }
+
+    #[tokio::test]
+    async fn a_file_that_is_not_a_recording_is_refused_and_a_tampered_one_does_not_replay() {
+        let show = a_run_with_everything_in_it().await;
+        let (addr, _s) = serve_app(router(show.clone())).await;
+        for bad in ["{}", "[]", "nonsense", r#"{"format":"pchi-run/1","records":[{"ts":1,"type":"show.input"}]}"#, r#"{"format":"pchi-run/9","records":[]}"#] {
+            assert!(recording::parse(bad).is_err(), "{bad}");
+            let (code, _) = failover::http(&addr.to_string(), "POST", "/replay", &[], Some(bad)).await.unwrap();
+            assert_eq!(code, 400, "{bad}");
+        }
+        // somebody changes where the show went
+        let (_, rec) = fo_get(addr, "/recording", None).await;
+        let mut tampered = rec.clone();
+        let i = tampered["records"].as_array().unwrap().iter().position(|r| r["type"] == "show.input" && r["payload"]["applied"] == true).unwrap();
+        tampered["records"][i]["payload"]["to"] = json!("FINALE");
+        let records = recording::parse(&tampered.to_string()).unwrap();
+        let v = recording::verify(&records).unwrap();
+        assert_eq!(v["matches"], false, "{v}");
+        assert!(v["verdict"].as_str().unwrap().contains("does NOT replay"), "{v}");
+        // an untouched copy is fine
+        assert_eq!(recording::verify(&recording::parse(&rec.to_string()).unwrap()).unwrap()["matches"], true);
+    }
+
+    #[tokio::test]
+    async fn a_recording_holds_no_secrets() {
+        let show = a_run_with_everything_in_it().await;
+        show.set_edit_key(Some("the-operator-key-123".into()));
+        show.set_audience_token(Some("the-audience-token-456".into()));
+        let text = recording::export(&show.records()).unwrap().to_string();
+        for secret in ["the-operator-key-123", "the-audience-token-456"] {
+            assert!(!text.contains(secret), "{secret} leaked into the recording");
+        }
+    }
+
+    // ---- sessions that survive a restart ----
+
+    fn fresh_show_with(roster: &str, edit_key: Option<&str>) -> Arc<Show> {
+        let show = Show::start(quick(), EventStore::open_in_memory().unwrap()).unwrap();
+        show.set_roster(governance::Roster::parse(roster).unwrap());
+        show.set_edit_key(edit_key.map(String::from));
+        show
+    }
+
+    #[tokio::test]
+    async fn a_signed_in_session_survives_a_restart_and_the_file_holds_no_token() {
+        let path = temp_db("sessions");
+        let (roster, keys) = hashed_roster(1000);
+        let first = fresh_show_with(&roster, Some("operator-key-1"));
+        assert_eq!(first.use_sessions_file(&path).unwrap(), 0, "no file yet");
+        let alex = first.sign_in(&keys[0].1).unwrap()["token"].as_str().unwrap().to_string();
+        let op = first.sign_in("operator-key-1").unwrap()["token"].as_str().unwrap().to_string();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains(&alex) && !text.contains(&op), "the file must not hold a token that works: {text}");
+        assert!(!text.contains("operator-key-1") && !text.contains(&keys[0].1), "nor a key");
+
+        // the runtime restarts: same roster, same file
+        let second = fresh_show_with(&roster, Some("operator-key-1"));
+        assert_eq!(second.use_sessions_file(&path).unwrap(), 2);
+        assert_eq!(second.identify_with(Some(&alex), None, Actor::Person(None)), Actor::Member { name: "Alex".into(), role: "operator".into() });
+        assert_eq!(second.identify_with(Some(&op), None, Actor::Anonymous), Actor::Person(None));
+        // signing out is remembered too
+        assert!(second.sign_out(&alex));
+        let third = fresh_show_with(&roster, Some("operator-key-1"));
+        assert_eq!(third.use_sessions_file(&path).unwrap(), 1);
+        assert_eq!(third.identify_with(Some(&alex), None, Actor::Person(None)), Actor::Anonymous);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn a_restored_session_is_dropped_if_the_person_is_gone_changed_role_or_ran_out() {
+        let path = temp_db("sessions-drop");
+        let (roster, keys) = hashed_roster(1000);
+        let first = fresh_show_with(&roster, None);
+        first.use_sessions_file(&path).unwrap();
+        let alex = first.sign_in(&keys[0].1).unwrap()["token"].as_str().unwrap().to_string();
+        let gus = first.sign_in(&keys[2].1).unwrap()["token"].as_str().unwrap().to_string();
+        let eddie = first.sign_in(&keys[1].1).unwrap()["token"].as_str().unwrap().to_string();
+        first.sessions.lock().unwrap().get_mut(&session_id(&eddie)).unwrap().1 = now_ms() - 1;
+        first.save_sessions();
+
+        // Gus has left the roster, Alex is now only a guest; Eddie's session had run out
+        let (_, a) = governance::new_entry("Alex", "guest", 1000).unwrap();
+        let (_, e) = governance::new_entry("Eddie", "editor", 1000).unwrap();
+        let smaller = json!({"people": [a, e]}).to_string();
+        let second = fresh_show_with(&smaller, None);
+        assert_eq!(second.use_sessions_file(&path).unwrap(), 0);
+        for t in [&alex, &gus, &eddie] {
+            assert_eq!(second.identify_with(Some(t), None, Actor::Person(None)), Actor::Anonymous);
+        }
+        // the operator key's session does not outlive the key
+        let op = first.sign_in(&keys[0].1).unwrap();
+        let _ = op;
+        let third = fresh_show_with(&roster, None);
+        std::fs::write(&path, json!({"sessions": [{"id": "x", "expires": now_ms() + 100000, "kind": "operator"}]}).to_string()).unwrap();
+        assert_eq!(third.use_sessions_file(&path).unwrap(), 0, "no operator key now: that session goes");
+        // a file that is not a sessions file is a startup error, not silently ignored
+        std::fs::write(&path, "not json").unwrap();
+        assert!(fresh_show_with(&roster, None).use_sessions_file(&path).is_err());
+        let _ = std::fs::remove_file(&path);
     }
 }

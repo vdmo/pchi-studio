@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { feedToken, signedInSession } from './liveFeed'
 import { clearSaid, peekSaid } from './said'
+import RunReplay from './RunReplay'
 
 const KEY = 'pchi.editkey'
 /** The operator key lives in this tab's session only: closing the tab forgets it. */
@@ -71,6 +72,7 @@ export default function RuntimeTools({ getFile, locked = false, undoDepth = 0 }:
   const [sendSaid, setSendSaid] = useState('') // what you asked for, kept with the change in the record
   const [report, setReport] = useState<Record<string, any> | { error: string } | null>(null)
   const [keyText, setKeyText] = useState('')
+  const [replayOpen, setReplayOpen] = useState(false)
   const [doors, setDoors] = useState<{ summary?: { go: boolean; fail: number; warn: number; ok: number }; checks?: DoorCheck[]; error?: string; busy?: boolean } | null>(null)
   type Rehearsal = { run: { length_ms: number; inputs: number; edited_live: number }; recorded_path: string[]; rehearsed_path: string[]; summary: { different: boolean; verdict: string; lines: string[] } }
   const [rehearse, setRehearse] = useState<{ r?: Rehearsal; error?: string; busy?: boolean } | null>(null)
@@ -147,7 +149,14 @@ export default function RuntimeTools({ getFile, locked = false, undoDepth = 0 }:
         <button onClick={openDoors} title="Check the whole show against the rig and each tool before the doors open">Doors check</button>
         <button onClick={openRehearse} title="Play this edited show against what already happened in the run, without sending anything">Rehearse</button>
         <button onClick={openReport} title="How the run went: cue timing, failed sends, edits made mid-show">Run report</button>
+        <button onClick={() => setReplayOpen(true)} title="Go back through the run: drag through it, or open a recording saved earlier">Replay a run</button>
       </div>
+
+      {replayOpen && (
+        <Dialog title="Replay a run" onClose={() => setReplayOpen(false)}>
+          <RunReplay />
+        </Dialog>
+      )}
 
       {send && (
         <Dialog title={send.mode === 'send' ? 'Send show to the running runtime' : 'Undo the last send'} onClose={() => setSend(null)}>

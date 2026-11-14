@@ -3,10 +3,10 @@
 //! laneDevice); the tests below pin the two to the same table.
 
 use pchi_showchart::Showchart;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Device {
     pub id: String,
     pub label: String,

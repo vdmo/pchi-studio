@@ -584,3 +584,42 @@ button.go:disabled { background: #1b1d25; color: #7a7f92; border-color: #2f323e;
 .poll > span { flex: 1; }
 .poll-open { display: flex; gap: 6px; margin-top: 6px; }
 .poll-open input:last-of-type { flex: 1; }
+
+/* ---- replaying a run ---- */
+.rp { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.rp .file-btn { display: inline-flex; align-items: center; padding: 4px 10px; border: 1px solid #343a48; border-radius: 6px; cursor: pointer; font-size: 13px; background: #1c1f28; }
+.rp .file-btn:hover { background: #232734; }
+.rp-line { margin: 0; }
+.rp-track { position: relative; height: 44px; background: #14161d; border: 1px solid #2a2e3a; border-radius: 6px; cursor: pointer; overflow: hidden; user-select: none; }
+.rp-track:focus-visible { outline: 2px solid #fbbf24; outline-offset: 2px; }
+.rp-scene { position: absolute; top: 0; bottom: 0; opacity: .82; overflow: hidden; border-right: 1px solid #0f1117; }
+.rp-scene span { position: absolute; left: 6px; top: 4px; font: 600 11px system-ui, sans-serif; color: #0b0d12; white-space: nowrap; }
+.rp-mark { position: absolute; bottom: 3px; width: 3px; height: 12px; margin-left: -1px; border-radius: 2px; background: #0b0d12; pointer-events: auto; }
+.rp-mark.edit { background: #fde68a; }
+.rp-mark.decision { background: #ffffff; }
+.rp-mark.delivery.bad, .rp-mark.held { background: #ef4444; height: 18px; }
+.rp-mark.resume, .rp-mark.fenced { background: #f97316; height: 22px; }
+.rp-head { position: absolute; top: 0; bottom: 0; width: 2px; background: #fbbf24; box-shadow: 0 0 8px rgba(251,191,36,.6); pointer-events: none; }
+.rp-ctl { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.rp-clock { font: 13px ui-monospace, monospace; color: #fbbf24; }
+.rp-now { display: flex; gap: 18px; flex-wrap: wrap; align-items: flex-start; padding: 8px 10px; background: #171921; border: 1px solid #262a33; border-radius: 6px; }
+.rp-now > div { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.rp-scene-name { font-size: 20px; }
+.rp-ctx { flex-direction: row !important; flex-wrap: wrap; align-items: center; gap: 6px !important; }
+.rp-ctx .chip { padding: 1px 8px; background: #20232c; border-radius: 10px; font: 12px ui-monospace, monospace; }
+.rp-log { list-style: none; margin: 0; padding: 0; max-height: 220px; overflow-y: auto; font: 12.5px ui-monospace, monospace; border: 1px solid #262a33; border-radius: 6px; }
+.rp-log li { padding: 3px 8px; border-bottom: 1px solid #1d2028; }
+.rp-log li time { color: #8b93a7; margin-right: 6px; }
+.rp-log li .kind { display: inline-block; min-width: 62px; color: #8b93a7; text-transform: uppercase; font-size: 10.5px; letter-spacing: .04em; }
+.rp-log li.scene { color: #bae6fd; }
+.rp-log li.edit { color: #fde68a; }
+.rp-log li.decision { color: #e2e8f0; }
+.rp-log li.bad, .rp-log li.held, .rp-log li.fenced, .rp-log li.resume { color: #fca5a5; }
+.rp-next { margin: 0; }
+
+/* ---- which runtime this is ---- */
+.role-banner { margin: 0 0 10px; padding: 8px 10px; border-radius: 6px; font-size: 13px; line-height: 1.4; border: 1px solid #343a48; background: #1c1f28; }
+.role-banner.standby { border-color: #38bdf8; background: #0c2230; }
+.role-banner.standby.bad { border-color: #ef4444; background: #2a1215; }
+.role-banner.fenced { border-color: #ef4444; background: #3a1417; color: #fecaca; }
+.role-banner.took { border-color: #fbbf24; background: #2a2210; }

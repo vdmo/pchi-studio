@@ -366,6 +366,11 @@ impl Roster {
         Ok(Some(Self::actor_of(m)))
     }
 
+    /// Whether this person is still on the roster with this role and a key that has not expired (a restored session must pass this).
+    pub fn still_valid(&self, name: &str, role: &str, now_ms: i64) -> bool {
+        self.members.iter().any(|m| m.name == name && m.role == role && !m.expires_ms.is_some_and(|e| now_ms > e))
+    }
+
     /// How many people's keys are written in the roster file in clear.
     pub fn plaintext_count(&self) -> usize {
         self.members.iter().filter(|m| matches!(m.cred, Cred::Plain(_))).count()

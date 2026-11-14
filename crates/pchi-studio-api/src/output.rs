@@ -30,7 +30,7 @@ const SEND_TIMEOUT: Duration = Duration::from_millis(1500);
 
 pub struct Output {
     devices: Vec<Device>,
-    send: bool,
+    send: std::sync::atomic::AtomicBool,
     /// Laser devices the operator has armed. A laser gets nothing from the show until it is armed,
     /// and every runtime start begins disarmed.
     armed: Mutex<BTreeSet<String>>,
@@ -57,7 +57,7 @@ pub enum Plan {
 
 impl Output {
     pub fn new(devices: Vec<Device>, send: bool) -> Self {
-        Self { devices, send, armed: Mutex::new(BTreeSet::new()), links: Arc::new(Links::default()), probe_every: Duration::from_secs(5), link_timeout: Duration::from_secs(15), dmx: Arc::new(crate::dmx::Dmx::default()), obs: Arc::new(crate::obs::Obs::default()) }
+        Self { devices, send: std::sync::atomic::AtomicBool::new(send), armed: Mutex::new(BTreeSet::new()), links: Arc::new(Links::default()), probe_every: Duration::from_secs(5), link_timeout: Duration::from_secs(15), dmx: Arc::new(crate::dmx::Dmx::default()), obs: Arc::new(crate::obs::Obs::default()) }
     }
 
     /// Change how often devices are probed and when silence counts as lost (the defaults are 5 s and 15 s).
@@ -80,7 +80,7 @@ impl Output {
     /// "heard" (a tool we only listen to has sent something), "silent" (expected to talk, has not yet)
     /// or "none" (this tool gives no feedback). Absent when the runtime is not sending.
     pub fn link_state(&self, dev: &Device) -> Option<Value> {
-        if !self.send {
+        if !self.sending() {
             return None;
         }
         if dev.kind == "obs" {
@@ -105,7 +105,7 @@ impl Output {
     /// The same output with a new device list (after a live edit), keeping the armed state of lasers that are still there.
     pub fn with_devices(&self, devices: Vec<Device>) -> Self {
         let keep: BTreeSet<String> = self.armed.lock().unwrap().iter().filter(|id| devices.iter().any(|d| &d.id == *id && d.dept == "laser")).cloned().collect();
-        Self { devices, send: self.send, armed: Mutex::new(keep), links: Arc::clone(&self.links), probe_every: self.probe_every, link_timeout: self.link_timeout, dmx: Arc::clone(&self.dmx), obs: Arc::clone(&self.obs) }
+        Self { devices, send: std::sync::atomic::AtomicBool::new(self.sending()), armed: Mutex::new(keep), links: Arc::clone(&self.links), probe_every: self.probe_every, link_timeout: self.link_timeout, dmx: Arc::clone(&self.dmx), obs: Arc::clone(&self.obs) }
     }
 
     pub fn is_armed(&self, id: &str) -> bool {
@@ -131,7 +131,19 @@ impl Output {
         &self.devices
     }
     pub fn sending(&self) -> bool {
-        self.send
+        self.send.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Go quiet: no more real sending, and the lighting universes this runtime was streaming stop (a runtime that has been
+    /// taken over must not keep talking to the same lights as the one that took over).
+    pub async fn silence(&self) {
+        self.set_sending(false);
+        self.dmx.stop_all().await;
+    }
+
+    /// Switch real sending on or off: a standby stays silent until it takes over, and a runtime that has been taken over goes silent.
+    pub fn set_sending(&self, on: bool) {
+        self.send.store(on, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Decide where an action goes. `dept` and `device` come from its lane (enter and exit actions have none).

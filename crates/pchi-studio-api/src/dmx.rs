@@ -412,6 +412,11 @@ impl Dmx {
         Ok(Node { state, notify, key, task })
     }
 
+    /// Stop sending every universe (a runtime that has been taken over must not keep talking to the lights).
+    pub async fn stop_all(&self) {
+        self.nodes.lock().await.clear();
+    }
+
     /// The levels a device is sending right now (for tests and the Doors check).
     pub async fn levels(&self, id: &str) -> Option<[u8; CHANNELS]> {
         let n = self.nodes.lock().await.get(id).cloned()?;

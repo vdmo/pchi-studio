@@ -63,7 +63,7 @@ impl Client {
     }
 }
 
-fn dechunk(s: &str) -> String {
+pub(crate) fn dechunk(s: &str) -> String {
     let mut out = String::new();
     let mut rest = s;
     while let Some((len, tail)) = rest.split_once("\r\n") {

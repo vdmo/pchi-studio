@@ -74,6 +74,34 @@ impl EventStore {
         Ok(out)
     }
 
+    /// Records after `id` (exclusive), oldest first, at most `limit`: how a standby follows a log.
+    pub fn after(&self, id: i64, limit: usize) -> Result<Vec<EventRecord>> {
+        let mut q = self.conn.prepare("SELECT id, timestamp, source, target, event_type, payload FROM events WHERE id > ?1 ORDER BY id LIMIT ?2")?;
+        let rows = q.query_map(params![id, limit as i64], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, Option<String>>(3)?, r.get::<_, String>(4)?, r.get::<_, String>(5)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, timestamp, source, target, event_type, payload) = row?;
+            out.push(EventRecord { id, timestamp, source, target, event_type, payload: serde_json::from_str(&payload)? });
+        }
+        Ok(out)
+    }
+
+    /// The timestamp of record `id`, if there is one (a standby checks it still follows the same log).
+    pub fn timestamp_of(&self, id: i64) -> Result<Option<i64>> {
+        match self.conn.query_row("SELECT timestamp FROM events WHERE id = ?1", params![id], |r| r.get(0)) {
+            Ok(t) => Ok(Some(t)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// The id of the newest record, or 0 for an empty log.
+    pub fn last_id(&self) -> Result<i64> {
+        Ok(self.conn.query_row("SELECT COALESCE(MAX(id), 0) FROM events", [], |r| r.get(0))?)
+    }
+
     pub fn count(&self) -> Result<i64> {
         Ok(self.conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))?)
     }

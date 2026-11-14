@@ -11,11 +11,11 @@ use pchi_studio_api::{output::Output, rig, router_with_token, Show};
 ///
 /// Give it a Studio .pchi file and it also knows the rig: each cue is routed to
 /// the device that handles it. Nothing is actually sent unless you add --send.
-#[derive(Parser)]
+#[derive(Parser, Clone)]
 #[command(version, about)]
 struct Cli {
     /// Show file: a Studio .pchi file (showchart + rig) or a bare showchart (.pchi.json).
-    #[arg(required_unless_present_any = ["midi_ports", "audio_devices", "new_roster_entry"])]
+    #[arg(required_unless_present_any = ["midi_ports", "audio_devices", "new_roster_entry", "replay", "export_run"])]
     file: Option<String>,
     /// Record to this SQLite file (default: in memory, lost on exit).
     #[arg(long)]
@@ -58,6 +58,12 @@ struct Cli {
     /// How long a signed-in session lasts, in hours (1 to 168). Default 8.
     #[arg(long, default_value_t = 8)]
     session_hours: u64,
+    /// Keep signed-in sessions in this file so a restart does not sign everyone out. Only a hash of each session token is written (reading the file lets nobody in); it is owner-only on Linux and macOS. A session is dropped if it has expired or its person has left the roster or changed role. See docs/tls.md.
+    #[arg(long, value_name = "FILE", env = "PCHI_SESSIONS")]
+    sessions: Option<String>,
+    /// Say that HTTPS is provided in front of this runtime (a reverse proxy such as Caddy or nginx), so the warning about keys crossing the network in clear is not printed. It changes nothing else. See docs/tls.md.
+    #[arg(long)]
+    behind_tls: bool,
     /// Make a roster entry for NAME:ROLE with a fresh random key, print the key once (give it to the person) and the entry (paste it into the roster file: it holds only a salted hash), and exit. Roles: operator, editor, lso, guest, agent, button.
     #[arg(long, value_name = "NAME:ROLE")]
     new_roster_entry: Option<String>,
@@ -65,11 +71,38 @@ struct Cli {
     #[arg(long, env = "PCHI_GOVERNANCE")]
     governance: Option<String>,
     /// Don't run: play this edited show file against the run recorded in --db and print what would differ (path, cues that would be cut off, timing). Needs no gear.
-    #[arg(long, value_name = "FILE", requires = "db")]
+    #[arg(long, value_name = "FILE")]
     rehearse: Option<String>,
+    /// Write the latest run in --db as a recording file (a single JSON file you can keep, send, replay and open in Studio) and exit. See docs/replay.md.
+    #[arg(long, value_name = "FILE")]
+    export_run: Option<String>,
+    /// Don't run: print a recording file as a timeline (what happened, when, who decided what) and check that it replays exactly. Needs no show file.
+    #[arg(long, value_name = "FILE")]
+    replay: Option<String>,
+    /// For --rehearse: play against this recording file instead of a --db log.
+    #[arg(long, value_name = "FILE")]
+    recording: Option<String>,
     /// Really send cues to the rig's devices (UDP/OSC to each device's host and port). Without it, deliveries are only reported as "dry-run".
     #[arg(long)]
     send: bool,
+    /// The secret a standby proves itself with. On the primary: lets a standby read the log and tell this runtime it has taken over (it then stops). On a standby: the same value. Must differ from every other token and key. See docs/failover.md.
+    #[arg(long, env = "PCHI_FAILOVER_KEY")]
+    failover_key: Option<String>,
+    /// Run as the STANDBY of the runtime at HOST:PORT: copy its log, send nothing, and take over if it goes quiet. Give it the same show file, its own --db and --governance, and --failover-key.
+    #[arg(long, value_name = "HOST:PORT", requires = "failover_key")]
+    standby_of: Option<String>,
+    /// Standby only: take over by itself when the primary is silent (auto, the default), or only when a person posts to /takeover (manual).
+    #[arg(long, default_value = "auto")]
+    takeover: String,
+    /// Standby only: seconds of silence from the primary before an auto takeover (2 to 600). Default 6.
+    #[arg(long, default_value_t = 6)]
+    takeover_after: u64,
+    /// Standby only: the name the primary's record shows for it. Default "standby".
+    #[arg(long)]
+    standby_name: Option<String>,
+    /// Standby only: the primary's --token, if different from this runtime's own.
+    #[arg(long, env = "PCHI_PRIMARY_TOKEN")]
+    primary_token: Option<String>,
 }
 
 #[tokio::main]
@@ -112,6 +145,31 @@ async fn main() -> anyhow::Result<()> {
             println!("fixture: {l}");
         }
     }
+    if let Some(path) = &cli.export_run {
+        let db = cli.db.as_deref().ok_or_else(|| anyhow::anyhow!("--export-run needs --db: the log to take the run from"))?;
+        let store = EventStore::open(db).with_context(|| format!("opening {db}"))?;
+        let rec = pchi_studio_api::recording::export(&store.all()?).map_err(anyhow::Error::msg)?;
+        std::fs::write(path, serde_json::to_string_pretty(&rec)?).with_context(|| format!("writing {path}"))?;
+        println!("wrote {path}: {} records of {}", rec["records"].as_array().map_or(0, |r| r.len()), rec["show"]);
+        return Ok(());
+    }
+    if let Some(path) = &cli.replay {
+        let records = pchi_studio_api::recording::parse(&std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?).map_err(anyhow::Error::msg)?;
+        let v = pchi_studio_api::recording::view(&records).map_err(anyhow::Error::msg)?;
+        println!("{}: {}", v["show"].as_str().unwrap_or("show"), v["summary"]["line"].as_str().unwrap_or(""));
+        println!("{}", pchi_studio_api::recording::verify(&records).map_err(anyhow::Error::msg)?["verdict"].as_str().unwrap_or(""));
+        println!("path: {}", v["summary"]["path"].as_array().into_iter().flatten().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(" → "));
+        let who: Vec<&str> = v["summary"]["who"].as_array().into_iter().flatten().filter_map(|x| x.as_str()).collect();
+        if !who.is_empty() {
+            println!("who decided things: {}", who.join(", "));
+        }
+        println!();
+        for f in v["frames"].as_array().into_iter().flatten() {
+            let t = f["t"].as_i64().unwrap_or(0) as f64 / 1000.0;
+            println!("{:>4}:{:04.1}  {:<9} {}", (t / 60.0) as i64, t % 60.0, f["kind"].as_str().unwrap_or(""), f["text"].as_str().unwrap_or(""));
+        }
+        return Ok(());
+    }
     let file = cli.file.clone().ok_or_else(|| anyhow::anyhow!("give a show file"))?;
     let (chart, devices) = rig::load(&std::fs::read_to_string(&file).with_context(|| format!("reading {file}"))?)
         .map_err(anyhow::Error::msg)
@@ -123,7 +181,11 @@ async fn main() -> anyhow::Result<()> {
     if let Some(cand) = &cli.rehearse {
         let (cchart, cdev) = rig::load(&std::fs::read_to_string(cand).with_context(|| format!("reading {cand}"))?).map_err(anyhow::Error::msg).with_context(|| format!("parsing {cand}"))?;
         let dev = cdev.or(devices).unwrap_or_default();
-        let records = store.all()?;
+        let records = match &cli.recording {
+            Some(p) => pchi_studio_api::recording::parse(&std::fs::read_to_string(p).with_context(|| format!("reading {p}"))?).map_err(anyhow::Error::msg)?,
+            None if cli.db.is_some() => store.all()?,
+            None => anyhow::bail!("--rehearse needs the run to play against: --db (a log) or --recording (a recording file)"),
+        };
         let until = records.last().map_or(0, |r| r.timestamp);
         let r = pchi_studio_api::rehearse::run(&records, &cchart, &dev, until).map_err(anyhow::Error::msg)?;
         println!("{}", r["summary"]["verdict"].as_str().unwrap_or(""));
@@ -137,6 +199,14 @@ async fn main() -> anyhow::Result<()> {
     let routed = devices.as_ref().map(|d| d.len());
     if cli.send && routed.is_none() {
         eprintln!("warning: --send has no effect: {} has no rig (open it in Studio, add devices and Save as .pchi)", file);
+    }
+    if let Some(key) = cli.failover_key.as_deref().filter(|k| !k.is_empty()) {
+        if cli.token.as_deref() == Some(key) || cli.edit_key.as_deref() == Some(key) || cli.audience_token.as_deref() == Some(key) {
+            anyhow::bail!("--failover-key must differ from --token, --edit-key and --audience-token: it lets a standby read the whole log and stop this runtime");
+        }
+    }
+    if let Some(primary) = cli.standby_of.clone() {
+        return run_standby(cli, primary, devices, store).await;
     }
     let output = devices.map(|d| Output::new(d, cli.send));
     let show = if cli.resume {
@@ -153,6 +223,39 @@ async fn main() -> anyhow::Result<()> {
     } else {
         Show::start_with(chart, store, output).map_err(anyhow::Error::msg)?
     };
+    configure(&show, &cli, if cli.resume { "resumed the run recorded in the database" } else { "started the show" })?;
+    if show.failover_enabled() {
+        println!("failover: a standby with the failover key may follow this runtime (GET /replicate) and tell it, if it takes over, to stop (POST /fence)");
+    }
+    start_inputs(&show, &cli).await?;
+    let listener = tokio::net::TcpListener::bind(&cli.bind).await.with_context(|| format!("binding {}", cli.bind))?;
+    println!("pchi-studio-api: {} on http://{} (ws://{}/ws), recording to {}",
+        show.snapshot()["chart"]["id"], cli.bind, cli.bind, cli.db.as_deref().unwrap_or("memory"));
+    if cli.edit_key.as_deref().is_some_and(|k| !k.is_empty()) {
+        println!("edits: locked, sending a show, undo and test-fire need the operator key");
+    }
+    match routed {
+        Some(n) if cli.send => println!("output: LIVE, sending cues to {n} rig device(s)"),
+        Some(n) => println!("output: dry-run, {n} rig device(s) known; add --send to really send cues"),
+        None => println!("output: none (no rig in the file)"),
+    }
+    open_network_warning(&cli);
+    axum::serve(listener, router_with_token(show, cli.token)).await?;
+    Ok(())
+}
+
+fn open_network_warning(cli: &Cli) {
+    let local = ["127.0.0.1", "localhost", "[::1]"].iter().any(|p| cli.bind.starts_with(p));
+    if !local && !cli.behind_tls && (cli.roster.is_some() || cli.edit_key.as_deref().is_some_and(|k| !k.is_empty())) {
+        eprintln!("warning: listening on {} over plain HTTP: keys, session tokens and the feed token cross the network in clear text. Put HTTPS in front of it (docs/tls.md) or add --behind-tls if that is already done.", cli.bind);
+    }
+    if cli.token.is_none() && !cli.bind.starts_with("127.0.0.1") && !cli.bind.starts_with("localhost") && !cli.bind.starts_with("[::1]") {
+        eprintln!("warning: listening on {} with no --token: anyone on the network can send inputs to the show", cli.bind);
+    }
+}
+
+/// Everything a show needs besides the show itself: who may edit, the roster, the audience token, signed receipts.
+fn configure(show: &std::sync::Arc<Show>, cli: &Cli, how: &str) -> anyhow::Result<()> {
     show.set_edit_key(cli.edit_key.clone());
     show.set_session_hours(cli.session_hours);
     if let Some(t) = cli.audience_token.as_deref().filter(|t| !t.is_empty()) {
@@ -176,6 +279,10 @@ async fn main() -> anyhow::Result<()> {
         }
         show.set_roster(roster);
     }
+    if let Some(path) = &cli.sessions {
+        let n = show.use_sessions_file(path).map_err(anyhow::Error::msg)?;
+        println!("sessions: kept in {path}{}", if n > 0 { format!(", {n} still signed in") } else { String::new() });
+    }
     if let Some(dir) = &cli.governance {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {dir}"))?;
         let (key, log) = (cli.governance_key.clone().unwrap_or_else(|| format!("{dir}/governance_key.hex")), format!("{dir}/governance_log.jsonl"));
@@ -196,41 +303,65 @@ async fn main() -> anyhow::Result<()> {
         }
         println!("governance: signed receipts in {dir} (verifying key {}; keep a copy somewhere the runtime's machine cannot change)", log.verifying_key_hex());
         show.set_governance(log);
-        let how = if cli.resume { "resumed the run recorded in the database" } else { "started the show" };
         show.receipt("show.start", "ALLOW", &pchi_studio_api::governance::Actor::Person(None), &format!("runtime {how}{}", if cli.send { " with sending ON" } else { " (dry-run)" }));
     }
-    if let Some(path) = &cli.inputs {
-        let file = pchi_studio_api::inputs::parse_file(&std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?).map_err(anyhow::Error::msg).with_context(|| format!("inputs {path}"))?;
-        for spec in file.ltc {
-            let input = pchi_studio_api::ltc::start(&show, spec).map_err(anyhow::Error::msg)?;
-            println!("input: {} reading LTC ({})", input.spec.name, pchi_studio_api::inputs::InputInfo::json(&*input)["listen"].as_str().unwrap_or(""));
-        }
-        for spec in file.midi {
-            let n = spec.bindings.len();
-            let input = pchi_studio_api::midi::start(&show, spec).map_err(anyhow::Error::msg)?;
-            println!("input: {} on MIDI port {} ({n} binding(s))", input.spec.name, pchi_studio_api::inputs::InputInfo::json(&*input)["listen"].as_str().unwrap_or(""));
-        }
-        for spec in file.inputs {
-            let n = spec.bindings.len();
-            let from = if spec.allow.is_empty() { "this machine only".to_string() } else { format!("from {}", spec.allow.join(", ")) };
-            let input = pchi_studio_api::inputs::start(&show, spec).await.map_err(anyhow::Error::msg)?;
-            println!("input: {} listening on {} ({n} binding(s), {from})", input.spec.name, input.bound.lock().unwrap().map(|a| a.to_string()).unwrap_or_default());
-        }
+    show.set_failover_key(cli.failover_key.clone());
+    Ok(())
+}
+
+/// Open the inputs (LTC, MIDI, OSC buttons) the inputs file lists.
+async fn start_inputs(show: &std::sync::Arc<Show>, cli: &Cli) -> anyhow::Result<()> {
+    let Some(path) = &cli.inputs else { return Ok(()) };
+    let file = pchi_studio_api::inputs::parse_file(&std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?).map_err(anyhow::Error::msg).with_context(|| format!("inputs {path}"))?;
+    for spec in file.ltc {
+        let input = pchi_studio_api::ltc::start(show, spec).map_err(anyhow::Error::msg)?;
+        println!("input: {} reading LTC ({})", input.spec.name, pchi_studio_api::inputs::InputInfo::json(&*input)["listen"].as_str().unwrap_or(""));
     }
+    for spec in file.midi {
+        let n = spec.bindings.len();
+        let input = pchi_studio_api::midi::start(show, spec).map_err(anyhow::Error::msg)?;
+        println!("input: {} on MIDI port {} ({n} binding(s))", input.spec.name, pchi_studio_api::inputs::InputInfo::json(&*input)["listen"].as_str().unwrap_or(""));
+    }
+    for spec in file.inputs {
+        let n = spec.bindings.len();
+        let from = if spec.allow.is_empty() { "this machine only".to_string() } else { format!("from {}", spec.allow.join(", ")) };
+        let input = pchi_studio_api::inputs::start(show, spec).await.map_err(anyhow::Error::msg)?;
+        println!("input: {} listening on {} ({n} binding(s), {from})", input.spec.name, input.bound.lock().unwrap().map(|a| a.to_string()).unwrap_or_default());
+    }
+    Ok(())
+}
+
+/// Wait as a standby: copy the primary's log, answer "standby", and take over if it goes quiet.
+async fn run_standby(cli: Cli, primary: String, devices: Option<Vec<rig::Device>>, store: EventStore) -> anyhow::Result<()> {
+    use pchi_studio_api::failover::{activation, standby_router, Config, Standby};
+    let key = cli.failover_key.clone().filter(|k| !k.is_empty()).ok_or_else(|| anyhow::anyhow!("a standby needs --failover-key (the same as the primary's): it is how the primary knows to let it read the log"))?;
+    if cli.resume {
+        anyhow::bail!("--resume and --standby-of do not go together: a standby builds the run from the primary's log by itself");
+    }
+    let mut cfg = Config::new(&primary, cli.standby_name.as_deref().unwrap_or("standby"), &key);
+    cfg.token = cli.primary_token.clone().or_else(|| cli.token.clone());
+    cfg.auto = match cli.takeover.as_str() {
+        "auto" => true,
+        "manual" => false,
+        other => anyhow::bail!("--takeover is auto or manual, not '{other}'"),
+    };
+    cfg.takeover_after = std::time::Duration::from_secs(cli.takeover_after.clamp(2, 600));
+    cfg.db = cli.db.clone();
+    let c2 = cli.clone();
+    let configure_fn: Box<dyn Fn(&std::sync::Arc<Show>) -> Result<(), String> + Send + Sync> = Box::new(move |show| configure(show, &c2, "took over as the standby").map_err(|e| format!("{e:#}")));
+    let activate = activation(devices.clone(), cli.send, cli.token.clone(), configure_fn);
+    let sb = Standby::new(cfg, store, activate);
+    let c3 = cli.clone();
+    sb.on_active(Box::new(move |show| {
+        let (c, show) = (c3.clone(), show.clone());
+        Box::pin(async move { start_inputs(&show, &c).await.map_err(|e| format!("{e:#}")) })
+    }));
     let listener = tokio::net::TcpListener::bind(&cli.bind).await.with_context(|| format!("binding {}", cli.bind))?;
-    println!("pchi-studio-api: {} on http://{} (ws://{}/ws), recording to {}",
-        show.snapshot()["chart"]["id"], cli.bind, cli.bind, cli.db.as_deref().unwrap_or("memory"));
-    if cli.edit_key.as_deref().is_some_and(|k| !k.is_empty()) {
-        println!("edits: locked, sending a show, undo and test-fire need the operator key");
-    }
-    match routed {
-        Some(n) if cli.send => println!("output: LIVE, sending cues to {n} rig device(s)"),
-        Some(n) => println!("output: dry-run, {n} rig device(s) known; add --send to really send cues"),
-        None => println!("output: none (no rig in the file)"),
-    }
-    if cli.token.is_none() && !cli.bind.starts_with("127.0.0.1") && !cli.bind.starts_with("localhost") && !cli.bind.starts_with("[::1]") {
-        eprintln!("warning: listening on {} with no --token: anyone on the network can send inputs to the show", cli.bind);
-    }
-    axum::serve(listener, router_with_token(show, cli.token)).await?;
+    let when = if cli.takeover == "auto" { format!("taking over after {} s of silence", cli.takeover_after.clamp(2, 600)) } else { "taking over only on POST /takeover".into() };
+    println!("standby: following {primary}, {when}; answering on http://{} (GET /role says how it is doing)", cli.bind);
+    println!("standby: sends nothing and opens no inputs until it takes over; then its rig is {}", if cli.send { "LIVE" } else { "dry-run" });
+    open_network_warning(&cli);
+    tokio::spawn(sb.clone().follow());
+    axum::serve(listener, standby_router(sb)).await?;
     Ok(())
 }
