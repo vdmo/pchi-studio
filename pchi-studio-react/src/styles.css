@@ -555,3 +555,10 @@ button.go:disabled { background: #1b1d25; color: #7a7f92; border-color: #2f323e;
 .try-cue .trow2 { display: flex; gap: 6px; }
 .try-cue .trow2 input { flex: 1; min-width: 0; }
 .try-out { font: 12px ui-monospace, monospace; overflow-wrap: anywhere; }
+
+/* an agent's proposed edit, waiting for a person */
+.proposals { border: 1px solid var(--accent, #7aa2ff); border-radius: 8px; padding: 10px 12px; margin: 10px 0; }
+.proposals h4 { margin: 0 0 6px; }
+.proposal ul { margin: 4px 0 8px; padding-left: 18px; }
+.proposal-actions { display: flex; gap: 8px; }
+.gov-badge { font-size: 12px; margin: 6px 0 0; }

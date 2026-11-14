@@ -1083,6 +1083,7 @@ dependencies = [
  "futures-util",
  "pchi-eventstore",
  "pchi-showchart",
+ "primeswarm-pchi",
  "rosc",
  "serde",
  "serde_json",

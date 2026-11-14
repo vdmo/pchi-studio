@@ -42,6 +42,7 @@ use axum::{
     Json, Router,
 };
 pub mod diff;
+pub mod governance;
 pub mod links;
 pub mod output;
 pub mod preflight;
@@ -49,6 +50,7 @@ pub mod profiles;
 pub mod rig;
 
 use futures_util::{SinkExt, StreamExt};
+use governance::{Actor, Proposal};
 use output::{Output, Plan};
 use pchi_eventstore::{recorder, EventStore};
 use pchi_showchart::{timer_event, Action, ScheduledCue, ShowEngine, Showchart};
@@ -90,6 +92,8 @@ pub struct Show {
     watching: std::sync::atomic::AtomicBool,
     /// Set when this run was resumed from the log after a restart (shown to clients in the hello).
     resumed: Mutex<Option<Value>>,
+    /// Who may do what, agent proposals, and the signed receipts (see the `governance` module).
+    gov: governance::Gov,
 }
 
 /// How long a department page may stay silent before it counts as not linked (mirrors the Studio).
@@ -126,6 +130,7 @@ impl Show {
             history: Mutex::new(Vec::new()),
             watching: std::sync::atomic::AtomicBool::new(false),
             resumed: Mutex::new(None),
+            gov: Default::default(),
         })
     }
 
@@ -282,6 +287,8 @@ impl Show {
             "edit_locked": self.edit_key.lock().unwrap().is_some(),
             "resumed": self.resumed.lock().unwrap().clone(),
             "undo_depth": self.history.lock().unwrap().len(),
+            "governed": self.gov.log.get().is_some(),
+            "proposals": self.gov.pending_json(),
             // elapsed, not a timestamp: the client counts from its own clock
             "elapsed_ms": (now_ms() - g.entered_at).max(0),
         })
@@ -549,6 +556,7 @@ impl Show {
         self.watch_links();
         let hello = self.snapshot();
         self.publish(json!({"type": "show", "ts": now_ms(), "definition": hello["definition"], "devices": hello["devices"], "output": hello["output"], "undo_depth": hello["undo_depth"], "diff": d}));
+        self.supersede();
         self.arm_from(generation, elapsed);
         Ok(json!({"applied": true, "diff": d, "undo_depth": self.history.lock().unwrap().len()}))
     }
@@ -683,6 +691,143 @@ impl Show {
         }
         self.report(m.clone());
         Ok(m)
+    }
+
+    pub fn current_state(&self) -> String {
+        self.inner.lock().unwrap().engine.current_state.clone()
+    }
+
+    /// Turn on signed receipts: every decision from now on is written to `log`.
+    pub fn set_governance(&self, log: primeswarm_pchi::GovernanceLog) {
+        let _ = self.gov.log.set(log);
+    }
+
+    /// Hash of the show as it is now (scene, definition, which lasers are armed): what a receipt is decided against.
+    fn state_hash(&self) -> String {
+        let out = self.output.lock().unwrap().clone();
+        let armed: Vec<String> = out.map(|o| o.lasers().into_iter().filter(|d| o.is_armed(&d.id)).map(|d| d.id).collect()).unwrap_or_default();
+        let g = self.inner.lock().unwrap();
+        primeswarm_pchi::governance::hash_state(&json!({"scene": g.engine.current_state, "show": primeswarm_pchi::governance::hash_state(&json!(g.engine.chart)), "armed": armed}))
+    }
+
+    /// Hash of the show and its rig, to tell whether a proposal still applies to what is running.
+    fn base_hash(&self) -> String {
+        let dev: Vec<rig::Device> = self.output.lock().unwrap().as_ref().map(|o| o.devices().to_vec()).unwrap_or_default();
+        let g = self.inner.lock().unwrap();
+        primeswarm_pchi::governance::hash_state(&json!({"show": g.engine.chart, "rig": dev}))
+    }
+
+    /// Write one decision to the signed log: `gate` is ALLOW, DENY or ESCALATE (waiting on a person).
+    /// Returns the receipt id, or None when receipts are not turned on. Never call with the inner lock held.
+    pub fn receipt(&self, rule: &str, gate: &str, actor: &Actor, text: &str) -> Option<String> {
+        let log = self.gov.log.get()?;
+        Some(log.record(rule, gate, &format!("{}: {}", actor.name(), text), &self.state_hash()).receipt_id)
+    }
+
+    /// The receipts so far, in the format `scripts/verify_governance_chain.py` checks offline.
+    pub fn governance_export(&self) -> Value {
+        match self.gov.log.get() {
+            Some(l) => l.export(),
+            None => json!({"receipts": [], "count": 0, "verifying_key": null, "note": "receipts are off: start the runtime with --governance <folder>"}),
+        }
+    }
+
+    pub fn proposals(&self) -> Value {
+        self.gov.all_json()
+    }
+
+    /// An agent's edit: checked like any send, but only stored. A person approves or rejects it.
+    pub fn propose(self: &Arc<Self>, actor: &Actor, chart: Showchart, devices: Option<Vec<rig::Device>>) -> Result<Value, (u16, Value)> {
+        let preview = self.replace(chart.clone(), devices.clone(), false)?;
+        let strings = |k: &str| preview["diff"][k].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect::<Vec<_>>()).unwrap_or_default();
+        let (changes, notes) = (strings("changes"), strings("notes"));
+        if changes.is_empty() {
+            return Err((409, json!({"error": "nothing to propose: that is the show already running"})));
+        }
+        let base = self.base_hash();
+        let ts = now_ms();
+        let (id, view) = {
+            let mut ps = self.gov.proposals.lock().unwrap();
+            let id = ps.iter().map(|p| p.id).max().unwrap_or(0) + 1;
+            let receipt = self.receipt("show.propose", "ESCALATE", actor, &format!("proposed edit #{id} ({} change(s)); waiting for a person", changes.len()));
+            ps.push(Proposal { id, actor: actor.name(), ts, status: "pending".into(), changes, notes, receipt, base, chart, devices });
+            while ps.len() > governance::MAX_PROPOSALS {
+                match ps.iter().position(|p| p.status != "pending") {
+                    Some(i) => {
+                        ps.remove(i);
+                    }
+                    None => break,
+                }
+            }
+            (id, ps.iter().find(|p| p.id == id).map(Proposal::json).unwrap_or(Value::Null))
+        };
+        self.publish(json!({"type": "proposal", "ts": ts, "proposal": view}));
+        Ok(json!({"proposed": true, "id": id, "status": "pending", "proposal": view, "diff": preview["diff"]}))
+    }
+
+    /// A person approves a proposal: it is applied now, exactly as a send. Refused if it is no longer pending.
+    pub fn approve(self: &Arc<Self>, id: u32, actor: &Actor) -> Result<Value, (u16, Value)> {
+        let (chart, devices, by, changes) = {
+            let mut ps = self.gov.proposals.lock().unwrap();
+            let p = ps.iter_mut().find(|p| p.id == id).ok_or((404u16, json!({"error": format!("no proposal #{id}")})))?;
+            if p.status != "pending" {
+                return Err((409, json!({"error": format!("proposal #{id} is {}, not pending", p.status), "status": p.status})));
+            }
+            p.status = "approving".into();
+            (p.chart.clone(), p.devices.clone(), p.actor.clone(), p.changes.len())
+        };
+        let set = |status: &str| {
+            if let Some(p) = self.gov.proposals.lock().unwrap().iter_mut().find(|p| p.id == id) {
+                p.status = status.into();
+            }
+        };
+        match self.replace(chart, devices, true) {
+            Ok(mut v) => {
+                set("approved");
+                v["approved"] = json!(id);
+                v["receipt"] = json!(self.receipt("show.edit", "ALLOW", actor, &format!("approved proposal #{id} from {by} and applied it ({changes} change(s))")));
+                let view = self.gov.proposals.lock().unwrap().iter().find(|p| p.id == id).map(Proposal::json);
+                self.publish(json!({"type": "proposal", "ts": now_ms(), "proposal": view}));
+                Ok(v)
+            }
+            Err(e) => {
+                set("pending");
+                self.receipt("show.edit", "DENY", actor, &format!("could not apply proposal #{id} from {by}: {}", e.1["error"].as_str().unwrap_or("refused")));
+                Err(e)
+            }
+        }
+    }
+
+    /// A person turns a proposal down.
+    pub fn reject(&self, id: u32, actor: &Actor) -> Result<Value, (u16, Value)> {
+        let by = {
+            let mut ps = self.gov.proposals.lock().unwrap();
+            let p = ps.iter_mut().find(|p| p.id == id).ok_or((404u16, json!({"error": format!("no proposal #{id}")})))?;
+            if p.status != "pending" {
+                return Err((409, json!({"error": format!("proposal #{id} is {}, not pending", p.status), "status": p.status})));
+            }
+            p.status = "rejected".into();
+            p.actor.clone()
+        };
+        let receipt = self.receipt("show.reject", "DENY", actor, &format!("rejected proposal #{id} from {by}"));
+        let view = self.gov.proposals.lock().unwrap().iter().find(|p| p.id == id).map(Proposal::json);
+        self.publish(json!({"type": "proposal", "ts": now_ms(), "proposal": view}));
+        Ok(json!({"rejected": id, "receipt": receipt}))
+    }
+
+    /// After any edit: proposals made against an older show no longer apply, so they are marked superseded.
+    fn supersede(&self) {
+        let base = self.base_hash();
+        let mut changed = Vec::new();
+        for p in self.gov.proposals.lock().unwrap().iter_mut() {
+            if p.status == "pending" && p.base != base {
+                p.status = "superseded".into();
+                changed.push(p.json());
+            }
+        }
+        for view in changed {
+            self.publish(json!({"type": "proposal", "ts": now_ms(), "proposal": view}));
+        }
     }
 
     /// Whether a restarted runtime carried on a run (see `resume`).
@@ -823,6 +968,9 @@ pub fn router_with_token(show: Arc<Show>, token: Option<String>) -> Router {
             if !authorized(&a.token, &q, &h) { return (StatusCode::UNAUTHORIZED, Json(json!({"error": "token required"}))); }
             (StatusCode::OK, Json(a.show.preflight()))
         }))
+        .route("/proposals", get(get_proposals))
+        .route("/proposals/:id/:verb", post(post_decide))
+        .route("/governance/export", get(get_governance))
         .route("/devices/:id/try", post(post_try))
         .route("/laser/stop", post(post_laser_stop))
         .route("/devices/:id/arm", post(post_arm))
@@ -839,21 +987,68 @@ fn authorized(token: &Option<String>, q: &HashMap<String, String>, h: &HeaderMap
     q.get("token").map(String::as_str) == Some(t.as_str()) || bearer == Some(t.as_str())
 }
 
+type Reply = (StatusCode, Json<Value>);
+
+/// Who is asking: `X-Pchi-Actor: agent:<name>` (or `?actor=`), otherwise a person.
+fn actor_of(q: &HashMap<String, String>, h: &HeaderMap) -> Actor {
+    Actor::from_headers(h, q.get("actor").map(String::as_str))
+}
+
+/// An agent asked for something only a person may do: refuse, and write the refusal down.
+fn refuse_agent(show: &Show, actor: &Actor, rule: &str, what: &str) -> Reply {
+    let receipt = show.receipt(rule, "DENY", actor, &format!("refused: agents may not {what}"));
+    (StatusCode::FORBIDDEN, Json(json!({"error": format!("agents may not {what}: they can propose a show edit for a person to approve"), "denied": true, "agent": true, "receipt": receipt})))
+}
+
+/// The operator's key is missing or wrong: refuse, and write the refusal down.
+fn refuse_key(show: &Show, actor: &Actor, rule: &str, what: &str) -> Reply {
+    show.receipt(rule, "DENY", actor, &format!("refused: {what} needs the operator key"));
+    locked()
+}
+
+/// For routes only a person with the key may use (agents are refused first).
+fn person_with_key(a: &App, actor: &Actor, q: &HashMap<String, String>, h: &HeaderMap, rule: &str, what: &str) -> Result<(), Reply> {
+    if actor.is_agent() {
+        return Err(refuse_agent(&a.show, actor, rule, what));
+    }
+    if !a.show.edit_ok(edit_key_of(q, h)) {
+        return Err(refuse_key(&a.show, actor, rule, what));
+    }
+    Ok(())
+}
+
+fn unauthorized() -> Reply {
+    (StatusCode::UNAUTHORIZED, Json(json!({"error": "token required"})))
+}
+
 /// `POST /show` (a show file, as Studio saves it) replaces the running show's definition;
 /// `?dry=1` only reports what would change. See `Show::replace`.
+/// From an agent (`X-Pchi-Actor: agent:...`) a real send is stored as a proposal for a person to approve.
 async fn post_show(State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap, body: String) -> impl IntoResponse {
     if !authorized(&a.token, &q, &h) {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "token required"})));
+        return unauthorized();
     }
-    if !a.show.edit_ok(edit_key_of(&q, &h)) {
-        return locked();
+    let actor = actor_of(&q, &h);
+    let dry = q.get("dry").is_some_and(|v| v == "1" || v == "true");
+    if !actor.is_agent() && !a.show.edit_ok(edit_key_of(&q, &h)) {
+        return refuse_key(&a.show, &actor, "show.edit", "sending a show");
     }
     let (chart, devices) = match rig::load(&body) {
         Ok(x) => x,
         Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))),
     };
-    let dry = q.get("dry").is_some_and(|v| v == "1" || v == "true");
-    match a.show.replace(chart, devices, !dry) {
+    let result = if dry {
+        a.show.replace(chart, devices, false)
+    } else if actor.is_agent() {
+        a.show.propose(&actor, chart, devices)
+    } else {
+        a.show.replace(chart, devices, true).inspect(|v| {
+            let n = v["diff"]["changes"].as_array().map_or(0, |c| c.len());
+            a.show.receipt("show.edit", "ALLOW", &actor, &format!("sent an edited show ({n} change(s))"));
+        })
+    };
+    match result {
+        Ok(v) if v["proposed"] == json!(true) => (StatusCode::ACCEPTED, Json(v)),
         Ok(v) => (StatusCode::OK, Json(v)),
         Err((code, v)) => (StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST), Json(v)),
     }
@@ -864,21 +1059,31 @@ fn edit_key_of<'a>(q: &'a HashMap<String, String>, h: &'a HeaderMap) -> Option<&
     h.get("x-pchi-edit-key").and_then(|v| v.to_str().ok()).or_else(|| q.get("edit_key").map(String::as_str))
 }
 
-fn locked() -> (StatusCode, Json<Value>) {
+fn locked() -> Reply {
     (StatusCode::FORBIDDEN, Json(json!({"error": "the operator key is required for this", "locked": true})))
 }
 
 /// `POST /show/undo` (`?dry=1` to preview): put the show back as it was before the last send.
 async fn post_undo(State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap) -> impl IntoResponse {
     if !authorized(&a.token, &q, &h) {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "token required"})));
+        return unauthorized();
     }
-    if !a.show.edit_ok(edit_key_of(&q, &h)) {
+    let actor = actor_of(&q, &h);
+    let dry = q.get("dry").is_some_and(|v| v == "1" || v == "true");
+    if !dry {
+        if let Err(r) = person_with_key(&a, &actor, &q, &h, "show.undo", "undo a send") {
+            return r;
+        }
+    } else if !actor.is_agent() && !a.show.edit_ok(edit_key_of(&q, &h)) {
         return locked();
     }
-    let dry = q.get("dry").is_some_and(|v| v == "1" || v == "true");
     match a.show.undo(!dry) {
-        Ok(v) => (StatusCode::OK, Json(v)),
+        Ok(v) => {
+            if !dry {
+                a.show.receipt("show.undo", "ALLOW", &actor, "put the show back to before the last send");
+            }
+            (StatusCode::OK, Json(v))
+        }
         Err((code, v)) => (StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST), Json(v)),
     }
 }
@@ -886,36 +1091,50 @@ async fn post_undo(State(a): State<App>, q: Query<HashMap<String, String>>, h: H
 /// `POST /devices/<id>/try` {"value": "3"}: one cue to one device through its profile. Needs the operator key.
 async fn post_try(State(a): State<App>, Path(id): Path<String>, q: Query<HashMap<String, String>>, h: HeaderMap, Json(body): Json<Value>) -> impl IntoResponse {
     if !authorized(&a.token, &q, &h) {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "token required"})));
+        return unauthorized();
     }
-    if !a.show.edit_ok(edit_key_of(&q, &h)) {
-        return locked();
+    let actor = actor_of(&q, &h);
+    if let Err(r) = person_with_key(&a, &actor, &q, &h, "device.try", "send a cue to a device") {
+        return r;
     }
-    match a.show.try_cue(&id, body["value"].as_str().unwrap_or("")).await {
-        Ok(v) => (StatusCode::OK, Json(v)),
+    let value = body["value"].as_str().unwrap_or("");
+    match a.show.try_cue(&id, value).await {
+        Ok(v) => {
+            a.show.receipt("device.try", "ALLOW", &actor, &format!("tried '{value}' on {id}: {}", v["status"].as_str().unwrap_or("?")));
+            (StatusCode::OK, Json(v))
+        }
         Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"error": e}))),
     }
 }
 
-/// `POST /laser/stop`: the hard stop. Needs the feed token (if any) but NOT the operator key: anyone on the crew can stop.
+/// `POST /laser/stop`: the hard stop. Needs the feed token (if any) but NOT the operator key: anyone on the crew can stop, agents included.
 async fn post_laser_stop(State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap) -> impl IntoResponse {
     if !authorized(&a.token, &q, &h) {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "token required"})));
+        return unauthorized();
     }
-    (StatusCode::OK, Json(a.show.laser_stop()))
+    let actor = actor_of(&q, &h);
+    let v = a.show.laser_stop();
+    a.show.receipt("laser.stop", "ALLOW", &actor, &format!("hard stop: disarmed {} laser(s)", v["stopped"].as_array().map_or(0, |s| s.len())));
+    (StatusCode::OK, Json(v))
 }
 
-/// `POST /devices/<id>/arm?armed=1|0`: arming needs the operator key; disarming never does.
+/// `POST /devices/<id>/arm?armed=1|0`: arming needs the operator key and a person; disarming never does (agents may disarm).
 async fn post_arm(State(a): State<App>, Path(id): Path<String>, q: Query<HashMap<String, String>>, h: HeaderMap) -> impl IntoResponse {
     if !authorized(&a.token, &q, &h) {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "token required"})));
+        return unauthorized();
     }
+    let actor = actor_of(&q, &h);
     let armed = q.get("armed").is_some_and(|v| v == "1" || v == "true");
-    if armed && !a.show.edit_ok(edit_key_of(&q, &h)) {
-        return locked();
+    if armed {
+        if let Err(r) = person_with_key(&a, &actor, &q, &h, "laser.arm", "arm a laser") {
+            return r;
+        }
     }
     match a.show.set_armed(&id, armed) {
-        Ok(()) => (StatusCode::OK, Json(json!({"ok": true, "armed": armed}))),
+        Ok(()) => {
+            a.show.receipt(if armed { "laser.arm" } else { "laser.disarm" }, "ALLOW", &actor, &format!("{} {id}", if armed { "armed" } else { "disarmed" }));
+            (StatusCode::OK, Json(json!({"ok": true, "armed": armed})))
+        }
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e}))),
     }
 }
@@ -923,15 +1142,56 @@ async fn post_arm(State(a): State<App>, Path(id): Path<String>, q: Query<HashMap
 /// `POST /devices/<id>/test`: one `/pchi/test` message to that device.
 async fn post_test(State(a): State<App>, Path(id): Path<String>, q: Query<HashMap<String, String>>, h: HeaderMap) -> impl IntoResponse {
     if !authorized(&a.token, &q, &h) {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "token required"})));
+        return unauthorized();
     }
-    if !a.show.edit_ok(edit_key_of(&q, &h)) {
-        return locked();
+    let actor = actor_of(&q, &h);
+    if let Err(r) = person_with_key(&a, &actor, &q, &h, "device.test", "test-fire a device") {
+        return r;
     }
     match a.show.test_fire(&id).await {
-        Ok(v) => (StatusCode::OK, Json(v)),
+        Ok(v) => {
+            a.show.receipt("device.test", "ALLOW", &actor, &format!("test-fired {id}: {}", v["status"].as_str().unwrap_or("?")));
+            (StatusCode::OK, Json(v))
+        }
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e}))),
     }
+}
+
+/// `GET /proposals`: every proposal (pending first in the Studio's list; settled ones stay for the record).
+async fn get_proposals(State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap) -> impl IntoResponse {
+    if !authorized(&a.token, &q, &h) {
+        return unauthorized();
+    }
+    (StatusCode::OK, Json(a.show.proposals()))
+}
+
+/// `POST /proposals/<id>/approve|reject`: a person with the operator key decides.
+async fn post_decide(State(a): State<App>, Path((id, verb)): Path<(u32, String)>, q: Query<HashMap<String, String>>, h: HeaderMap) -> impl IntoResponse {
+    if !authorized(&a.token, &q, &h) {
+        return unauthorized();
+    }
+    let actor = actor_of(&q, &h);
+    let (rule, what) = match verb.as_str() {
+        "approve" => ("show.edit", "approve a proposal"),
+        "reject" => ("show.reject", "reject a proposal"),
+        _ => return (StatusCode::NOT_FOUND, Json(json!({"error": "use approve or reject"}))),
+    };
+    if let Err(r) = person_with_key(&a, &actor, &q, &h, rule, what) {
+        return r;
+    }
+    let r = if verb == "approve" { a.show.approve(id, &actor) } else { a.show.reject(id, &actor) };
+    match r {
+        Ok(v) => (StatusCode::OK, Json(v)),
+        Err((code, v)) => (StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST), Json(v)),
+    }
+}
+
+/// `GET /governance/export`: the signed receipts, for `scripts/verify_governance_chain.py`.
+async fn get_governance(State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap) -> impl IntoResponse {
+    if !authorized(&a.token, &q, &h) {
+        return unauthorized();
+    }
+    (StatusCode::OK, Json(a.show.governance_export()))
 }
 
 async fn post_ready(
@@ -958,7 +1218,14 @@ async fn post_input(State(a): State<App>, q: Query<HashMap<String, String>>, h: 
     let Some(event) = body["event"].as_str() else {
         return (StatusCode::BAD_REQUEST, Json(json!({"error": "send {\"event\": \"NAME\"}"})));
     };
+    let actor = actor_of(&q, &h);
+    if actor.is_agent() {
+        return refuse_agent(&a.show, &actor, "show.go", "run the show (send an input)");
+    }
     let applied = a.show.apply("http", event);
+    if applied {
+        a.show.receipt("show.go", "ALLOW", &actor, &format!("input '{event}' moved the show to {}", a.show.current_state()));
+    }
     (StatusCode::OK, Json(json!({"applied": applied})))
 }
 
@@ -967,10 +1234,11 @@ async fn ws_upgrade(ws: WebSocketUpgrade, State(a): State<App>, q: Query<HashMap
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let show = a.show;
-    ws.on_upgrade(move |socket| client(socket, show))
+    let actor = actor_of(&q, &h);
+    ws.on_upgrade(move |socket| client(socket, show, actor))
 }
 
-async fn client(socket: WebSocket, show: Arc<Show>) {
+async fn client(socket: WebSocket, show: Arc<Show>, actor: Actor) {
     let (mut sink, mut stream) = socket.split();
     // subscribe before the snapshot so nothing between the two is missed
     let mut rx = show.subscribe();
@@ -994,19 +1262,28 @@ async fn client(socket: WebSocket, show: Arc<Show>) {
             m = stream.next() => {
                 let Some(Ok(m)) = m else { break };
                 if let Message::Text(t) = m {
-                    handle_client(&show, &t);
+                    handle_client(&show, &actor, &t);
                 }
             }
         }
     }
 }
 
-fn handle_client(show: &Arc<Show>, text: &str) {
+fn handle_client(show: &Arc<Show>, actor: &Actor, text: &str) {
     let Ok(v) = serde_json::from_str::<Value>(text) else { return };
-    match v["type"].as_str() {
+    let kind = v["type"].as_str();
+    // an agent may report readiness, but it may not run the show
+    if actor.is_agent() && matches!(kind, Some("input") | Some("context") | Some("reset")) {
+        show.receipt("show.go", "DENY", actor, &format!("refused: agents may not run the show ({})", kind.unwrap_or("")));
+        show.publish(json!({"type": "error", "message": "agents may not run the show: they can propose a show edit for a person to approve"}));
+        return;
+    }
+    match kind {
         Some("input") => {
             if let Some(e) = v["event"].as_str() {
-                show.apply("studio", e);
+                if show.apply("studio", e) {
+                    show.receipt("show.go", "ALLOW", actor, &format!("input '{e}' moved the show to {}", show.current_state()));
+                }
             }
         }
         Some("context") => {
@@ -1014,7 +1291,10 @@ fn handle_client(show: &Arc<Show>, text: &str) {
                 show.set_context(k, v["value"].clone());
             }
         }
-        Some("reset") => show.reset(),
+        Some("reset") => {
+            show.reset();
+            show.receipt("show.reset", "ALLOW", actor, "started a fresh run");
+        }
         Some("ready") => {
             if let Some(d) = v["dept"].as_str() {
                 // a client may name itself ("dept-page"); anything odd falls back to plain "ws"
@@ -1975,5 +2255,159 @@ mod tests {
         assert_eq!(http(addr, "GET", "/state?token=s3cret", "", "").await.0, 200);
         assert_eq!(http(addr, "POST", "/ready/audio", r#"{}"#, "Authorization: Bearer s3cret\r\n").await.0, 200);
         assert!(connect_async(format!("ws://{addr}/ws?token=s3cret")).await.is_ok());
+    }
+
+    // ---- governance: who may do what, and the signed record ----
+
+    /// A show with a (dry-run) laser, the operator key "k", and receipts written to a fresh temp folder.
+    async fn governed(name: &str) -> (Arc<Show>, std::net::SocketAddr) {
+        let dir = std::env::temp_dir().join(format!("pchi-gov-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = Output::new(vec![device("b1", "beyond", 9)], false);
+        let show = Show::start_with(quick(), EventStore::open_in_memory().unwrap(), Some(out)).unwrap();
+        show.set_edit_key(Some("k".into()));
+        let log = primeswarm_pchi::GovernanceLog::open(dir.join("key.hex").to_str().unwrap(), dir.join("log.jsonl").to_str().unwrap()).unwrap();
+        show.set_governance(log);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = router_with_token(Arc::clone(&show), None);
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (show, addr)
+    }
+
+    fn receipts(show: &Show) -> Vec<(String, String, String)> {
+        show.governance_export()["receipts"].as_array().unwrap().iter().map(|r| (r["rule_name"].as_str().unwrap().into(), r["gate_state"].as_str().unwrap().into(), r["message"].as_str().unwrap().into())).collect()
+    }
+
+    const AGENT: &str = "X-Pchi-Actor: agent:nova\r\n";
+    const KEY: &str = "X-Pchi-Edit-Key: k\r\n";
+
+    #[tokio::test]
+    async fn an_agent_may_propose_but_not_act_and_every_decision_is_written_down() {
+        let (show, addr) = governed("agent").await;
+        let body = |c: &Showchart| serde_json::to_string(c).unwrap();
+        let mut edited = quick();
+        move_cue(&mut edited, "INTRO", "lighting", 3_000);
+        let before = show.snapshot()["definition"].clone();
+
+        // an agent may preview, even without the key
+        assert_eq!(http(addr, "POST", "/show?dry=1", &body(&edited), AGENT).await.0, 200);
+        // its real send is only a proposal: 202, nothing changes, and it waits for a person
+        let (st, v) = http(addr, "POST", "/show", &body(&edited), AGENT).await;
+        assert_eq!((st, v["proposed"].as_bool(), v["id"].as_u64()), (202, Some(true), Some(1)), "{v}");
+        assert_eq!(show.snapshot()["definition"], before, "an agent's send must not change the running show");
+        assert_eq!(show.snapshot()["proposals"].as_array().unwrap().len(), 1);
+        assert!(v["diff"]["changes"][0].as_str().unwrap().contains("moved"), "{v}");
+        // the same agent holding the key is still an agent
+        let (st, _) = http(addr, "POST", "/devices/b1/arm?armed=1", "", &format!("{AGENT}{KEY}")).await;
+        assert_eq!(st, 403);
+        assert_eq!(http(addr, "POST", "/show/undo", "", &format!("{AGENT}{KEY}")).await.0, 403);
+        assert_eq!(http(addr, "POST", "/devices/b1/try", r#"{"value":"x"}"#, &format!("{AGENT}{KEY}")).await.0, 403);
+        assert_eq!(http(addr, "POST", "/devices/b1/test", "", &format!("{AGENT}{KEY}")).await.0, 403);
+        // nor may it press GO, over HTTP or the WebSocket
+        let (st, v) = http(addr, "POST", "/input", r#"{"event":"START"}"#, AGENT).await;
+        assert_eq!((st, v["denied"].as_bool()), (403, Some(true)));
+        let (mut ws, _) = connect_async(format!("ws://{addr}/ws?actor=agent:nova")).await.unwrap();
+        ws.send(TMsg::Text(r#"{"type":"input","event":"START"}"#.into())).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(show.snapshot()["state"], "PRESHOW", "an agent must not move the show");
+        // the safe direction is open to it: disarm and the hard stop
+        assert_eq!(http(addr, "POST", "/devices/b1/arm?armed=0", "", AGENT).await.0, 200);
+        assert_eq!(http(addr, "POST", "/laser/stop", "", AGENT).await.0, 200);
+
+        let r = receipts(&show);
+        let has = |rule: &str, gate: &str| r.iter().any(|(ru, g, m)| ru == rule && g == gate && m.contains("agent:nova"));
+        assert!(has("show.propose", "ESCALATE") && has("laser.arm", "DENY") && has("show.undo", "DENY") && has("device.try", "DENY") && has("device.test", "DENY") && has("show.go", "DENY"), "{r:?}");
+        assert!(has("laser.disarm", "ALLOW") && has("laser.stop", "ALLOW"), "{r:?}");
+        assert!(!r.iter().any(|(ru, g, _)| ru == "show.edit" && g == "ALLOW"), "no edit was allowed");
+    }
+
+    #[tokio::test]
+    async fn a_person_approves_or_rejects_a_proposal_and_stale_ones_are_superseded() {
+        let (show, addr) = governed("approve").await;
+        let body = |c: &Showchart| serde_json::to_string(c).unwrap();
+        let (mut a, mut b, mut c) = (quick(), quick(), quick());
+        move_cue(&mut a, "INTRO", "lighting", 3_000);
+        move_cue(&mut b, "INTRO", "visual", 1_000);
+        move_cue(&mut c, "INTRO", "laser", 2_000);
+        for chart in [&a, &b, &c] {
+            assert_eq!(http(addr, "POST", "/show", &body(chart), AGENT).await.0, 202);
+        }
+        assert_eq!(show.snapshot()["proposals"].as_array().unwrap().len(), 3);
+
+        // deciding needs a person with the key
+        assert_eq!(http(addr, "POST", "/proposals/1/approve", "", "").await.0, 403);
+        assert_eq!(http(addr, "POST", "/proposals/1/approve", "", &format!("{AGENT}{KEY}")).await.0, 403, "an agent cannot approve its own proposal");
+        assert_eq!(show.snapshot()["definition"], serde_json::to_value(quick()).unwrap());
+        // reject one
+        let (st, _) = http(addr, "POST", "/proposals/3/reject", "", KEY).await;
+        assert_eq!(st, 200);
+        // approve another: it is applied, and the one made against the old show is superseded
+        let (st, v) = http(addr, "POST", "/proposals/1/approve", "", KEY).await;
+        assert_eq!((st, v["applied"].as_bool()), (200, Some(true)), "{v}");
+        assert_eq!(show.snapshot()["definition"], serde_json::to_value(&a).unwrap());
+        let list = http(addr, "GET", "/proposals", "", "").await.1;
+        let status = |id: u64| list.as_array().unwrap().iter().find(|p| p["id"] == id).unwrap()["status"].as_str().unwrap().to_string();
+        assert_eq!((status(1).as_str(), status(2).as_str(), status(3).as_str()), ("approved", "superseded", "rejected"));
+        assert_eq!(http(addr, "POST", "/proposals/2/approve", "", KEY).await.0, 409, "a superseded proposal cannot be approved");
+        assert_eq!(http(addr, "POST", "/proposals/9/approve", "", KEY).await.0, 404);
+        assert_eq!(show.snapshot()["proposals"].as_array().unwrap().len(), 0, "nothing is left waiting");
+
+        let r = receipts(&show);
+        assert!(r.iter().any(|(ru, g, m)| ru == "show.edit" && g == "ALLOW" && m.contains("approved proposal #1 from agent:nova")), "{r:?}");
+        assert!(r.iter().any(|(ru, g, _)| ru == "show.reject" && g == "DENY"), "{r:?}");
+    }
+
+    #[tokio::test]
+    async fn the_receipts_form_a_signed_chain_that_names_who_did_what() {
+        use primeswarm_pchi::governance::{verify_receipt, GovernanceReceipt};
+        let (show, addr) = governed("chain").await;
+        let body = serde_json::to_string(&quick()).unwrap();
+        // a person's actions
+        assert_eq!(http(addr, "POST", "/devices/b1/arm?armed=1", "", "X-Pchi-Edit-Key: k\r\nX-Pchi-Actor: person:Alex\r\n").await.0, 200);
+        let mut edited = quick();
+        move_cue(&mut edited, "INTRO", "lighting", 3_000);
+        assert_eq!(http(addr, "POST", "/show", &serde_json::to_string(&edited).unwrap(), KEY).await.0, 200);
+        assert_eq!(http(addr, "POST", "/show", &body, "").await.0, 403, "no key: refused, and written down");
+        assert_eq!(http(addr, "POST", "/input", r#"{"event":"START"}"#, KEY).await.0, 200);
+        assert_eq!(http(addr, "POST", "/input", r#"{"event":"NO_SUCH_EVENT"}"#, KEY).await.0, 200);
+
+        let export = show.governance_export();
+        let recs: Vec<GovernanceReceipt> = serde_json::from_value(export["receipts"].clone()).unwrap();
+        let rules: Vec<&str> = recs.iter().map(|r| r.rule_name.as_str()).collect();
+        assert_eq!(rules, ["laser.arm", "show.edit", "show.edit", "show.go"], "{recs:?}");
+        assert_eq!(recs[0].message, "person:Alex: armed b1");
+        assert_eq!(recs[2].gate_state, "DENY");
+        assert!(recs[3].message.contains("moved the show to"), "only an input that moved the show is recorded");
+        let key = export["verifying_key"].as_str().unwrap();
+        let mut prev: Option<String> = None;
+        for r in &recs {
+            assert!(verify_receipt(r, key), "signature and hash of {}", r.receipt_id);
+            assert_eq!(r.parent_decision_hash, prev, "chain link of {}", r.receipt_id);
+            prev = Some(r.decision_hash.clone());
+        }
+        // each is decided against the state at that moment: the armed laser and the edited show change it
+        assert_ne!(recs[0].state_snapshot_hash, recs[1].state_snapshot_hash);
+        assert_ne!(recs[2].state_snapshot_hash, recs[3].state_snapshot_hash);
+        // tampering with any receipt is detectable
+        let mut forged = recs[2].clone();
+        forged.gate_state = "ALLOW".into();
+        assert!(!verify_receipt(&forged, key));
+    }
+
+    #[tokio::test]
+    async fn without_receipts_agents_are_still_held_back_and_nothing_is_written() {
+        let show = Show::start(quick(), EventStore::open_in_memory().unwrap()).unwrap();
+        assert!(show.receipt("x", "ALLOW", &Actor::Person(None), "y").is_none());
+        let ex = show.governance_export();
+        assert_eq!(ex["count"], 0);
+        assert!(ex["note"].as_str().unwrap().contains("--governance"));
+        assert_eq!(show.snapshot()["governed"], false);
+        let (a, p) = (Actor::parse(Some("Agent:Nova")), Actor::parse(Some("person:Alex")));
+        assert_eq!((a.name(), p.name(), Actor::parse(None).name()), ("agent:Nova".to_string(), "person:Alex".to_string(), "operator".to_string()));
+        assert!(Actor::parse(Some("agent")).is_agent() && !Actor::parse(Some("robot")).is_agent());
     }
 }

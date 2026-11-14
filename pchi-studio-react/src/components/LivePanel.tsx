@@ -6,7 +6,7 @@ import CommandBar from './CommandBar'
 import TimelineStrip, { useStripLayout } from './TimelineStrip'
 import { sceneInfo } from './sceneInfo'
 import LiveCallSheet from './LiveCallSheet'
-import RuntimeTools, { armLaser, stopLasers, testFire, tryCue } from './RuntimeTools'
+import RuntimeTools, { armLaser, decideProposal, stopLasers, testFire, tryCue } from './RuntimeTools'
 import { STALE_MS, feedUrl, type Ready } from './liveFeed'
 import { fmt } from './TimelineStrip'
 import {
@@ -106,6 +106,9 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
   const [tryOut, setTryOut] = useState('')
   const [locked, setLocked] = useState(false) // the runtime wants an operator key for edits
   const [undoDepth, setUndoDepth] = useState(0) // sends that can still be undone
+  const [proposals, setProposals] = useState<{ id: number; actor: string; status: string; changes: string[]; notes: string[] }[]>([]) // edits an agent proposed
+  const [governed, setGoverned] = useState(false) // the runtime writes signed receipts
+  const [decideErr, setDecideErr] = useState('')
   const [armed, setArmed] = useState(false) // GO pressed once while a department is on hold
   const [trail, setTrail] = useState<{ ts: number; text: string }[]>([])
   const [key, setKey] = useState('energy')
@@ -146,6 +149,8 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
             setHeard([])
             setLocked(!!msg.edit_locked)
             setUndoDepth(Number(msg.undo_depth ?? 0))
+            setGoverned(!!msg.governed)
+            setProposals(Array.isArray(msg.proposals) ? (msg.proposals as typeof proposals) : [])
             setDef(msg.definition as Showchart)
             setState(String(msg.state))
             setCtx((msg.context as ShowContext) ?? {})
@@ -191,6 +196,11 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
             setUndoDepth(Number(msg.undo_depth ?? 0))
             setRunDevices(Array.isArray(msg.devices) ? (msg.devices as RunDevice[]) : null)
             break
+          case 'proposal': {
+            const p = msg.proposal as (typeof proposals)[number] | null
+            if (p) setProposals((ps) => [...ps.filter((x) => x.id !== p.id), p].sort((a, b) => a.id - b.id))
+            break
+          }
           case 'context':
             setCtx((c) => ({ ...c, [String(msg.key)]: msg.value }))
             break
@@ -541,6 +551,49 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
           </form>
         )}
         {getFile && <RuntimeTools getFile={getFile} locked={locked} undoDepth={undoDepth} />}
+        {governed && <p className="muted gov-badge" title="Every edit, arming, GO and refusal is written to a signed, hash-chained log you can verify offline">Signed receipts are on</p>}
+        {proposals.some((p) => p.status === 'pending') && (
+          <section className="proposals" aria-label="Edits waiting for a person">
+            <h4>Waiting for you</h4>
+            {proposals
+              .filter((p) => p.status === 'pending')
+              .map((p) => (
+                <div key={p.id} className="proposal">
+                  <p>
+                    <b>{p.actor}</b> proposes an edit
+                  </p>
+                  <ul>
+                    {p.changes.map((c, i) => (
+                      <li key={i}>{c}</li>
+                    ))}
+                    {p.notes.map((c, i) => (
+                      <li key={'n' + i} className="muted">{c}</li>
+                    ))}
+                  </ul>
+                  <div className="proposal-actions">
+                    <button
+                      onClick={async () => {
+                        const r = await decideProposal(p.id, 'approve')
+                        setDecideErr(r.ok ? '' : (r.error ?? 'Could not apply it.'))
+                      }}
+                    >
+                      Approve and apply
+                    </button>
+                    <button
+                      className="ghost"
+                      onClick={async () => {
+                        const r = await decideProposal(p.id, 'reject')
+                        setDecideErr(r.ok ? '' : (r.error ?? 'Could not reject it.'))
+                      }}
+                    >
+                      Reject
+                    </button>
+                  </div>
+                </div>
+              ))}
+            {decideErr && <p className="muted" role="alert">{decideErr}</p>}
+          </section>
+        )}
         {timerRows.map((r, i) => {
           const elapsed = Math.max(0, now - enteredAt)
           const left = Math.max(0, r.ms - elapsed)

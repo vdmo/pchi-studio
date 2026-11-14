@@ -30,6 +30,9 @@ struct Cli {
     /// Carry on the run recorded in --db instead of starting a new one: the scene the show was in, its context and the cues still ahead. Cues that came due while the runtime was down are skipped (and listed), lasers start disarmed, and departments report READY again.
     #[arg(long, requires = "db")]
     resume: bool,
+    /// Write a signed, hash-chained receipt for every decision (edits, arming, GO, refusals, proposals) into this folder, in the format scripts/verify_governance_chain.py checks offline. The folder keeps the signing key too: protect it like the show file.
+    #[arg(long, env = "PCHI_GOVERNANCE")]
+    governance: Option<String>,
     /// Really send cues to the rig's devices (UDP/OSC to each device's host and port). Without it, deliveries are only reported as "dry-run".
     #[arg(long)]
     send: bool,
@@ -65,6 +68,15 @@ async fn main() -> anyhow::Result<()> {
         Show::start_with(chart, store, output).map_err(anyhow::Error::msg)?
     };
     show.set_edit_key(cli.edit_key.clone());
+    if let Some(dir) = &cli.governance {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {dir}"))?;
+        let (key, log) = (format!("{dir}/governance_key.hex"), format!("{dir}/governance_log.jsonl"));
+        let log = primeswarm_pchi::GovernanceLog::open(&key, &log).with_context(|| format!("opening the governance log in {dir}"))?;
+        println!("governance: signed receipts in {dir} (verifying key {})", log.verifying_key_hex());
+        show.set_governance(log);
+        let how = if cli.resume { "resumed the run recorded in the database" } else { "started the show" };
+        show.receipt("show.start", "ALLOW", &pchi_studio_api::governance::Actor::Person(None), &format!("runtime {how}{}", if cli.send { " with sending ON" } else { " (dry-run)" }));
+    }
     let listener = tokio::net::TcpListener::bind(&cli.bind).await.with_context(|| format!("binding {}", cli.bind))?;
     println!("pchi-studio-api: {} on http://{} (ws://{}/ws), recording to {}",
         show.snapshot()["chart"]["id"], cli.bind, cli.bind, cli.db.as_deref().unwrap_or("memory"));

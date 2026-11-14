@@ -27,6 +27,11 @@ fn sha256_hex(s: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// sha256 of the JCS-canonical form of `v`: how a receipt is tied to the state it was decided against.
+pub fn hash_state(v: &serde_json::Value) -> String {
+    sha256_hex(&serde_jcs::to_string(v).unwrap_or_else(|_| v.to_string()))
+}
+
 /// A signed, chained record of one rule firing. Field names mirror DGV's
 /// `DecisionRecord` where the concept maps directly (decision_hash,
 /// parent_decision_hash, signature, created_unix_ms); `gate_state` reuses

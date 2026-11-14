@@ -321,6 +321,24 @@ export async function stopLasers(): Promise<{ ok: boolean; notes: string[]; erro
   return { ok: true, notes: (r.body?.notes as string[]) ?? [] }
 }
 
+/** A person decides an agent's proposed show edit. Needs the operator key when the runtime has one. */
+export async function decideProposal(id: number, verb: 'approve' | 'reject'): Promise<{ ok: boolean; error?: string }> {
+  const go = () => api(`/proposals/${id}/${verb}`, { method: 'POST' }).catch(() => null)
+  let r = await go()
+  if (r?.status === 403 && !r.body?.agent) {
+    const k = window.prompt(`This runtime needs the operator key to ${verb} a proposal:`)
+    if (!k) return { ok: false, error: 'The operator key is needed.' }
+    setEditKey(k.trim())
+    r = await go()
+  }
+  if (!r) return { ok: false, error: 'The runtime did not answer.' }
+  if (r.status === 403) {
+    setEditKey('')
+    return { ok: false, error: 'That key was not accepted.' }
+  }
+  return r.ok ? { ok: true } : { ok: false, error: String(r.body?.error ?? `refused (${r.status})`) }
+}
+
 /** One harmless message to a rig device, to check the link before doors. */
 export async function testFire(id: string): Promise<{ status: string; error?: string }> {
   const r = await api(`/devices/${encodeURIComponent(id)}/test`, { method: 'POST' }).catch(() => null)
