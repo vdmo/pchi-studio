@@ -10,6 +10,10 @@ name = "pchi-studio-api"
 path = "src/main.rs"
 
 [[bin]]
+name = "pchi-mcp"
+path = "src/bin/mcp.rs"
+
+[[bin]]
 name = "pchi-drill"
 path = "src/bin/drill.rs"
 
@@ -29,12 +33,21 @@ rosc = "0.10"
 clap = { version = "4", features = ["derive", "env"] }
 anyhow = "1.0"
 regex = "1"
+tokio-tungstenite = "0.24"
+sha2 = "0.10"
+base64 = "0.22"
+pbkdf2 = "0.12"
+hex = "0.4"
+rand = "0.8"
 primeswarm-pchi = { path = "../../primeswarm-pchi" }
 midir = { version = "0.10", optional = true }
+cpal = { version = "0.15", optional = true }
 
 [features]
 # Read MIDI ports (notes, controllers, MIDI Time Code). Needs the system MIDI library: libasound2-dev on Linux.
 midi = ["dep:midir"]
+# Read LTC timecode from an audio input device. Needs the system audio library: libasound2-dev on Linux.
+audio = ["dep:cpal"]
 
 [dev-dependencies]
 tokio = { version = "1.34", features = ["test-util"] }

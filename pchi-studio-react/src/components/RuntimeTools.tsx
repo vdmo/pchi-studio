@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { feedToken } from './liveFeed'
+import { feedToken, signedInSession } from './liveFeed'
 import { clearSaid, peekSaid } from './said'
 
 const KEY = 'pchi.editkey'
@@ -24,7 +24,8 @@ const setEditKey = (k: string) => {
 async function api(path: string, init: RequestInit = {}) {
   const t = feedToken()
   const k = editKey()
-  const res = await fetch(`/api${path}`, { ...init, headers: { ...(init.headers ?? {}), ...(t ? { Authorization: `Bearer ${t}` } : {}), ...(k ? { 'X-Pchi-Edit-Key': k } : {}) } })
+  const sess = signedInSession()
+  const res = await fetch(`/api${path}`, { ...init, headers: { ...(init.headers ?? {}), ...(t ? { Authorization: `Bearer ${t}` } : {}), ...(k ? { 'X-Pchi-Edit-Key': k } : {}), ...(sess ? { 'X-Pchi-Session': sess } : {}) } })
   let body: unknown = null
   try {
     body = await res.json()
@@ -428,6 +429,22 @@ export async function getInputs(): Promise<OscInput[]> {
   return r?.ok && Array.isArray(r.body) ? (r.body as unknown as OscInput[]) : []
 }
 
+export type Poll = { id: string; open: boolean; total: number; winner: string | null; options: { option: string; votes: number }[] }
+
+/** Open or close an audience poll. Needs the right to run the show (your key, when the runtime has one). */
+export async function pollAction(id: string, verb: 'open' | 'close', options: string[] = []): Promise<{ ok: boolean; error?: string }> {
+  const go = () => api(`/polls/${encodeURIComponent(id)}/${verb}`, { method: 'POST', body: JSON.stringify({ options }), headers: { 'Content-Type': 'application/json' } }).catch(() => null)
+  let r = await go()
+  if (r?.status === 403 && r.body?.locked) {
+    const k = window.prompt(`This runtime needs your key to ${verb} a poll:`)
+    if (!k) return { ok: false, error: 'Your key is needed.' }
+    setEditKey(k.trim())
+    r = await go()
+  }
+  if (!r) return { ok: false, error: 'The runtime did not answer.' }
+  return r.ok ? { ok: true } : { ok: false, error: String(r.body?.error ?? `refused (${r.status})`) }
+}
+
 export type WhoAmI = { name: string; role: string; signed_in: boolean; locked: boolean; can: string[] }
 
 /** Who the runtime takes this tab to be, and what that person may do. */
@@ -436,15 +453,31 @@ export async function whoami(): Promise<WhoAmI | null> {
   return r?.ok ? (r.body as unknown as WhoAmI) : null
 }
 
-/** Sign in with your own key (given by whoever runs the show). Returns who you are, or null if the key is not known. */
+/**
+ * Sign in with your own key (given by whoever runs the show). The runtime trades it for a session token that lasts a few hours:
+ * this tab keeps the token, not the key. Returns who you are, or null if the key is not known (or has expired).
+ */
 export async function signIn(key: string): Promise<WhoAmI | null> {
-  setEditKey(key.trim())
-  const me = await whoami()
-  if (!me?.signed_in) {
-    setEditKey('')
-    return null
+  const t = feedToken()
+  const res = await fetch('/api/signin', { method: 'POST', headers: { 'Content-Type': 'application/json', ...(t ? { Authorization: `Bearer ${t}` } : {}) }, body: JSON.stringify({ key: key.trim() }) }).catch(() => null)
+  const body = res ? ((await res.json().catch(() => null)) as { token?: string } | null) : null
+  if (!res?.ok || !body?.token) return null
+  try {
+    sessionStorage.setItem('pchi.session', body.token)
+  } catch {
+    /* storage blocked: the sign-in lasts until the page is reloaded */
   }
-  return me
+  setEditKey('') // no long-lived key is kept
+  return whoami()
 }
 
-export const signOut = () => setEditKey('')
+/** End the session on the runtime and forget it here. */
+export async function signOut() {
+  await api('/signout', { method: 'POST' }).catch(() => null)
+  try {
+    sessionStorage.removeItem('pchi.session')
+  } catch {
+    /* nothing to forget */
+  }
+  setEditKey('')
+}

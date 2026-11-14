@@ -41,6 +41,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+pub mod audience;
 pub mod diff;
 pub mod drill;
 pub mod dmx;
@@ -48,8 +49,11 @@ pub mod fixtures;
 pub mod gearcheck;
 pub mod governance;
 pub mod inputs;
+pub mod mcp;
 pub mod midi;
 pub mod links;
+pub mod obs;
+pub mod ltc;
 pub mod output;
 pub mod preflight;
 pub mod profiles;
@@ -142,6 +146,16 @@ pub struct Show {
     tc_published: std::sync::atomic::AtomicI64,
     /// Cues the tools themselves fired (heard as feedback), newest last: what Studio can add to the show.
     captures: Mutex<std::collections::VecDeque<Value>>,
+    /// Audience polls (see `audience`), the token the audience's gateway votes with, and when each poll's tally last went out.
+    votes: Mutex<audience::Votes>,
+    audience_token: Mutex<Option<String>>,
+    vote_window: Mutex<(i64, u32)>,
+    poll_pub: Mutex<HashMap<String, (i64, bool)>>,
+    /// Signed-in sessions: a short-lived token stands in for the person's key, so the key is typed once and not kept.
+    sessions: Mutex<HashMap<String, (Actor, i64)>>,
+    session_hours: std::sync::atomic::AtomicU64,
+    /// Recent failed sign-ins: (start of the minute, count). Too many in a minute and sign-in waits.
+    signin_fails: Mutex<(i64, u32)>,
 }
 
 /// How long a department page may stay silent before it counts as not linked (mirrors the Studio).
@@ -184,6 +198,13 @@ impl Show {
             tc: Mutex::new(timecode::Clock::default()),
             tc_published: std::sync::atomic::AtomicI64::new(0),
             captures: Mutex::new(std::collections::VecDeque::new()),
+            votes: Mutex::new(audience::Votes::default()),
+            audience_token: Mutex::new(None),
+            vote_window: Mutex::new((0, 0)),
+            poll_pub: Mutex::new(HashMap::new()),
+            sessions: Mutex::new(HashMap::new()),
+            session_hours: std::sync::atomic::AtomicU64::new(8),
+            signin_fails: Mutex::new((0, 0)),
         })
     }
 
@@ -273,7 +294,10 @@ impl Show {
                 }));
                 let now = now_ms();
                 for dev in out.devices() {
-                    if output::Output::expects_feedback(dev) {
+                    if dev.kind == "obs" {
+                        // OBS is held open by its own connection: just make sure it is being made
+                        let _ = out.obs_ensure(dev).await;
+                    } else if output::Output::expects_feedback(dev) {
                         match out.links().get(dev).await {
                             Err(e) => {
                                 if warned.insert(dev.id.clone()) {
@@ -315,6 +339,77 @@ impl Show {
         *self.roster.lock().unwrap() = roster;
     }
 
+    /// How long a signed-in session lasts (default 8 hours).
+    pub fn set_session_hours(&self, h: u64) {
+        self.session_hours.store(h.clamp(1, 168), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn session_actor(&self, token: &str) -> Option<Actor> {
+        let mut s = self.sessions.lock().unwrap();
+        match s.get(token) {
+            Some((a, exp)) if *exp > now_ms() => Some(a.clone()),
+            Some(_) => {
+                s.remove(token);
+                None
+            }
+            None => None,
+        }
+    }
+
+    /// Trade a key for a session. The key is checked (a roster person's, or the operator key) and the answer is a token that lasts a
+    /// few hours and can be ended with `sign_out`: Studio keeps the token, not the key. Ten wrong keys in a minute make sign-in wait.
+    pub fn sign_in(&self, key: &str) -> Result<Value, (u16, String)> {
+        let now = now_ms();
+        {
+            let mut f = self.signin_fails.lock().unwrap();
+            if now - f.0 >= 60_000 {
+                *f = (now, 0);
+            }
+            if f.1 >= 10 {
+                return Err((429, "too many wrong keys: wait a minute".into()));
+            }
+        }
+        let found = match self.roster.lock().unwrap().find_at(key, now) {
+            Ok(Some(a)) => Ok(a),
+            Ok(None) if self.edit_key.lock().unwrap().as_deref() == Some(key) => Ok(Actor::Person(None)),
+            Ok(None) => Err("that key is not known".to_string()),
+            Err(e) => Err(e),
+        };
+        let actor = match found {
+            Ok(a) => a,
+            Err(why) => {
+                self.signin_fails.lock().unwrap().1 += 1;
+                self.receipt("auth.signin", "DENY", &Actor::Anonymous, &format!("sign-in refused: {why}"));
+                return Err((403, why));
+            }
+        };
+        if actor.is_agent() {
+            return Err((403, "an agent does not sign in: it sends its key with each request".into()));
+        }
+        use rand::RngCore;
+        let mut raw = [0u8; 24];
+        rand::rngs::OsRng.fill_bytes(&mut raw);
+        let token = hex::encode(raw);
+        let hours = self.session_hours.load(std::sync::atomic::Ordering::Relaxed);
+        let expires = now + hours as i64 * 3_600_000;
+        {
+            let mut s = self.sessions.lock().unwrap();
+            s.retain(|_, (_, e)| *e > now);
+            s.insert(token.clone(), (actor.clone(), expires));
+        }
+        self.receipt("auth.signin", "ALLOW", &actor, "signed in");
+        Ok(json!({"token": token, "expires_in_s": hours * 3600, "name": actor.name(), "role": actor.role()}))
+    }
+
+    /// End a session at once.
+    pub fn sign_out(&self, token: &str) -> bool {
+        let gone = self.sessions.lock().unwrap().remove(token);
+        if let Some((a, _)) = &gone {
+            self.receipt("auth.signout", "ALLOW", a, "signed out");
+        }
+        gone.is_some()
+    }
+
     /// Keep an OSC input so its counters can be shown.
     pub fn add_input(&self, input: Arc<dyn inputs::InputInfo>) {
         self.inputs.lock().unwrap().push(input);
@@ -337,11 +432,19 @@ impl Show {
     /// agent whatever key it holds; a roster key gives that person's name and role (their own label is ignored);
     /// the operator key gives an operator; with nothing valid, a locked show sees nobody and an open show a person.
     pub fn identify(&self, key: Option<&str>, declared: Actor) -> Actor {
+        self.identify_with(None, key, declared)
+    }
+
+    /// As `identify`, but a live session token (from `sign_in`) counts first: it is the person who signed in.
+    pub fn identify_with(&self, session: Option<&str>, key: Option<&str>, declared: Actor) -> Actor {
         if declared.is_agent() {
             return declared;
         }
+        if let Some(a) = session.and_then(|t| self.session_actor(t)) {
+            return a;
+        }
         if let Some(k) = key {
-            if let Some(found) = self.roster.lock().unwrap().find(k) {
+            if let Ok(Some(found)) = self.roster.lock().unwrap().find_at(k, now_ms()) {
                 return found;
             }
             if self.edit_key.lock().unwrap().as_deref() == Some(k) {
@@ -406,6 +509,7 @@ impl Show {
             "inputs": self.inputs_json(),
             "timecode": self.timecode_json(),
             "captures": Value::Array(self.captures.lock().unwrap().iter().cloned().collect()),
+            "polls": self.polls_json(),
             "resumed": self.resumed.lock().unwrap().clone(),
             "undo_depth": self.history.lock().unwrap().len(),
             "governed": self.gov.log.get().is_some(),
@@ -838,7 +942,7 @@ impl Show {
         };
         let action = Action::new(kind, json!({ field: value }));
         let sent_as: Vec<Value> = output::wire_lines(&dev, &action)?.into_iter().map(|(a, args)| json!({"address": a, "args": args})).collect();
-        let packets = if dev.is_dmx() { Vec::new() } else { output::packets_for(&dev, &action)? };
+        let packets = if dev.is_direct() { Vec::new() } else { output::packets_for(&dev, &action)? };
         let mut m = json!({"type": "delivery", "ts": now_ms(), "kind": kind, "lane": null, "cue": null, "device": dev.id, "label": dev.label, "dept": dev.dept, "target": dev.address(), "sent_as": sent_as, "manual": true});
         if dev.dept == "laser" && !out.is_armed(&dev.id) {
             m["status"] = json!("held");
@@ -847,7 +951,7 @@ impl Show {
             m["status"] = json!("dry-run");
             m["note"] = json!("sending is off: this is exactly what WOULD be sent");
         } else {
-            match if dev.is_dmx() { out.deliver(&dev, &action).await } else { out.send_packets(&dev, packets).await } {
+            match if dev.is_direct() { out.deliver(&dev, &action).await } else { out.send_packets(&dev, packets).await } {
                 Ok(_) => m["status"] = json!("sent"),
                 Err(e) => {
                     m["status"] = json!("failed");
@@ -904,6 +1008,115 @@ impl Show {
 
     pub fn captures_json(&self) -> Value {
         Value::Array(self.captures.lock().unwrap().iter().cloned().collect())
+    }
+
+    /// The token the audience's gateway votes with. Without one, voting is off. It opens `POST /vote` and nothing else.
+    pub fn set_audience_token(&self, t: Option<String>) {
+        *self.audience_token.lock().unwrap() = t.filter(|t| !t.is_empty());
+    }
+
+    pub fn audience_ok(&self, provided: Option<&str>) -> bool {
+        matches!(&*self.audience_token.lock().unwrap(), Some(t) if provided == Some(t.as_str()))
+    }
+
+    pub fn audience_enabled(&self) -> bool {
+        self.audience_token.lock().unwrap().is_some()
+    }
+
+    pub fn polls_json(&self) -> Value {
+        Value::Array(self.votes.lock().unwrap().all().iter().map(audience::tally_json).collect())
+    }
+
+    /// Put every poll's tally where the show can read it, as one object: `vote.<poll>.<option>`, `.total`, `.winner` (the option's key,
+    /// or ""), `.open`. A guard's dotted names walk into objects, so `vote.next.winner == "hype"` works.
+    fn publish_poll(&self, t: &audience::Tally) {
+        let mut all = serde_json::Map::new();
+        for p in self.votes.lock().unwrap().all() {
+            let mut o = serde_json::Map::new();
+            for (opt, n) in &p.counts {
+                o.insert(audience::key_of(opt), json!(n));
+            }
+            o.insert("total".into(), json!(p.total));
+            o.insert("winner".into(), json!(p.winner.as_deref().map(audience::key_of).unwrap_or_default()));
+            o.insert("open".into(), json!(p.open));
+            all.insert(p.id.clone(), Value::Object(o));
+        }
+        self.set_context("vote", Value::Object(all));
+        self.publish(audience::tally_json(t));
+    }
+
+    /// A person opens a poll.
+    pub fn poll_open(&self, actor: &Actor, id: &str, options: &[String]) -> Result<Value, String> {
+        let t = self.votes.lock().unwrap().open(id, options)?;
+        self.poll_pub.lock().unwrap().remove(id);
+        self.publish_poll(&t);
+        self.receipt("poll.open", "ALLOW", actor, &format!("opened poll '{id}' with {}", options.join(", ")));
+        Ok(audience::tally_json(&t))
+    }
+
+    /// A person closes it: the result stays in the context for the show to read.
+    pub fn poll_close(&self, actor: &Actor, id: &str) -> Result<Value, String> {
+        let t = self.votes.lock().unwrap().close(id)?;
+        self.poll_pub.lock().unwrap().remove(id);
+        self.publish_poll(&t);
+        let said = t.counts.iter().map(|(o, n)| format!("{o} {n}")).collect::<Vec<_>>().join(", ");
+        {
+            let g = self.inner.lock().unwrap();
+            let show_id = g.engine.chart.id.clone().unwrap_or_else(|| "show".into());
+            let _ = g.store.append(now_ms(), "runtime", Some(&show_id), "show.poll", &json!({"poll": id, "total": t.total, "winner": t.winner, "counts": said}));
+        }
+        self.receipt("poll.close", "ALLOW", actor, &format!("closed poll '{id}': {said}; {}", t.winner.as_deref().map_or("no winner".to_string(), |w| format!("winner {w}"))));
+        Ok(audience::tally_json(&t))
+    }
+
+    /// One audience vote, from the gateway. Votes are counted at once but put into the show's context at most four times a second.
+    pub fn cast_vote(self: &Arc<Self>, poll: &str, option: &str, voter: &str) -> Result<Value, (u16, String)> {
+        {
+            let now = now_ms();
+            let mut w = self.vote_window.lock().unwrap();
+            if now - w.0 >= 1000 {
+                *w = (now, 0);
+            }
+            w.1 += 1;
+            if w.1 > 300 {
+                return Err((429, "too many votes a second: slow down".into()));
+            }
+        }
+        let t = self.votes.lock().unwrap().vote(poll, option, voter).map_err(|e| (if e.contains("no poll") { 404 } else if e.contains("closed") { 409 } else { 400 }, e))?;
+        let now = now_ms();
+        let wait = {
+            let mut m = self.poll_pub.lock().unwrap();
+            let e = m.entry(poll.to_string()).or_insert((0, false));
+            if now - e.0 >= 250 {
+                e.0 = now;
+                Some(0)
+            } else if !e.1 {
+                e.1 = true;
+                Some(250 - (now - e.0))
+            } else {
+                None
+            }
+        };
+        match wait {
+            Some(0) => self.publish_poll(&t),
+            Some(ms) => {
+                let show = Arc::clone(self);
+                let id = poll.to_string();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(ms as u64)).await;
+                    if let Some(e) = show.poll_pub.lock().unwrap().get_mut(&id) {
+                        e.0 = now_ms();
+                        e.1 = false;
+                    }
+                    let latest = show.votes.lock().unwrap().tally(&id);
+                    if let Some(t) = latest {
+                        show.publish_poll(&t);
+                    }
+                });
+            }
+            None => {}
+        }
+        Ok(json!({"ok": true, "total": t.total}))
     }
 
     /// What the timecode is doing, for clients: {state: none|running|stopped, position, fps, source, heard_ms_ago}.
@@ -1286,6 +1499,14 @@ pub fn router_with_token(show: Arc<Show>, token: Option<String>) -> Router {
             (StatusCode::OK, Json(a.show.preflight()))
         }))
         .route("/whoami", get(get_whoami))
+        .route("/signin", post(post_signin))
+        .route("/signout", post(post_signout))
+        .route("/vote", post(post_vote))
+        .route("/polls", get(|State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap| async move {
+            if !authorized(&a.token, &q, &h) { return (StatusCode::UNAUTHORIZED, Json(json!({"error": "token required"}))); }
+            (StatusCode::OK, Json(a.show.polls_json()))
+        }))
+        .route("/polls/:id/:verb", post(post_poll))
         .route("/fixtures", get(|State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap| async move {
             if !authorized(&a.token, &q, &h) { return (StatusCode::UNAUTHORIZED, Json(json!({"error": "token required"}))); }
             (StatusCode::OK, Json(fixtures::summary()))
@@ -1332,7 +1553,31 @@ fn actor_of(q: &HashMap<String, String>, h: &HeaderMap) -> Actor {
 
 /// Who is really asking: the roster person or operator the key belongs to, an agent, or nobody.
 fn who(a: &App, q: &HashMap<String, String>, h: &HeaderMap) -> Actor {
-    a.show.identify(edit_key_of(q, h), actor_of(q, h))
+    a.show.identify_with(session_of(q, h), edit_key_of(q, h), actor_of(q, h))
+}
+
+/// The session token, from `X-Pchi-Session` or `?session=` (a WebSocket cannot set headers).
+fn session_of<'a>(q: &'a HashMap<String, String>, h: &'a HeaderMap) -> Option<&'a str> {
+    h.get("x-pchi-session").and_then(|v| v.to_str().ok()).or_else(|| q.get("session").map(String::as_str))
+}
+
+/// `POST /signin` {"key": "..."}: trade a key for a session token (see `Show::sign_in`). `POST /signout` ends it.
+async fn post_signin(State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap, Json(body): Json<Value>) -> impl IntoResponse {
+    if !authorized(&a.token, &q, &h) {
+        return unauthorized();
+    }
+    match a.show.sign_in(body["key"].as_str().unwrap_or("")) {
+        Ok(v) => (StatusCode::OK, Json(v)),
+        Err((code, e)) => (StatusCode::from_u16(code).unwrap_or(StatusCode::FORBIDDEN), Json(json!({"error": e}))),
+    }
+}
+
+async fn post_signout(State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap) -> impl IntoResponse {
+    if !authorized(&a.token, &q, &h) {
+        return unauthorized();
+    }
+    let ended = session_of(&q, &h).is_some_and(|t| a.show.sign_out(t));
+    (StatusCode::OK, Json(json!({"signed_out": ended})))
 }
 
 /// Refuse, and write the refusal down. Says why in the words the person needs.
@@ -1530,6 +1775,50 @@ async fn post_rehearse(State(a): State<App>, q: Query<HashMap<String, String>>, 
     match a.show.rehearse(chart, devices) {
         Ok(v) => (StatusCode::OK, Json(v)),
         Err(e) => (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"error": e}))),
+    }
+}
+
+/// `POST /vote` {"poll", "option", "voter"}: one audience vote. Needs the audience token (`--audience-token`), which opens this and
+/// nothing else, so it is not the feed token and does not need one.
+async fn post_vote(State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap, Json(body): Json<Value>) -> impl IntoResponse {
+    if !a.show.audience_enabled() {
+        return (StatusCode::FORBIDDEN, Json(json!({"error": "audience voting is not turned on: start the runtime with --audience-token"})));
+    }
+    let bearer = h.get("authorization").and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer "));
+    let token = h.get("x-pchi-audience").and_then(|v| v.to_str().ok()).or(bearer).or_else(|| q.get("token").map(String::as_str));
+    if !a.show.audience_ok(token) {
+        return (StatusCode::FORBIDDEN, Json(json!({"error": "the audience token is wrong"})));
+    }
+    let (poll, option, voter) = (body["poll"].as_str().unwrap_or(""), body["option"].as_str().unwrap_or(""), body["voter"].as_str().unwrap_or(""));
+    match a.show.cast_vote(poll, option, voter) {
+        Ok(v) => (StatusCode::OK, Json(v)),
+        Err((code, e)) => (StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST), Json(json!({"error": e}))),
+    }
+}
+
+/// `POST /polls/<id>/open` {"options": [...]} and `POST /polls/<id>/close`: a person (or a button) with the right to run the show.
+async fn post_poll(State(a): State<App>, Path((id, verb)): Path<(String, String)>, q: Query<HashMap<String, String>>, h: HeaderMap, body: String) -> impl IntoResponse {
+    if !authorized(&a.token, &q, &h) {
+        return unauthorized();
+    }
+    let actor = who(&a, &q, &h);
+    let (rule, what) = match verb.as_str() {
+        "open" => ("poll.open", "open an audience poll"),
+        "close" => ("poll.close", "close an audience poll"),
+        _ => return (StatusCode::NOT_FOUND, Json(json!({"error": "use open or close"}))),
+    };
+    if let Err(r) = gate(&a, &actor, Perm::Go, rule, what, None) {
+        return r;
+    }
+    let result = if verb == "open" {
+        let options: Vec<String> = serde_json::from_str::<Value>(&body).ok().and_then(|v| v["options"].as_array().map(|o| o.iter().filter_map(|x| x.as_str().map(String::from)).collect())).unwrap_or_default();
+        a.show.poll_open(&actor, &id, &options)
+    } else {
+        a.show.poll_close(&actor, &id)
+    };
+    match result {
+        Ok(v) => (StatusCode::OK, Json(v)),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"error": e}))),
     }
 }
 
@@ -1836,7 +2125,7 @@ mod tests {
     }
 
     fn device(id: &str, kind: &str, port: u16) -> rig::Device {
-        rig::Device { id: id.into(), label: id.into(), kind: kind.into(), dept: rig::dept_of_type(kind).unwrap().into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None, profile: None, universe: None, patch: None }
+        rig::Device { id: id.into(), label: id.into(), kind: kind.into(), dept: rig::dept_of_type(kind).unwrap().into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None, profile: None, universe: None, patch: None, password: None }
     }
 
     fn deliveries(rx: &mut broadcast::Receiver<Value>) -> Vec<Value> {
@@ -3486,7 +3775,7 @@ mod tests {
     // ---- DMX over the network: a lighting cue becomes Art-Net or sACN ----
 
     fn dmx_device(kind: &str, port: u16) -> rig::Device {
-        rig::Device { id: "d1".into(), label: "Rack".into(), kind: kind.into(), dept: "lighting".into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None, profile: None, universe: Some(if kind == "sacn" { 1 } else { 0 }), patch: None }
+        rig::Device { id: "d1".into(), label: "Rack".into(), kind: kind.into(), dept: "lighting".into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None, profile: None, universe: Some(if kind == "sacn" { 1 } else { 0 }), patch: None, password: None }
     }
 
     fn lit(look: &str) -> Showchart {
@@ -3626,5 +3915,444 @@ mod tests {
         assert_eq!(profiles::get("proven-tool").unwrap().rules[0].proven.as_deref(), Some("2026-11-20, v3.2 offline, Alex"));
         assert_eq!(profiles::summary().as_array().unwrap().iter().find(|p| p["id"] == "proven-tool").unwrap()["rules"][0]["proven"], "2026-11-20, v3.2 offline, Alex");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- LTC: timecode from audio ----
+
+    fn ltc_file(name: &str, first: timecode::Tc, frames: usize) -> std::path::PathBuf {
+        let audio = ltc::synth(first, frames, 48_000, 0.5, false, 1.0);
+        let bytes: Vec<u8> = audio.iter().flat_map(|s| ((s * 32767.0) as i16).to_le_bytes()).collect();
+        let path = std::env::temp_dir().join(format!("pchi-ltc-{name}-{}.raw", std::process::id()));
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn ltc_read_from_an_audio_file_drives_a_locked_scene() {
+        let path = ltc_file("scene", timecode::Tc::new(0, 0, 59, 20, Fps::F25).unwrap(), 70);
+        let show = Show::start(timecoded(), EventStore::open_in_memory().unwrap()).unwrap();
+        let mut rx = show.subscribe();
+        show.apply("studio", "START");
+        let spec: ltc::LtcSpec = serde_json::from_str(&format!(r#"{{"name":"Playback","file":{},"fps":25,"pace":false}}"#, serde_json::to_string(path.to_str().unwrap()).unwrap())).unwrap();
+        let input = ltc::start(&show, spec).unwrap();
+        let mut ids = Vec::new();
+        for _ in 0..60 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            ids.extend(cue_ids(&mut rx));
+            if ids.len() >= 3 {
+                break;
+            }
+        }
+        assert_eq!(ids, ["v1", "l1", "z1"], "the three INTRO cues fired as the LTC passed 00:01:00:00, :10 and :20");
+        let tc = show.snapshot()["timecode"].clone();
+        assert_eq!(tc["source"], "ltc", "{tc}");
+        assert_eq!(tc["fps"], "25");
+        let j = inputs::InputInfo::json(&*input);
+        assert!(j["received"].as_u64().unwrap() > 20, "{j}");
+        assert!(j["listen"].as_str().unwrap().starts_with("LTC file"), "{j}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn an_ltc_input_must_be_sound() {
+        let ok = |t: &str| ltc::check(&serde_json::from_str::<Vec<ltc::LtcSpec>>(t).unwrap());
+        assert!(ok(r#"[{"name":"A","stdin":true}]"#).is_ok());
+        assert!(ok(r#"[{"name":"A","file":"x.raw","channels":2,"channel":1,"format":"f32le","fps":29.97,"drop":true}]"#).is_ok());
+        assert!(ok(r#"[{"name":"A"}]"#).unwrap_err().contains("exactly one of stdin, file or device"));
+        assert!(ok(r#"[{"name":"A","stdin":true,"file":"x"}]"#).unwrap_err().contains("exactly one"));
+        assert!(ok(r#"[{"name":"A","stdin":true,"sample_rate":100}]"#).unwrap_err().contains("sample_rate"));
+        assert!(ok(r#"[{"name":"A","stdin":true,"format":"mp3"}]"#).unwrap_err().contains("format"));
+        assert!(ok(r#"[{"name":"A","stdin":true,"channels":1,"channel":1}]"#).unwrap_err().contains("channel 1 does not exist"));
+        assert!(ok(r#"[{"name":"A","stdin":true,"fps":12}]"#).unwrap_err().contains("fps 12"));
+        assert!(ok(r#"[{"name":"","stdin":true}]"#).unwrap_err().contains("short name"));
+        // a device in a build without audio support says how to get it, rather than failing silently
+        let show = Show::start(quick(), EventStore::open_in_memory().unwrap()).unwrap();
+        let spec: ltc::LtcSpec = serde_json::from_str(r#"{"name":"A","device":"Scarlett"}"#).unwrap();
+        if !cfg!(feature = "audio") {
+            let e = ltc::start(&show, spec).err().unwrap();
+            assert!(e.contains("--features audio") && e.contains("stdin or file"), "{e}");
+        }
+        let f = inputs::parse_file(r#"{"ltc":[{"name":"Playback","stdin":true}],"inputs":[{"name":"Deck","listen":"127.0.0.1:1","bindings":[{"address":"/a","event":"X"}]}]}"#).unwrap();
+        assert_eq!((f.ltc.len(), f.inputs.len()), (1, 1));
+        assert!(inputs::parse_file(r#"{"ltc":[{"name":"deck","stdin":true}],"inputs":[{"name":"Deck","listen":"127.0.0.1:1","bindings":[{"address":"/a","event":"X"}]}]}"#).is_err(), "names are unique across inputs");
+    }
+
+    // ---- OBS as a device: a cue cuts the picture ----
+
+    fn obs_device(port: u16) -> rig::Device {
+        rig::Device { id: "obs1".into(), label: "OBS".into(), kind: "obs".into(), dept: "visual".into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None, profile: None, universe: None, patch: None, password: None }
+    }
+
+    #[tokio::test]
+    async fn a_scene_cue_to_obs_switches_the_program_scene_and_the_link_is_watched() {
+        let (port, scenes) = obs::fake::fake_obs(None).await;
+        let mut c = quick();
+        c.states.iter_mut().find(|s| s.id == "INTRO").unwrap().timeline.as_mut().unwrap().lanes.iter_mut().find(|l| l.id == "visual").unwrap().cues[0].action.payload = json!({"scene": "Main Camera"});
+        let out = Output::new(vec![obs_device(port)], true);
+        let show = Show::start_with(c, EventStore::open_in_memory().unwrap(), Some(out)).unwrap();
+        let mut rx = show.subscribe();
+        show.apply("studio", "START");
+        let mut got = false;
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if scenes.lock().unwrap().contains(&"Main Camera".to_string()) {
+                got = true;
+                break;
+            }
+        }
+        assert!(got, "OBS was told to make Main Camera the program");
+        let sent: Vec<Value> = deliveries(&mut rx).into_iter().filter(|d| d["kind"] == "scene.activate").collect();
+        assert!(sent.iter().any(|d| d["status"] == "sent"), "{sent:?}");
+        // the connection is the link: OBS shows as linked in the show's own state
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        let dev = &show.snapshot()["devices"][0];
+        assert_eq!(dev["link"]["state"], "linked", "{dev}");
+        // the password is never in what clients are told
+        assert!(!show.snapshot().to_string().contains("hunter2"));
+    }
+
+    #[tokio::test]
+    async fn obs_cues_are_checked_before_the_show_and_try_a_cue_describes_them() {
+        let out = Output::new(vec![obs_device(9)], false);
+        let mut c = quick();
+        c.states.iter_mut().find(|s| s.id == "INTRO").unwrap().timeline.as_mut().unwrap().lanes.iter_mut().find(|l| l.id == "visual").unwrap().cues[0].action.payload = json!({"scene": "x".repeat(150)});
+        let show = Show::start_with(c, EventStore::open_in_memory().unwrap(), Some(out)).unwrap();
+        let fails: Vec<String> = show.preflight()["checks"].as_array().unwrap().iter().filter(|c| c["level"] == "fail").map(|c| c["text"].as_str().unwrap().to_string()).collect();
+        assert!(fails.iter().any(|t| t.contains("OBS") && t.contains("scene name is too long")), "{fails:?}");
+        let m = show.try_cue("obs1", "Slides").await.unwrap();
+        assert_eq!(m["status"], "dry-run");
+        assert_eq!(m["sent_as"][0]["args"][0], "Slides");
+        // a password in the rig file is read but never serialised
+        let file = r#"{"showchart": {"initial":"A","states":[{"id":"A"}],"transitions":[]},"nodes":[{"id":"o","type":"obs","params":{"host":"127.0.0.1","port":4455,"password":"hunter2"}}]}"#;
+        let devs = rig::load(file).unwrap().1.unwrap();
+        assert_eq!((devs[0].dept.as_str(), devs[0].password.as_deref()), ("visual", Some("hunter2")));
+        assert!(!serde_json::to_string(&devs[0]).unwrap().contains("hunter2"));
+    }
+
+    // ---- audience votes: the room decides ----
+
+    const AUD: &str = "X-Pchi-Audience: aud-token\r\n";
+
+    async fn vote(addr: std::net::SocketAddr, poll: &str, option: &str, voter: &str) -> (u16, Value) {
+        http(addr, "POST", "/vote", &json!({"poll": poll, "option": option, "voter": voter}).to_string(), AUD).await
+    }
+
+    #[tokio::test]
+    async fn the_audience_votes_and_the_show_waits_for_the_room() {
+        let (show, addr) = governed("votes").await;
+        // voting is off until there is a token, and a wrong token is refused
+        assert_eq!(vote(addr, "next", "hype", "ann").await.0, 403);
+        show.set_audience_token(Some("aud-token".into()));
+        assert_eq!(http(addr, "POST", "/vote", r#"{"poll":"next","option":"hype","voter":"ann"}"#, "X-Pchi-Audience: nope\r\n").await.0, 403);
+        assert_eq!(vote(addr, "next", "hype", "ann").await.0, 404, "no such poll yet");
+        // an agent cannot open a poll; a person can (the audience token opening nothing else is the next test)
+        let open = r#"{"options":["Calm","Hype"]}"#;
+        assert_eq!(http(addr, "POST", "/polls/next/open", open, &format!("{AGENT}{KEY}")).await.0, 403, "an agent may not run the show");
+        assert_eq!(http(addr, "POST", "/polls/next/open", open, KEY).await.0, 200);
+        // a transition that waits for the room
+        let mut c = quick();
+        c.transitions.iter_mut().find(|t| t.source == "INTRO" && t.target == "DROP").unwrap().guard = Some("vote.next.winner == \"hype\"".into());
+        show.replace(c, None, true).unwrap();
+        show.apply("studio", "START");
+        assert!(!show.apply("studio", "DROP"), "nobody has voted: the guard is not met");
+        // the votes come in
+        assert_eq!(vote(addr, "next", "hype", "ann").await.0, 200);
+        assert_eq!(vote(addr, "next", "CALM", "bob").await.0, 200);
+        assert_eq!(vote(addr, "next", "hype", "cy").await.0, 200);
+        assert_eq!(vote(addr, "next", "weird", "dee").await.0, 400, "not an option");
+        assert_eq!(http(addr, "POST", "/vote", r#"{"poll":"next","option":"hype"}"#, AUD).await.0, 400, "a vote needs a voter id");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let ctx = show.snapshot()["context"].clone();
+        let v = &ctx["vote"]["next"];
+        assert_eq!((v["hype"].clone(), v["calm"].clone(), v["total"].clone(), v["winner"].clone(), v["open"].clone()), (json!(2), json!(1), json!(3), json!("hype"), json!(true)), "{ctx}");
+        assert!(show.apply("studio", "DROP"), "the room chose hype, so the guard is met");
+        // closing it keeps the result and stops the votes
+        assert_eq!(http(addr, "POST", "/polls/next/close", "", KEY).await.0, 200);
+        assert_eq!(vote(addr, "next", "calm", "eve").await.0, 409);
+        assert_eq!(show.snapshot()["context"]["vote"]["next"]["open"], json!(false));
+        assert_eq!(show.snapshot()["polls"][0]["winner"], "Hype");
+        let r = receipts(&show);
+        assert!(r.iter().any(|(ru, g, m)| ru == "poll.open" && g == "ALLOW" && m.contains("opened poll 'next' with Calm, Hype")), "{r:?}");
+        assert!(r.iter().any(|(ru, _, m)| ru == "poll.close" && m.contains("Hype 2") && m.contains("winner Hype")), "{r:?}");
+        assert!(r.iter().any(|(ru, g, _)| ru == "poll.open" && g == "DENY"), "the refused openings were written down too");
+        assert!(show.events().iter().any(|e| e["type"] == "show.poll" && e["payload"]["winner"] == "Hype"));
+    }
+
+    #[tokio::test]
+    async fn the_audience_token_opens_voting_and_nothing_else() {
+        let (show, addr) = serve(Some("feed-token")).await;
+        show.set_audience_token(Some("aud-token".into()));
+        // as a feed token it gets nothing
+        assert_eq!(http(addr, "GET", "/state?token=aud-token", "", "").await.0, 401);
+        assert_eq!(http(addr, "GET", "/polls?token=aud-token", "", "").await.0, 401);
+        assert_eq!(http(addr, "POST", "/input?token=aud-token", r#"{"event":"START"}"#, "").await.0, 401);
+        assert_eq!(http(addr, "POST", "/polls/x/open?token=aud-token", r#"{"options":["a","b"]}"#, "").await.0, 401);
+        // and the feed token does not let anyone vote
+        assert_eq!(http(addr, "POST", "/vote?token=feed-token", r#"{"poll":"x","option":"a","voter":"v"}"#, "").await.0, 403);
+        show.poll_open(&Actor::Person(None), "x", &["a".into(), "b".into()]).unwrap();
+        assert_eq!(http(addr, "POST", "/vote?token=aud-token", r#"{"poll":"x","option":"a","voter":"v"}"#, "").await.0, 200);
+        assert_eq!(http(addr, "POST", "/vote", r#"{"poll":"x","option":"b","voter":"w"}"#, "Authorization: Bearer aud-token\r\n").await.0, 200, "a bearer header works too");
+    }
+
+    #[tokio::test]
+    async fn a_flood_of_votes_is_capped() {
+        let show = Show::start(quick(), EventStore::open_in_memory().unwrap()).unwrap();
+        show.set_audience_token(Some("aud-token".into()));
+        show.poll_open(&Actor::Person(None), "p", &["a".into(), "b".into()]).unwrap();
+        let mut refused = 0;
+        for i in 0..400 {
+            if let Err((code, _)) = show.cast_vote("p", "a", &format!("v{i}")) {
+                assert_eq!(code, 429);
+                refused += 1;
+            }
+        }
+        assert!(refused >= 90, "more than 300 a second are refused: {refused}");
+        // the context was not written 300 times: it is throttled
+        let writes = show.events().iter().filter(|e| e["type"] == "show.context").count();
+        assert!(writes < 60, "{writes} context writes for 300 votes");
+    }
+
+    // ---- safer secrets: hashed keys, end dates, sessions ----
+
+    fn hashed_roster(iters: u32) -> (String, Vec<(String, String)>) {
+        let people = [("Alex", "operator"), ("Eddie", "editor"), ("Gus", "guest")];
+        let mut keys = Vec::new();
+        let mut entries = Vec::new();
+        for (n, r) in people {
+            let (key, entry) = governance::new_entry(n, r, iters).unwrap();
+            keys.push((n.to_string(), key));
+            entries.push(entry);
+        }
+        (json!({"people": entries}).to_string(), keys)
+    }
+
+    #[test]
+    fn pbkdf2_is_the_standard_one_and_a_made_entry_holds_no_key() {
+        // a published PBKDF2-HMAC-SHA256 test vector: password "password", salt "salt", 1 iteration
+        assert_eq!(hex::encode(governance::pbkdf2_key("password", b"salt", 1)), "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b");
+        let (k1, e1) = governance::new_entry("Alex", "operator", 1000).unwrap();
+        let (k2, _) = governance::new_entry("Alex", "operator", 1000).unwrap();
+        assert_ne!(k1, k2, "every key is fresh");
+        assert_eq!(k1.len(), 40);
+        assert!(!e1.to_string().contains(&k1), "the entry must not contain the key it was made for");
+        assert!(e1["key_hash"].as_str().unwrap().len() == 64 && e1["salt"].as_str().unwrap().len() == 32);
+        let roster = governance::Roster::parse(&json!([e1]).to_string()).unwrap();
+        assert!(matches!(roster.find(&k1), Some(Actor::Member { .. })));
+        assert!(roster.find(&k2).is_none() && roster.find("not the key").is_none());
+        assert_eq!(roster.plaintext_count(), 0);
+        assert!(governance::new_entry("", "operator", 1000).is_err() && governance::new_entry("A", "boss", 1000).is_err());
+    }
+
+    #[test]
+    fn a_roster_entry_is_one_kind_of_credential_and_may_have_an_end_date() {
+        let (_, e) = governance::new_entry("Alex", "operator", 1000).unwrap();
+        let err = |v: Value| governance::Roster::parse(&json!([v]).to_string()).err().unwrap_or_default();
+        let mut both = e.clone();
+        both["key"] = json!("12345678");
+        assert!(err(both).contains("either"), "key and key_hash together");
+        let mut neither = e.clone();
+        neither.as_object_mut().unwrap().remove("key_hash");
+        assert!(err(neither).contains("either"));
+        let mut weak = e.clone();
+        weak["iterations"] = json!(5);
+        assert!(err(weak).contains("iterations from 1000"));
+        let mut badsalt = e.clone();
+        badsalt["salt"] = json!("zz");
+        assert!(err(badsalt).contains("salt must be hex"));
+        let mut when = e.clone();
+        when["expires"] = json!("next tuesday");
+        assert!(err(when).contains("write 2026-12-31"));
+        assert_eq!(governance::governance_plain_count_for(r#"[{"name":"A","role":"guest","key":"12345678"}]"#), 1);
+        // end dates are read as UTC: a date means the end of that day, a time is the time
+        assert_eq!(governance::parse_expiry("2000-01-01").unwrap(), (10_957 * 86_400 + 86_399) * 1000);
+        assert_eq!(governance::parse_expiry("2000-01-01T01:30").unwrap(), (10_957 * 86_400 + 5_400) * 1000);
+        assert_eq!(gearcheck::date_of_ms(governance::parse_expiry("2026-12-31").unwrap()), "2026-12-31");
+        assert!(governance::parse_expiry("2026-13-01").is_err() && governance::parse_expiry("2026-01-01T25:00").is_err());
+    }
+
+    #[test]
+    fn a_key_stops_working_after_its_end_date_and_says_why() {
+        let (key, mut e) = governance::new_entry("Temp", "editor", 1000).unwrap();
+        e["expires"] = json!("2026-12-31T18:00");
+        let roster = governance::Roster::parse(&json!([e]).to_string()).unwrap();
+        let end = governance::parse_expiry("2026-12-31T18:00").unwrap();
+        assert!(matches!(roster.find_at(&key, end - 1), Ok(Some(_))), "before the end it works");
+        assert!(matches!(roster.find_at(&key, end), Ok(Some(_))), "at the end it still works");
+        let e = roster.find_at(&key, end + 1).unwrap_err();
+        assert!(e.contains("Temp") && e.contains("expired"), "{e}");
+        assert!(matches!(roster.find_at("other", end + 1), Ok(None)), "an unknown key is just unknown");
+        assert_eq!(roster.expiring().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn signing_in_trades_a_key_for_a_session_and_the_key_is_never_kept() {
+        let (roster, keys) = hashed_roster(1000);
+        let key_of = |n: &str| keys.iter().find(|k| k.0 == n).unwrap().1.clone();
+        let (show, addr) = governed("session").await;
+        show.set_edit_key(None);
+        show.set_roster(governance::Roster::parse(&roster).unwrap());
+        // a wrong key is refused and written down
+        let (st, v) = http(addr, "POST", "/signin", r#"{"key":"wrong-key"}"#, "").await;
+        assert_eq!((st, v["error"].clone()), (403, json!("that key is not known")));
+        // the right key gives a token
+        let (st, v) = http(addr, "POST", "/signin", &json!({"key": key_of("Alex")}).to_string(), "").await;
+        assert_eq!((st, v["name"].clone(), v["role"].clone(), v["expires_in_s"].clone()), (200, json!("Alex (operator)"), json!("operator"), json!(8 * 3600)), "{v}");
+        let token = v["token"].as_str().unwrap().to_string();
+        assert_eq!(token.len(), 48);
+        // from then on the token is who they are: no key needed
+        let hdr = format!("X-Pchi-Session: {token}\r\n");
+        let (_, w) = http(addr, "GET", "/whoami", "", &hdr).await;
+        assert_eq!((w["name"].clone(), w["signed_in"].clone()), (json!("Alex (operator)"), json!(true)));
+        assert_eq!(http(addr, "GET", &format!("/whoami?session={token}"), "", "").await.1["name"], "Alex (operator)", "a query works too, for a WebSocket");
+        assert_eq!(http(addr, "POST", "/input", r#"{"event":"START"}"#, &hdr).await.0, 200);
+        assert_eq!(http(addr, "GET", "/whoami", "", "X-Pchi-Session: made-up\r\n").await.1["signed_in"], false, "a token nobody gave out is nobody");
+        // a guest's session may look and nothing more
+        let g = http(addr, "POST", "/signin", &json!({"key": key_of("Gus")}).to_string(), "").await.1;
+        let ghdr = format!("X-Pchi-Session: {}\r\n", g["token"].as_str().unwrap());
+        assert_eq!(http(addr, "POST", "/input", r#"{"event":"DROP"}"#, &ghdr).await.0, 403);
+        // signing out ends it at once
+        assert_eq!(http(addr, "POST", "/signout", "", &hdr).await.1["signed_out"], true);
+        assert_eq!(http(addr, "GET", "/whoami", "", &hdr).await.1["signed_in"], false);
+        // an agent does not sign in
+        let (agent_key, agent_entry) = governance::new_entry("Nova", "agent", 1000).unwrap();
+        show.set_roster(governance::Roster::parse(&json!([agent_entry]).to_string()).unwrap());
+        assert_eq!(http(addr, "POST", "/signin", &json!({"key": agent_key}).to_string(), "").await.0, 403);
+        // none of the keys is anywhere in the record
+        let everything = format!("{} {}", show.governance_export(), serde_json::to_string(&show.events()).unwrap());
+        for (_, k) in &keys {
+            assert!(!everything.contains(k.as_str()), "a key was written down");
+        }
+        assert!(everything.contains("auth.signin") && everything.contains("sign-in refused: that key is not known"));
+    }
+
+    #[tokio::test]
+    async fn a_session_ends_when_its_time_is_up_and_wrong_keys_are_throttled() {
+        let (roster, keys) = hashed_roster(1000);
+        let show = Show::start(quick(), EventStore::open_in_memory().unwrap()).unwrap();
+        show.set_roster(governance::Roster::parse(&roster).unwrap());
+        let token = show.sign_in(&keys[0].1).unwrap()["token"].as_str().unwrap().to_string();
+        assert!(matches!(show.identify_with(Some(&token), None, Actor::Person(None)), Actor::Member { .. }));
+        // its time up: it is gone, and the sweep removes it
+        show.sessions.lock().unwrap().get_mut(&token).unwrap().1 = now_ms() - 1;
+        assert_eq!(show.identify_with(Some(&token), None, Actor::Person(None)), Actor::Anonymous);
+        assert!(show.sessions.lock().unwrap().is_empty());
+        // a declared agent stays an agent whatever session it holds
+        let live = show.sign_in(&keys[0].1).unwrap()["token"].as_str().unwrap().to_string();
+        assert!(show.identify_with(Some(&live), None, Actor::Agent("x".into())).is_agent());
+        // ten wrong keys in a minute and sign-in waits, even for the right key
+        for _ in 0..10 {
+            assert_eq!(show.sign_in("nope").unwrap_err().0, 403);
+        }
+        let (code, why) = show.sign_in(&keys[0].1).unwrap_err();
+        assert_eq!(code, 429, "{why}");
+        // a key with a past end date is refused with the reason
+        let (k, mut e) = governance::new_entry("Old", "operator", 1000).unwrap();
+        e["expires"] = json!("2001-01-01");
+        let show = Show::start(quick(), EventStore::open_in_memory().unwrap()).unwrap();
+        show.set_roster(governance::Roster::parse(&json!([e]).to_string()).unwrap());
+        assert!(show.sign_in(&k).unwrap_err().1.contains("has expired"));
+        assert_eq!(show.identify(Some(&k), Actor::Person(None)), Actor::Anonymous, "an expired key does not work as a header either");
+    }
+
+    // ---- the MCP server: an agent reads, rehearses and proposes ----
+
+    async fn rpc(c: &mcp::Client, method: &str, params: Value) -> Value {
+        let line = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).to_string();
+        serde_json::from_str(&c.handle(&line).await.expect("a request is answered")).unwrap()
+    }
+
+    fn tool_text(r: &Value) -> (bool, String) {
+        (r["result"]["isError"].as_bool().unwrap_or(false), r["result"]["content"][0]["text"].as_str().unwrap_or("").to_string())
+    }
+
+    #[tokio::test]
+    async fn the_mcp_server_speaks_the_protocol_and_offers_only_what_an_agent_may_do() {
+        let c = mcp::Client { addr: "127.0.0.1:1".into(), name: "nova".into(), token: None, key: None };
+        let init = rpc(&c, "initialize", json!({"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}})).await;
+        assert_eq!((init["result"]["protocolVersion"].clone(), init["result"]["serverInfo"]["name"].clone()), (json!("2024-11-05"), json!("pchi")));
+        assert!(init["result"]["capabilities"]["tools"].is_object());
+        assert_eq!(rpc(&c, "initialize", json!({"protocolVersion": "1999-01-01"})).await["result"]["protocolVersion"], "2025-06-18", "an unknown version is answered with one we speak");
+        assert!(c.handle(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}).to_string()).await.is_none(), "a notification gets no answer");
+        assert_eq!(rpc(&c, "ping", json!({})).await["result"], json!({}));
+        assert_eq!(rpc(&c, "resources/list", json!({})).await["error"]["code"], -32601);
+        assert_eq!(serde_json::from_str::<Value>(&c.handle("not json").await.unwrap()).unwrap()["error"]["code"], -32700);
+        let tools = rpc(&c, "tools/list", json!({})).await["result"]["tools"].clone();
+        let names: Vec<&str> = tools.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        for want in ["pchi_state", "pchi_show", "pchi_doors_check", "pchi_rehearse", "pchi_propose", "pchi_propose_cue_change", "pchi_proposals", "pchi_report", "pchi_stop_lasers"] {
+            assert!(names.contains(&want), "{want} is offered");
+        }
+        for t in tools.as_array().unwrap() {
+            assert!(t["description"].as_str().unwrap().len() > 30 && t["inputSchema"]["type"] == "object", "{t}");
+            let n = t["name"].as_str().unwrap();
+            for never in ["go", "arm", "approve", "reject", "undo", "try", "test", "input", "poll", "reset"] {
+                assert!(!n.contains(never) || n == "pchi_proposals" || n == "pchi_report" || n.contains("propose"), "{n} should not exist: an agent cannot {never}");
+            }
+        }
+        // asking for what is not offered is a clear failure, not a surprise
+        let (bad, text) = tool_text(&rpc(&c, "tools/call", json!({"name": "pchi_go", "arguments": {}})).await);
+        assert!(bad && text.contains("cannot press GO, arm, approve or edit directly"), "{text}");
+        // and a runtime that is not there is said plainly
+        let (bad, text) = tool_text(&rpc(&c, "tools/call", json!({"name": "pchi_state", "arguments": {}})).await);
+        assert!(bad && text.contains("cannot reach the PCHI runtime"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn an_agent_looks_rehearses_and_proposes_and_a_person_decides() {
+        let (show, addr) = governed("mcp").await;
+        let c = mcp::Client { addr: addr.to_string(), name: "nova".into(), token: None, key: None };
+        let call = |name: &'static str, args: Value| {
+            let c = &c;
+            async move { tool_text(&rpc(c, "tools/call", json!({"name": name, "arguments": args})).await) }
+        };
+        let (bad, text) = call("pchi_state", json!({})).await;
+        assert!(!bad && text.contains("\"scene\": \"PRESHOW\""), "{text}");
+        let (_, def) = call("pchi_show", json!({})).await;
+        assert!(serde_json::from_str::<Value>(&def).unwrap()["states"].is_array());
+        let (bad, doors) = call("pchi_doors_check", json!({})).await;
+        assert!(!bad && doors.contains("\"summary\""), "{doors}");
+        show.apply("studio", "START");
+        tokio::time::sleep(Duration::from_millis(700)).await;
+
+        // a dry run reports what would change and how it would have played, and proposes nothing
+        let change = json!({"scene": "INTRO", "lane": "lighting", "cue": "l1", "at_ms": 60_000, "said": "bring the lights in much later"});
+        let mut dry = change.clone();
+        dry["dry_run"] = json!(true);
+        let (bad, text) = call("pchi_propose_cue_change", dry).await;
+        let v: Value = serde_json::from_str(&text).unwrap();
+        assert!(!bad && v["dry_run"] == true && v["changes"][0].as_str().unwrap().contains("moved"), "{text}");
+        assert!(v["rehearsal"]["differences"].as_array().unwrap().iter().any(|l| l.as_str().unwrap().contains("would NOT fire")), "{text}");
+        assert_eq!(show.snapshot()["proposals"].as_array().unwrap().len(), 0, "a dry run proposes nothing");
+
+        // without a reason it is refused; with one it is only a proposal
+        let mut nowhy = change.clone();
+        nowhy["said"] = json!("");
+        assert!(call("pchi_propose_cue_change", nowhy).await.0);
+        assert!(call("pchi_propose_cue_change", json!({"scene": "INTRO", "lane": "lighting", "cue": "nope", "at_ms": 1, "said": "x"})).await.1.contains("there is no cue 'nope'"));
+        assert!(call("pchi_propose_cue_change", json!({"scene": "INTRO", "lane": "lighting", "cue": "l1", "said": "x"})).await.1.contains("change something"));
+        let before = show.snapshot()["definition"].clone();
+        let (bad, text) = call("pchi_propose_cue_change", change).await;
+        let v: Value = serde_json::from_str(&text).unwrap();
+        assert!(!bad && v["proposed"] == true && v["id"] == 1 && v["next"].as_str().unwrap().contains("changes nothing until then"), "{text}");
+        assert_eq!(show.snapshot()["definition"], before, "the agent changed nothing");
+        let (_, list) = call("pchi_proposals", json!({})).await;
+        assert!(list.contains("agent:nova") && list.contains("bring the lights in much later") && list.contains("pending"), "{list}");
+
+        // the whole-show tools work too, and a bad show is the runtime's refusal in words
+        let mut edited: Value = serde_json::from_str(&def).unwrap();
+        edited["states"][2]["label"] = json!("Renamed for the test");
+        let (bad, text) = call("pchi_rehearse", json!({"show": edited.clone()})).await;
+        assert!(!bad && text.contains("verdict"), "{text}");
+        assert!(call("pchi_propose", json!({"show": {"nonsense": true}, "said": "x"})).await.0);
+        assert!(call("pchi_propose", json!({"show": edited})).await.1.contains("say why"));
+
+        // a person approves it: only then does the show change
+        assert_eq!(http(addr, "POST", "/proposals/1/approve", "", KEY).await.0, 200);
+        assert_ne!(show.snapshot()["definition"], before);
+        let (_, report) = call("pchi_report", json!({})).await;
+        assert!(report.contains("agent:nova") && report.contains("proposed edit #1") && report.contains("said"), "{report}");
+        // the hard stop is open to it, because it only makes things safer
+        let (bad, text) = call("pchi_stop_lasers", json!({})).await;
+        assert!(!bad && text.contains("stopped"), "{text}");
+        assert!(receipts(&show).iter().any(|(ru, g, m)| ru == "laser.stop" && g == "ALLOW" && m.contains("agent:nova")));
     }
 }

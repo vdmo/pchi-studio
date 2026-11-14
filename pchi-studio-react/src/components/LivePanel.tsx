@@ -6,7 +6,7 @@ import CommandBar from './CommandBar'
 import TimelineStrip, { useStripLayout } from './TimelineStrip'
 import { sceneInfo } from './sceneInfo'
 import LiveCallSheet from './LiveCallSheet'
-import RuntimeTools, { armLaser, decideProposal, getInputs, signIn, signOut, stopLasers, testFire, tryCue, whoami, type OscInput, type WhoAmI } from './RuntimeTools'
+import RuntimeTools, { armLaser, decideProposal, getInputs, pollAction, signIn, signOut, stopLasers, testFire, tryCue, whoami, type OscInput, type Poll, type WhoAmI } from './RuntimeTools'
 import { STALE_MS, feedUrl, type Ready } from './liveFeed'
 import { fmt } from './TimelineStrip'
 import {
@@ -113,6 +113,10 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile, onAddCa
   const [undoDepth, setUndoDepth] = useState(0) // sends that can still be undone
   const [proposals, setProposals] = useState<{ id: number; actor: string; status: string; changes: string[]; notes: string[]; said?: string; rehearsal?: { different: boolean; verdict: string; lines: string[] } | null }[]>([]) // edits an agent proposed
   const [governed, setGoverned] = useState(false) // the runtime writes signed receipts
+  const [polls, setPolls] = useState<Poll[]>([]) // audience polls
+  const [pollName, setPollName] = useState('next')
+  const [pollOptions, setPollOptions] = useState('')
+  const [pollErr, setPollErr] = useState('')
   const [captures, setCaptures] = useState<Capture[]>([]) // cues the tools fired themselves
   const [gone, setGone] = useState<Set<number>>(new Set()) // captures added or dismissed
   const [capNote, setCapNote] = useState('')
@@ -166,6 +170,7 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile, onAddCa
             setOscIn(Array.isArray(msg.inputs) ? (msg.inputs as OscInput[]) : [])
             setTc((msg.timecode as typeof tc) ?? null)
             setCaptures(Array.isArray(msg.captures) ? (msg.captures as Capture[]) : [])
+            setPolls(Array.isArray(msg.polls) ? (msg.polls as Poll[]) : [])
             setProposals(Array.isArray(msg.proposals) ? (msg.proposals as typeof proposals) : [])
             setDef(msg.definition as Showchart)
             setState(String(msg.state))
@@ -215,6 +220,11 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile, onAddCa
           case 'proposal': {
             const p = msg.proposal as (typeof proposals)[number] | null
             if (p) setProposals((ps) => [...ps.filter((x) => x.id !== p.id), p].sort((a, b) => a.id - b.id))
+            break
+          }
+          case 'poll': {
+            const p = msg as unknown as Poll
+            setPolls((ps) => [...ps.filter((x) => x.id !== p.id), p].sort((a, b) => a.id.localeCompare(b.id)))
             break
           }
           case 'capture':
@@ -597,7 +607,7 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile, onAddCa
               <>
                 Signed in as <b>{me.name}</b>
                 {me.can.length ? ' · may ' + me.can.join(', ') : ' · look only'}{' '}
-                <button className="ghost" onClick={() => { signOut(); setMe(null); setAuthTick((t) => t + 1) }}>Sign out</button>
+                <button className="ghost" onClick={async () => { await signOut(); setMe(null); setAuthTick((t) => t + 1) }}>Sign out</button>
               </>
             ) : (
               <>
@@ -618,6 +628,42 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile, onAddCa
             {signErr && <span role="alert"> {signErr}</span>}
           </p>
         )}
+        <section className="polls" aria-label="Audience polls">
+          <h4>Audience polls</h4>
+          {polls.map((p) => (
+            <div key={p.id} className="poll">
+              <span>
+                <b>{p.id}</b> · {p.open ? 'open' : 'closed'} · {p.total} vote{p.total === 1 ? '' : 's'} ·{' '}
+                {p.options.map((o) => `${o.option} ${o.votes}`).join(' · ')}
+                {p.winner ? <b> · leading: {p.winner}</b> : ' · no leader'}
+              </span>
+              {p.open && (
+                <button
+                  onClick={async () => {
+                    const r = await pollAction(p.id, 'close')
+                    setPollErr(r.ok ? '' : (r.error ?? 'Could not close it.'))
+                  }}
+                >
+                  Close
+                </button>
+              )}
+            </div>
+          ))}
+          <form
+            className="poll-open"
+            onSubmit={async (e) => {
+              e.preventDefault()
+              const r = await pollAction(pollName.trim(), 'open', pollOptions.split(',').map((x) => x.trim()).filter(Boolean))
+              setPollErr(r.ok ? '' : (r.error ?? 'Could not open it.'))
+            }}
+          >
+            <input value={pollName} onChange={(e) => setPollName(e.target.value)} aria-label="Poll name" placeholder="name" size={8} />
+            <input value={pollOptions} onChange={(e) => setPollOptions(e.target.value)} aria-label="Poll options" placeholder="options, separated by commas" />
+            <button type="submit" disabled={!pollName.trim() || pollOptions.split(',').filter((x) => x.trim()).length < 2}>Open a poll</button>
+          </form>
+          {pollErr && <p className="muted" role="alert">{pollErr}</p>}
+          <p className="muted">A guard can wait for the room: <code>vote.{pollName.trim() || 'next'}.winner == "…"</code></p>
+        </section>
         {onAddCapture && captures.filter((c) => !gone.has(c.id)).length > 0 && (
           <section className="captures" aria-label="Cues the tools fired">
             <h4>Fired on the tools</h4>

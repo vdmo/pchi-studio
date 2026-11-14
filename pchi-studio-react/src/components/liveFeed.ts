@@ -18,8 +18,17 @@ export const signedInKey = () => {
   }
 }
 
+/** The session token this tab got by signing in (the key itself is not kept). It lives in this tab only. */
+export const signedInSession = () => {
+  try {
+    return sessionStorage.getItem('pchi.session') ?? ''
+  } catch {
+    return ''
+  }
+}
+
 export const feedUrl = () => {
-  const params = [['token', feedToken()], ['edit_key', signedInKey()]].filter(([, v]) => v).map(([k, v]) => `${k}=${encodeURIComponent(v)}`)
+  const params = [['token', feedToken()], ['edit_key', signedInKey()], ['session', signedInSession()]].filter(([, v]) => v).map(([k, v]) => `${k}=${encodeURIComponent(v)}`)
   return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/ws${params.length ? '?' + params.join('&') : ''}`
 }
 

@@ -131,6 +131,15 @@ pub fn run(chart: &Showchart, output: Option<&Output>, readiness: &BTreeMap<Stri
                 *bad += 1;
                 return Some(("fail", format!("{what}: the value is blank (set it in the Cue sheet)."), Some(dev.id.clone())));
             }
+            if dev.kind == "obs" {
+                return match crate::obs::scene_of(action) {
+                    Err(e) => {
+                        *bad += 1;
+                        Some(("fail", format!("{what} to {}: {e}.", dev.label), Some(dev.id.clone())))
+                    }
+                    Ok(_) => None,
+                };
+            }
             if dev.is_dmx() {
                 return match crate::dmx::describe(dev, action) {
                     Err(e) => {
@@ -192,7 +201,7 @@ mod tests {
     use serde_json::json;
 
     fn dev(id: &str, kind: &str, host: &str, port: u16) -> Device {
-        Device { id: id.into(), label: id.into(), kind: kind.into(), dept: dept_of_type(kind).unwrap().into(), host: Some(host.into()), port: Some(port), listen_port: None, profile: None, universe: None, patch: None }
+        Device { id: id.into(), label: id.into(), kind: kind.into(), dept: dept_of_type(kind).unwrap().into(), host: Some(host.into()), port: Some(port), listen_port: None, profile: None, universe: None, patch: None, password: None }
     }
     fn chart(cue_value: &str) -> Showchart {
         Showchart::from_json(&format!(

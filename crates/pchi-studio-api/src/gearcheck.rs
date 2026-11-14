@@ -122,7 +122,7 @@ async fn check_device(c: &mut dyn Console, out: &Output, dev: &Device, o: &Optio
     if dev.address().is_none() {
         return r.skip("no host and port in the rig");
     }
-    if !profiles::exists(dev.profile_key()) && !dev.is_dmx() {
+    if !profiles::exists(dev.profile_key()) && !dev.is_direct() {
         return r.skip("this type has no profile: it gets generic OSC, which only the tool's own manual can confirm");
     }
     // safety first
@@ -146,7 +146,7 @@ async fn check_device(c: &mut dyn Console, out: &Output, dev: &Device, o: &Optio
         }
     }
     let (kind, field, hint) = what_for(dev);
-    let hint = if dev.is_dmx() { "levels (for example 1=255 or 1-3=50%)" } else { hint };
+    let hint = if dev.is_dmx() { "levels (for example 1=255 or 1-3=50%)" } else if dev.kind == "obs" { "OBS scene (its exact name)" } else { hint };
     let value = c.ask(&format!("Which {hint} should it try? Pick a harmless one (Enter to skip):")).trim().to_string();
     if value.is_empty() {
         return r.skip("no value given");
@@ -161,7 +161,7 @@ async fn check_device(c: &mut dyn Console, out: &Output, dev: &Device, o: &Optio
             return r.finish();
         }
     };
-    let packets = if dev.is_dmx() { Vec::new() } else { output::packets_for(dev, &action).unwrap_or_default() };
+    let packets = if dev.is_direct() { Vec::new() } else { output::packets_for(dev, &action).unwrap_or_default() };
     r.sent = lines.iter().map(|(a, args)| if args.is_empty() { a.clone() } else { format!("{a} {}", args.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(" ")) }).collect();
     c.say("It will send exactly this:");
     for l in &r.sent {
@@ -173,7 +173,7 @@ async fn check_device(c: &mut dyn Console, out: &Output, dev: &Device, o: &Optio
     if dev.dept == "laser" {
         out.set_armed(&dev.id, true); // only inside this check: the real runtime always starts disarmed
     }
-    match if dev.is_dmx() { out.deliver(dev, &action).await } else { out.send_packets(dev, packets).await } {
+    match if dev.is_direct() { out.deliver(dev, &action).await } else { out.send_packets(dev, packets).await } {
         Ok(_) => c.say("Sent."),
         Err(e) => {
             c.say(&format!("Could not send: {e}"));
@@ -325,6 +325,12 @@ fn civil(days: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
+/// `2026-11-14` for a time in ms since the epoch (UTC).
+pub fn date_of_ms(ms: i64) -> String {
+    let (y, m, d) = civil(ms.div_euclid(86_400_000));
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
 pub fn today() -> String {
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
     let (y, m, d) = civil(secs.div_euclid(86_400));
@@ -343,6 +349,7 @@ pub fn doc_label(tool: &str) -> Option<&'static str> {
         "beyond" => "BEYOND",
         "artnet" => "Art-Net node / fixture",
         "sacn" => "sACN node / fixture",
+        "obs" => "OBS Studio",
         _ => return None,
     })
 }
@@ -453,7 +460,7 @@ mod tests {
     }
 
     fn dev(id: &str, kind: &str, port: u16) -> Device {
-        Device { id: id.into(), label: id.into(), kind: kind.into(), dept: dept_of_type(kind).unwrap().into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None, profile: None, universe: None, patch: None }
+        Device { id: id.into(), label: id.into(), kind: kind.into(), dept: dept_of_type(kind).unwrap().into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None, profile: None, universe: None, patch: None, password: None }
     }
 
     /// A pretend X32: answers /info to whoever asked, while `up` is true; records what it received.
@@ -564,7 +571,7 @@ mod tests {
     async fn a_dmx_output_is_checked_with_levels_and_ticked_when_the_fixture_reacts() {
         let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let port = sock.local_addr().unwrap().port();
-        let d = Device { id: "rack".into(), label: "Rack".into(), kind: "artnet".into(), dept: "lighting".into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None, profile: None, universe: Some(1), patch: None };
+        let d = Device { id: "rack".into(), label: "Rack".into(), kind: "artnet".into(), dept: "lighting".into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None, profile: None, universe: Some(1), patch: None, password: None };
         let out = Output::new(vec![d], true);
         let mut c = Script::new(&["", "1-3=100%", "y", "y"]);
         let r = run(&mut c, &out, &[], &fast()).await.remove(0);

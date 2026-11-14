@@ -15,7 +15,8 @@ use pchi_studio_api::{output::Output, rig, router_with_token, Show};
 #[command(version, about)]
 struct Cli {
     /// Show file: a Studio .pchi file (showchart + rig) or a bare showchart (.pchi.json).
-    file: String,
+    #[arg(required_unless_present_any = ["midi_ports", "audio_devices", "new_roster_entry"])]
+    file: Option<String>,
     /// Record to this SQLite file (default: in memory, lost on exit).
     #[arg(long)]
     db: Option<String>,
@@ -45,6 +46,21 @@ struct Cli {
     /// A folder of DMX fixture files (*.json) to add to the built-in ones: what each channel of a fixture means, so a cue can say wash1=blue. See docs/fixtures.md.
     #[arg(long, value_name = "DIR", env = "PCHI_FIXTURES")]
     fixtures: Option<String>,
+    /// List the audio input devices this machine has (needs a build with --features audio) and exit.
+    #[arg(long)]
+    audio_devices: bool,
+    /// Let an online audience vote: the token their gateway (a web page, a chat bot) sends with each vote to POST /vote. It opens that and nothing else, and must differ from --token. See docs/virtual-events.md.
+    #[arg(long, env = "PCHI_AUDIENCE_TOKEN")]
+    audience_token: Option<String>,
+    /// Where the receipt-signing key lives (default: next to the log in the --governance folder). Put it somewhere the show folder's readers cannot reach, and keep a copy of the verifying key (printed at startup) somewhere the runtime's machine cannot change.
+    #[arg(long, value_name = "FILE", env = "PCHI_GOVERNANCE_KEY")]
+    governance_key: Option<String>,
+    /// How long a signed-in session lasts, in hours (1 to 168). Default 8.
+    #[arg(long, default_value_t = 8)]
+    session_hours: u64,
+    /// Make a roster entry for NAME:ROLE with a fresh random key, print the key once (give it to the person) and the entry (paste it into the roster file: it holds only a salted hash), and exit. Roles: operator, editor, lso, guest, agent, button.
+    #[arg(long, value_name = "NAME:ROLE")]
+    new_roster_entry: Option<String>,
     /// Write a signed, hash-chained receipt for every decision (edits, arming, GO, refusals, proposals) into this folder, in the format scripts/verify_governance_chain.py checks offline. The folder keeps the signing key too: protect it like the show file.
     #[arg(long, env = "PCHI_GOVERNANCE")]
     governance: Option<String>,
@@ -59,6 +75,22 @@ struct Cli {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    if let Some(spec) = &cli.new_roster_entry {
+        let (name, role) = spec.split_once(':').ok_or_else(|| anyhow::anyhow!("write NAME:ROLE, for example Alex:operator"))?;
+        let (key, entry) = pchi_studio_api::governance::new_entry(name, &role.trim().to_ascii_lowercase(), 200_000).map_err(anyhow::Error::msg)?;
+        println!("Key for {name} (shown once: give it to them, it cannot be read back from the roster):\n\n    {key}\n\nRoster entry (paste into the roster file; it holds only a salted hash):\n\n{}\n", serde_json::to_string_pretty(&entry)?);
+        return Ok(());
+    }
+    if cli.audio_devices {
+        let devs = pchi_studio_api::ltc::list_devices();
+        if devs.is_empty() {
+            println!("no audio input devices found (or this build has no audio support: build with --features audio)");
+        }
+        for d in devs {
+            println!("{d}");
+        }
+        return Ok(());
+    }
     if cli.midi_ports {
         let ports = pchi_studio_api::midi::list_ports();
         if ports.is_empty() {
@@ -80,9 +112,10 @@ async fn main() -> anyhow::Result<()> {
             println!("fixture: {l}");
         }
     }
-    let (chart, devices) = rig::load(&std::fs::read_to_string(&cli.file).with_context(|| format!("reading {}", cli.file))?)
+    let file = cli.file.clone().ok_or_else(|| anyhow::anyhow!("give a show file"))?;
+    let (chart, devices) = rig::load(&std::fs::read_to_string(&file).with_context(|| format!("reading {file}"))?)
         .map_err(anyhow::Error::msg)
-        .with_context(|| format!("parsing {}", cli.file))?;
+        .with_context(|| format!("parsing {file}"))?;
     let store = match &cli.db {
         Some(p) => EventStore::open(p).with_context(|| format!("opening {p}"))?,
         None => EventStore::open_in_memory()?,
@@ -103,7 +136,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let routed = devices.as_ref().map(|d| d.len());
     if cli.send && routed.is_none() {
-        eprintln!("warning: --send has no effect: {} has no rig (open it in Studio, add devices and Save as .pchi)", cli.file);
+        eprintln!("warning: --send has no effect: {} has no rig (open it in Studio, add devices and Save as .pchi)", file);
     }
     let output = devices.map(|d| Output::new(d, cli.send));
     let show = if cli.resume {
@@ -121,25 +154,57 @@ async fn main() -> anyhow::Result<()> {
         Show::start_with(chart, store, output).map_err(anyhow::Error::msg)?
     };
     show.set_edit_key(cli.edit_key.clone());
+    show.set_session_hours(cli.session_hours);
+    if let Some(t) = cli.audience_token.as_deref().filter(|t| !t.is_empty()) {
+        if cli.token.as_deref() == Some(t) || cli.edit_key.as_deref() == Some(t) {
+            anyhow::bail!("--audience-token must differ from --token and --edit-key: it is handed to an outside gateway and must open nothing but voting");
+        }
+        show.set_audience_token(Some(t.to_string()));
+        println!("audience: voting is on (POST /vote with the audience token)");
+    }
     if let Some(path) = &cli.roster {
         let roster = pchi_studio_api::governance::Roster::parse(&std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?).map_err(anyhow::Error::msg).with_context(|| format!("roster {path}"))?;
         println!("roster: {} people: {}", roster.len(), roster.summary());
         if !roster.has_role("operator") && cli.edit_key.as_deref().map_or(true, str::is_empty) {
             eprintln!("warning: nobody on the roster is an operator and there is no --edit-key: nobody can run the show or send edits");
         }
+        if roster.plaintext_count() > 0 {
+            eprintln!("warning: {} key(s) in {path} are written in clear. Replace each with a hashed entry from --new-roster-entry, and protect the file meanwhile.", roster.plaintext_count());
+        }
+        for (name, ms) in roster.expiring() {
+            println!("roster: {name}'s key {} ({})", if ms < std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0) { "HAS EXPIRED" } else { "expires" }, pchi_studio_api::gearcheck::date_of_ms(ms));
+        }
         show.set_roster(roster);
     }
     if let Some(dir) = &cli.governance {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {dir}"))?;
-        let (key, log) = (format!("{dir}/governance_key.hex"), format!("{dir}/governance_log.jsonl"));
+        let (key, log) = (cli.governance_key.clone().unwrap_or_else(|| format!("{dir}/governance_key.hex")), format!("{dir}/governance_log.jsonl"));
+        if let Some(parent) = std::path::Path::new(&key).parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        }
         let log = primeswarm_pchi::GovernanceLog::open(&key, &log).with_context(|| format!("opening the governance log in {dir}"))?;
-        println!("governance: signed receipts in {dir} (verifying key {})", log.verifying_key_hex());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // the signing key is the one thing that makes the record trustworthy: only the runtime's user may read it
+            if let Ok(meta) = std::fs::metadata(&key) {
+                if meta.permissions().mode() & 0o077 != 0 {
+                    let _ = std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600));
+                    println!("governance: the signing key {key} could be read by others: set to owner-only");
+                }
+            }
+        }
+        println!("governance: signed receipts in {dir} (verifying key {}; keep a copy somewhere the runtime's machine cannot change)", log.verifying_key_hex());
         show.set_governance(log);
         let how = if cli.resume { "resumed the run recorded in the database" } else { "started the show" };
         show.receipt("show.start", "ALLOW", &pchi_studio_api::governance::Actor::Person(None), &format!("runtime {how}{}", if cli.send { " with sending ON" } else { " (dry-run)" }));
     }
     if let Some(path) = &cli.inputs {
         let file = pchi_studio_api::inputs::parse_file(&std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?).map_err(anyhow::Error::msg).with_context(|| format!("inputs {path}"))?;
+        for spec in file.ltc {
+            let input = pchi_studio_api::ltc::start(&show, spec).map_err(anyhow::Error::msg)?;
+            println!("input: {} reading LTC ({})", input.spec.name, pchi_studio_api::inputs::InputInfo::json(&*input)["listen"].as_str().unwrap_or(""));
+        }
         for spec in file.midi {
             let n = spec.bindings.len();
             let input = pchi_studio_api::midi::start(&show, spec).map_err(anyhow::Error::msg)?;

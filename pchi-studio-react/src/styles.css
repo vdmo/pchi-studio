@@ -576,3 +576,11 @@ button.go:disabled { background: #1b1d25; color: #7a7f92; border-color: #2f323e;
 .captures h4 { margin: 0 0 6px; }
 .capture { display: flex; gap: 8px; align-items: center; margin: 4px 0; }
 .capture > span { flex: 1; }
+
+/* audience polls */
+.polls { border: 1px solid var(--border, #3a3f4b); border-radius: 8px; padding: 8px 12px; margin: 10px 0; }
+.polls h4 { margin: 0 0 6px; }
+.poll { display: flex; gap: 8px; align-items: center; margin: 4px 0; }
+.poll > span { flex: 1; }
+.poll-open { display: flex; gap: 6px; margin-top: 6px; }
+.poll-open input:last-of-type { flex: 1; }

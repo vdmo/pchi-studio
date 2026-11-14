@@ -74,6 +74,7 @@ Per tool, what to look at:
 | BEYOND | a cue name (**laser safe, arm first**) | `/beyond/general/StartCue`, and STOP LASERS: `BlackOut`, `DisableLaserOutput` | not yet tried |
 | Art-Net node / fixture | `1=255` (channel 1 at full) | Art-Net universe frames arriving at the node (`artnet-sacn.md`) | not yet tried |
 | sACN node / fixture | `1=255` (channel 1 at full) | sACN universe frames arriving at the receiver (`artnet-sacn.md`) | not yet tried |
+| OBS Studio | a scene name (`Main Camera`) | the program scene changes in OBS (`virtual-events.md`) | not yet tried |
 
 ## 5. The honest summary
 

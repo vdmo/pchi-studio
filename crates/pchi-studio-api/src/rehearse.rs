@@ -389,7 +389,7 @@ mod tests {
 
     #[test]
     fn cues_are_checked_against_the_rig_and_show_what_would_be_sent() {
-        let dev = |id: &str, kind: &str| rig::Device { id: id.into(), label: id.into(), kind: kind.into(), dept: rig::dept_of_type(kind).unwrap().into(), host: Some("127.0.0.1".into()), port: Some(9), listen_port: None, profile: None, universe: None, patch: None };
+        let dev = |id: &str, kind: &str| rig::Device { id: id.into(), label: id.into(), kind: kind.into(), dept: rig::dept_of_type(kind).unwrap().into(), host: Some("127.0.0.1".into()), port: Some(9), listen_port: None, profile: None, universe: None, patch: None, password: None };
         // a Resolume for visuals only: the lighting cue has nowhere to go
         let r = run(&real_run(), &chart(), &[dev("r1", "resolume")], T0 + 6000).unwrap();
         assert!(r["summary"]["different"] == true);
@@ -418,7 +418,7 @@ mod tests {
 
     #[test]
     fn a_dmx_cue_is_read_as_channels_and_a_console_cue_sent_to_it_is_a_problem() {
-        let dev = |kind: &str| rig::Device { id: "d".into(), label: "Rack".into(), kind: kind.into(), dept: "lighting".into(), host: Some("127.0.0.1".into()), port: Some(6454), listen_port: None, profile: None, universe: Some(2), patch: None };
+        let dev = |kind: &str| rig::Device { id: "d".into(), label: "Rack".into(), kind: kind.into(), dept: "lighting".into(), host: Some("127.0.0.1".into()), port: Some(6454), listen_port: None, profile: None, universe: Some(2), patch: None, password: None };
         let mut c = chart();
         c.states.iter_mut().find(|s| s.id == "INTRO").unwrap().timeline.as_mut().unwrap().lanes.iter_mut().find(|l| l.id == "lighting").unwrap().cues[0].action.payload = json!({"look": "1-4=50% over 2"});
         let r = run(&real_run(), &c, &[dev("artnet")], T0 + 6000).unwrap();

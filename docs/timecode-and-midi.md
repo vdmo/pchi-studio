@@ -34,9 +34,23 @@ Timecode moves by about 40 ms a frame. A step of more than half a second, or any
 |---|---|
 | **MIDI Time Code** | a MIDI input with `{"timecode": "mtc"}` (below). Eight quarter-frame messages make a position, taken as two frames after the first; a lost message is not guessed, and the next full sequence recovers. A full-frame message (a locate) is read exactly |
 | **OSC** | an OSC input with `{"address": "/tc", "timecode": true, "fps": 25}`. The message may be a string `"01:02:03:12"`, four numbers (hours, minutes, seconds, frames, and optionally the frame rate), or one number of seconds |
-| **LTC** | **not supported.** LTC is an audio signal and needs an audio input and a decoder. Convert it to MTC or OSC first (many playback tools and audio interfaces can) |
+| **LTC** | an `ltc` input in the inputs file (below): the timecode a playback machine puts on an audio track, read from a pipe, a file, or an audio device |
 
 A timecode source must be allowed to press: it acts as the role `button` (see `osc-input.md`, `roles.md`). The record names it.
+
+## LTC input
+
+LTC is an 80-bit biphase-mark signal on an audio track, once per video frame. PCHI decodes it from audio; it does not care about the signal's polarity or level, follows a tape a few percent fast or slow, and ignores hiss between frames.
+
+```json
+{"ltc": [{"name": "Playback", "stdin": true, "sample_rate": 48000, "format": "s16le", "channels": 2, "channel": 1, "fps": 25}]}
+```
+
+- **Source (give exactly one):** `stdin` (a pipe, for example `arecord -f S16_LE -r 48000 -c 2 | pchi-studio-api show.pchi --inputs inputs.json`, or `ffmpeg ... -f s16le -`), `file` (a raw audio file or a named pipe; read at the speed it plays, or as fast as possible with `"pace": false`), or `device` (part of an audio input device's name; a build with `--features audio`).
+- `format` is `s16le` (default), `f32le` or `u8`; `channel` says which channel carries the LTC (0 is the first).
+- `fps` is the rate to assume where the signal cannot say: 29.97 and 30 differ by 0.1%, so only your word settles it (add `"drop": true` for drop-frame, which the signal does say). Default 25.
+- The position it reports is the time at the end of the frame it just read, the same moment MTC reports. After a gap, the first frame is spent finding the bit rate again.
+- `pchi-studio-api --audio-devices` lists what a `--features audio` build can see. Like MIDI, building for audio devices needs the system audio library (`libasound2-dev` on Linux).
 
 ## MIDI input
 
@@ -81,7 +95,7 @@ else works.
   jump rules, cues, `tc:` transitions and the minimum bypass, the OSC forms of timecode, MIDI parsing and bindings, and MTC
   driving a locked scene. OSC timecode was also played into a real runtime over real UDP at 25 fps: the cues fired at the right
   timecodes and the scene changed on its `tc:` transition.
-- **Compiled but not run:** the MIDI port code (`--features midi`) compiles against the real `midir` library on Linux, but has
-  not been run against a MIDI device or a playback machine. Treat it as unproven until you have sent it real MTC.
-- **Not covered:** LTC, timecode in `rehearse` (a rehearsal replays presses, not timecode), and timecode restored after
+- **Compiled but not run:** the MIDI port code (`--features midi`) and the audio device code (`--features audio`) compile against the real `midir` and `cpal` libraries on Linux, but have
+  not been run against a MIDI device, a sound card or a playback machine. Treat them as unproven until you have sent them real MTC or LTC. The LTC **decoder** is tested with synthetic LTC (every rate, level, polarity, speed, noise, chunking, a start in the middle) and a file driving a locked scene.
+- **Not covered:** LTC on a real sound card and a real playback machine (a real signal may be dirtier than the synthetic ones), timecode in `rehearse` (a rehearsal replays presses, not timecode), and timecode restored after
   `--resume` (it is heard again from the source).

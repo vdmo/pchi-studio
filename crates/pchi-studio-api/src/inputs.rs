@@ -80,6 +80,7 @@ impl InputInfo for Input {
 pub struct InputsFile {
     pub inputs: Vec<InputSpec>,
     pub midi: Vec<crate::midi::MidiSpec>,
+    pub ltc: Vec<crate::ltc::LtcSpec>,
 }
 
 pub fn parse_file(text: &str) -> Result<InputsFile, String> {
@@ -88,10 +89,18 @@ pub fn parse_file(text: &str) -> Result<InputsFile, String> {
     let inputs = parse_list(osc)?;
     let midi: Vec<crate::midi::MidiSpec> = serde_json::from_value(midi).map_err(|e| format!("the midi list is not in the expected shape: {e}"))?;
     crate::midi::check(&midi)?;
+    let ltc: Vec<crate::ltc::LtcSpec> = match v.get("ltc") {
+        Some(l) => serde_json::from_value(l.clone()).map_err(|e| format!("the ltc list is not in the expected shape: {e}"))?,
+        None => Vec::new(),
+    };
+    crate::ltc::check(&ltc)?;
+    if let Some(l) = ltc.iter().find(|l| inputs.iter().any(|i| i.name.trim().eq_ignore_ascii_case(l.name.trim())) || midi.iter().any(|m| m.name.trim().eq_ignore_ascii_case(l.name.trim()))) {
+        return Err(format!("two inputs are named {}", l.name));
+    }
     if let Some(m) = midi.iter().find(|m| inputs.iter().any(|i| i.name.trim().eq_ignore_ascii_case(m.name.trim()))) {
         return Err(format!("two inputs are named {}", m.name));
     }
-    Ok(InputsFile { inputs, midi })
+    Ok(InputsFile { inputs, midi, ltc })
 }
 
 /// Read and check the OSC inputs of a file: `{"inputs": [...]}` or a bare list.
