@@ -623,3 +623,7 @@ button.go:disabled { background: #1b1d25; color: #7a7f92; border-color: #2f323e;
 .role-banner.standby.bad { border-color: #ef4444; background: #2a1215; }
 .role-banner.fenced { border-color: #ef4444; background: #3a1417; color: #fecaca; }
 .role-banner.took { border-color: #fbbf24; background: #2a2210; }
+.backup { margin: 0 0 10px; font-size: 13px; }
+.backup summary { cursor: pointer; color: #8b93a7; }
+.backup form { display: flex; gap: 6px; margin: 6px 0; }
+.backup input { flex: 1; min-width: 0; }

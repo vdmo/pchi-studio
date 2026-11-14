@@ -64,7 +64,7 @@ struct Cli {
     /// Say that HTTPS is provided in front of this runtime (a reverse proxy such as Caddy or nginx), so the warning about keys crossing the network in clear is not printed. It changes nothing else. See docs/tls.md.
     #[arg(long)]
     behind_tls: bool,
-    /// Make a roster entry for NAME:ROLE with a fresh random key, print the key once (give it to the person) and the entry (paste it into the roster file: it holds only a salted hash), and exit. Roles: operator, editor, lso, guest, agent, button.
+    /// Make a roster entry for NAME:ROLE (or NAME:ROLE:DEPARTMENTS to limit it to some, for example Sam:editor:lighting) with a fresh random key, print the key once (give it to the person) and the entry (paste it into the roster file: it holds only a salted hash), and exit. Roles: operator, editor, lso, guest, agent, button.
     #[arg(long, value_name = "NAME:ROLE")]
     new_roster_entry: Option<String>,
     /// Write a signed, hash-chained receipt for every decision (edits, arming, GO, refusals, proposals) into this folder, in the format scripts/verify_governance_chain.py checks offline. The folder keeps the signing key too: protect it like the show file.
@@ -100,6 +100,9 @@ struct Cli {
     /// Standby only: the name the primary's record shows for it. Default "standby".
     #[arg(long)]
     standby_name: Option<String>,
+    /// Let a Studio served from this origin (http://host:port, repeat or comma-separate for several) talk to this runtime from the browser: how Studio follows a takeover to a backup address. Only listed origins are answered; * is not accepted. See docs/failover.md.
+    #[arg(long, value_name = "ORIGIN", env = "PCHI_ALLOW_ORIGIN", value_delimiter = ',')]
+    allow_origin: Vec<String>,
     /// Standby only: the primary's --token, if different from this runtime's own.
     #[arg(long, env = "PCHI_PRIMARY_TOKEN")]
     primary_token: Option<String>,
@@ -109,8 +112,14 @@ struct Cli {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     if let Some(spec) = &cli.new_roster_entry {
-        let (name, role) = spec.split_once(':').ok_or_else(|| anyhow::anyhow!("write NAME:ROLE, for example Alex:operator"))?;
-        let (key, entry) = pchi_studio_api::governance::new_entry(name, &role.trim().to_ascii_lowercase(), 200_000).map_err(anyhow::Error::msg)?;
+        let mut parts = spec.splitn(3, ':');
+        let (name, role) = (parts.next().unwrap_or(""), parts.next().ok_or_else(|| anyhow::anyhow!("write NAME:ROLE, for example Alex:operator, or NAME:ROLE:DEPARTMENTS, for example Sam:editor:lighting"))?);
+        let (key, mut entry) = pchi_studio_api::governance::new_entry(name, &role.trim().to_ascii_lowercase(), 200_000).map_err(anyhow::Error::msg)?;
+        if let Some(depts) = parts.next().filter(|d| !d.trim().is_empty()) {
+            entry["depts"] = serde_json::json!(depts.split(',').map(|d| d.trim().to_ascii_lowercase()).collect::<Vec<_>>());
+            // the entry must read back as a roster entry: say so now rather than at the next start
+            pchi_studio_api::governance::Roster::parse(&serde_json::json!({"people": [entry.clone()]}).to_string()).map_err(anyhow::Error::msg)?;
+        }
         println!("Key for {name} (shown once: give it to them, it cannot be read back from the roster):\n\n    {key}\n\nRoster entry (paste into the roster file; it holds only a salted hash):\n\n{}\n", serde_json::to_string_pretty(&entry)?);
         return Ok(());
     }
@@ -240,8 +249,18 @@ async fn main() -> anyhow::Result<()> {
         None => println!("output: none (no rig in the file)"),
     }
     open_network_warning(&cli);
-    axum::serve(listener, router_with_token(show, cli.token)).await?;
+    let origins = allowed_origins(&cli)?;
+    axum::serve(listener, pchi_studio_api::with_cors(router_with_token(show, cli.token), origins)).await?;
     Ok(())
+}
+
+/// The origins `--allow-origin` lists; `*` is refused.
+fn allowed_origins(cli: &Cli) -> anyhow::Result<Vec<String>> {
+    let list: Vec<String> = cli.allow_origin.iter().flat_map(|o| o.split(',')).map(|o| o.trim().trim_end_matches('/').to_string()).filter(|o| !o.is_empty()).collect();
+    if list.iter().any(|o| o == "*" || !(o.starts_with("http://") || o.starts_with("https://"))) {
+        anyhow::bail!("--allow-origin takes full origins such as http://10.0.0.5:5173, not * and not a bare host");
+    }
+    Ok(list)
 }
 
 fn open_network_warning(cli: &Cli) {
@@ -362,6 +381,6 @@ async fn run_standby(cli: Cli, primary: String, devices: Option<Vec<rig::Device>
     println!("standby: sends nothing and opens no inputs until it takes over; then its rig is {}", if cli.send { "LIVE" } else { "dry-run" });
     open_network_warning(&cli);
     tokio::spawn(sb.clone().follow());
-    axum::serve(listener, standby_router(sb)).await?;
+    axum::serve(listener, pchi_studio_api::with_cors(standby_router(sb), allowed_origins(&cli)?)).await?;
     Ok(())
 }

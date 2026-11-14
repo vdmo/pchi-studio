@@ -656,3 +656,4 @@ export function scheduledCues(t?: ShowTimeline): { at_ms: number; lane: string; 
     .sort((a, b) => a.at_ms - b.at_ms) // stable sort: ties keep lane order
 }
 export * from './replay'
+export * from './follow'

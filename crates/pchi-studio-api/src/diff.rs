@@ -4,7 +4,7 @@
 use crate::rig::Device;
 use pchi_showchart::{Cue, Showchart};
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Default, Serialize, PartialEq)]
 pub struct Diff {
@@ -17,16 +17,22 @@ pub struct Diff {
     /// Cues the edit added, moved or re-pointed (scene, lane, cue id): used to check their devices are ready. Not sent to clients.
     #[serde(skip)]
     pub touched: Vec<(String, String, String)>,
+    /// The departments the edit touches (a cue, a lane's device, a rig device each belong to one): who may send it, when a person is limited to some departments.
+    #[serde(skip)]
+    pub depts: BTreeSet<String>,
+    /// Something that belongs to no one department changed (scenes, transitions, minimums, timecode lock): only someone with the whole show may send it.
+    #[serde(skip)]
+    pub general: bool,
 }
 
 type CueKey = (String, String, String); // scene, lane, cue
 
-fn cues(c: &Showchart) -> BTreeMap<CueKey, (&Cue, String)> {
+fn cues(c: &Showchart) -> BTreeMap<CueKey, (&Cue, String, String)> {
     let mut m = BTreeMap::new();
     for s in &c.states {
         for l in s.timeline.iter().flat_map(|t| &t.lanes) {
             for q in &l.cues {
-                m.insert((s.id.clone(), l.id.clone(), q.id.clone()), (q, if l.name.is_empty() { l.id.clone() } else { l.name.clone() }));
+                m.insert((s.id.clone(), l.id.clone(), q.id.clone()), (q, if l.name.is_empty() { l.id.clone() } else { l.name.clone() }, l.dept.clone().filter(|d| !d.is_empty()).unwrap_or_else(|| crate::rig::dept_of_kind(&q.action.kind).to_string())));
             }
         }
     }
@@ -49,11 +55,13 @@ pub fn diff(old: &Showchart, new: &Showchart, old_dev: &[Device], new_dev: &[Dev
     }
     for s in &new.states {
         if !old.states.iter().any(|o| o.id == s.id) {
+            d.general = true;
             d.changes.push(format!("+ scene {}", s.id));
         }
     }
     for s in &old.states {
         if !new.states.iter().any(|n| n.id == s.id) {
+            d.general = true;
             d.changes.push(format!("- scene {}", s.id));
         }
     }
@@ -61,6 +69,7 @@ pub fn diff(old: &Showchart, new: &Showchart, old_dev: &[Device], new_dev: &[Dev
         if let Some(o) = old.states.iter().find(|o| o.id == n.id) {
             if o.min_ms != n.min_ms {
                 let word = |m: Option<u64>| m.map_or("none".to_string(), secs);
+                d.general = true;
                 d.changes.push(format!("~ scene {}: minimum {} → {}", n.id, word(o.min_ms), word(n.min_ms)));
             }
         }
@@ -69,6 +78,7 @@ pub fn diff(old: &Showchart, new: &Showchart, old_dev: &[Device], new_dev: &[Dev
         if let Some(o) = old.states.iter().find(|o| o.id == n.id) {
             let tc = |s: &pchi_showchart::State| s.timeline.as_ref().and_then(|t| t.tc_start.clone());
             if tc(o) != tc(n) {
+                d.general = true;
                 d.changes.push(format!("~ scene {}: timecode lock {} → {}", n.id, tc(o).unwrap_or_else(|| "none".into()), tc(n).unwrap_or_else(|| "none".into())));
             }
         }
@@ -76,27 +86,34 @@ pub fn diff(old: &Showchart, new: &Showchart, old_dev: &[Device], new_dev: &[Dev
     let tkey = |t: &pchi_showchart::Transition| format!("{} → {} ({})", t.source, t.target, t.event.clone().or(t.after_ms.map(|a| format!("after {}", secs(a)))).unwrap_or_default());
     for t in &new.transitions {
         if !old.transitions.iter().any(|o| tkey(o) == tkey(t)) {
+            d.general = true;
             d.changes.push(format!("+ transition {}", tkey(t)));
         }
     }
     for t in &old.transitions {
         if !new.transitions.iter().any(|n| tkey(n) == tkey(t)) {
+            d.general = true;
             d.changes.push(format!("- transition {}", tkey(t)));
         }
     }
 
     let (oc, nc) = (cues(old), cues(new));
-    for (k, (q, lane)) in &nc {
+    for (k, (q, lane, dept)) in &nc {
         let where_ = format!("{} / {}", k.0, lane);
         match oc.get(k) {
             None => {
+                d.depts.insert(dept.clone());
                 d.touched.push(k.clone());
                 d.changes.push(format!("+ {where_}: {} at {}", name(q), secs(q.at_ms)));
                 if k.0 == current && q.at_ms <= elapsed_ms {
                     d.notes.push(format!("{} is at {}, already past: it will not fire this time", name(q), secs(q.at_ms)));
                 }
             }
-            Some((o, _)) => {
+            Some((o, _, odept)) => {
+                if o.at_ms != q.at_ms || o.action != q.action || o.num != q.num {
+                    d.depts.insert(dept.clone());
+                    d.depts.insert(odept.clone());
+                }
                 if o.at_ms != q.at_ms || o.action != q.action {
                     d.touched.push(k.clone());
                 }
@@ -115,8 +132,9 @@ pub fn diff(old: &Showchart, new: &Showchart, old_dev: &[Device], new_dev: &[Dev
             }
         }
     }
-    for (k, (q, lane)) in &oc {
+    for (k, (q, lane, dept)) in &oc {
         if !nc.contains_key(k) {
+            d.depts.insert(dept.clone());
             d.changes.push(format!("- {} / {}: {} at {}", k.0, lane, name(q), secs(q.at_ms)));
         }
     }
@@ -126,6 +144,7 @@ pub fn diff(old: &Showchart, new: &Showchart, old_dev: &[Device], new_dev: &[Dev
             let before = old.states.iter().find(|o| o.id == s.id).and_then(|o| o.timeline.as_ref()).and_then(|t| t.lanes.iter().find(|x| x.id == l.id));
             if let Some(b) = before {
                 if b.device != l.device {
+                    d.depts.insert(l.dept.clone().filter(|x| !x.is_empty()).unwrap_or_else(|| l.cues.first().map(|c| crate::rig::dept_of_kind(&c.action.kind).to_string()).unwrap_or_default()));
                     d.changes.push(format!("~ {} / {}: device {} → {}", s.id, l.id, b.device.as_deref().unwrap_or("auto"), l.device.as_deref().unwrap_or("auto")));
                 }
             }
@@ -133,13 +152,20 @@ pub fn diff(old: &Showchart, new: &Showchart, old_dev: &[Device], new_dev: &[Dev
     }
     for n in new_dev {
         match old_dev.iter().find(|o| o.id == n.id) {
-            None => d.changes.push(format!("+ device {}", n.label)),
-            Some(o) if o.address() != n.address() => d.changes.push(format!("~ device {}: {} → {}", n.label, o.address().unwrap_or_else(|| "no address".into()), n.address().unwrap_or_else(|| "no address".into()))),
+            None => {
+                d.depts.insert(n.dept.clone());
+                d.changes.push(format!("+ device {}", n.label))
+            }
+            Some(o) if o.address() != n.address() => {
+                d.depts.insert(n.dept.clone());
+                d.changes.push(format!("~ device {}: {} → {}", n.label, o.address().unwrap_or_else(|| "no address".into()), n.address().unwrap_or_else(|| "no address".into())));
+            }
             _ => {}
         }
     }
     for o in old_dev {
         if !new_dev.iter().any(|n| n.id == o.id) {
+            d.depts.insert(o.dept.clone());
             d.changes.push(format!("- device {}", o.label));
         }
     }

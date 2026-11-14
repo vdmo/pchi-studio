@@ -170,6 +170,9 @@ pub struct Show {
     epoch: std::sync::atomic::AtomicU64,
     fenced: Mutex<Option<Value>>,
     failover_key: Mutex<Option<String>>,
+    /// Votes counted but not yet written to the log: they are written together every half second (a vote a record would be too many).
+    vote_buf: Mutex<Vec<(String, String, String)>>,
+    vote_flush: std::sync::atomic::AtomicBool,
 }
 
 /// How long a department page may stay silent before it counts as not linked (mirrors the Studio).
@@ -223,6 +226,8 @@ impl Show {
             epoch: std::sync::atomic::AtomicU64::new(0),
             fenced: Mutex::new(None),
             failover_key: Mutex::new(None),
+            vote_buf: Mutex::new(Vec::new()),
+            vote_flush: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -239,8 +244,54 @@ impl Show {
         let mut engine = ShowEngine::new(chart).map_err(|errs| errs.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; "))?;
         let mut entered = records[start].timestamp;
         let mut divergences = Vec::new();
+        // the show's own state besides the scene: polls, edit proposals, and what a send can still undo, rebuilt from what was logged
+        let mut votes = audience::Votes::default();
+        let mut proposals: Vec<governance::Proposal> = Vec::new();
+        let mut history: Vec<(Showchart, Option<Vec<rig::Device>>)> = Vec::new();
         for r in &records[start + 1..] {
             match r.event_type.as_str() {
+                "poll.open" => {
+                    let options: Vec<String> = r.payload["options"].as_array().into_iter().flatten().filter_map(|o| o.as_str().map(String::from)).collect();
+                    let _ = votes.open(r.payload["id"].as_str().unwrap_or(""), &options);
+                }
+                "poll.close" => {
+                    let _ = votes.close(r.payload["id"].as_str().unwrap_or(""));
+                }
+                "poll.votes" => {
+                    let poll = r.payload["poll"].as_str().unwrap_or("");
+                    for v in r.payload["votes"].as_array().into_iter().flatten() {
+                        if let (Some(option), Some(voter)) = (v[0].as_str(), v[1].as_str()) {
+                            let _ = votes.vote(poll, option, voter);
+                        }
+                    }
+                }
+                "proposal.new" => {
+                    let p = &r.payload;
+                    if let (Some(id), Ok(chart)) = (p["id"].as_u64(), serde_json::from_value::<Showchart>(p["chart"].clone())) {
+                        let strings = |k: &str| p[k].as_array().into_iter().flatten().filter_map(|x| x.as_str().map(String::from)).collect::<Vec<_>>();
+                        proposals.push(governance::Proposal {
+                            id: id as u32, actor: p["actor"].as_str().unwrap_or("").to_string(), ts: p["ts"].as_i64().unwrap_or(0), status: "pending".into(),
+                            changes: strings("changes"), notes: strings("notes"), receipt: p["receipt"].as_str().map(String::from), said: p["said"].as_str().unwrap_or("").to_string(),
+                            rehearsal: p["rehearsal"].clone(), base: p["base"].as_str().unwrap_or("").to_string(), chart,
+                            devices: p.get("devices").filter(|d| !d.is_null()).and_then(|d| serde_json::from_value(d.clone()).ok()),
+                        });
+                        while proposals.len() > governance::MAX_PROPOSALS {
+                            match proposals.iter().position(|p| p.status != "pending") {
+                                Some(i) => {
+                                    proposals.remove(i);
+                                }
+                                None => break,
+                            }
+                        }
+                    }
+                }
+                "proposal.status" => {
+                    if let (Some(id), Some(status)) = (r.payload["id"].as_u64(), r.payload["status"].as_str()) {
+                        if let Some(p) = proposals.iter_mut().find(|p| p.id as u64 == id) {
+                            p.status = status.to_string();
+                        }
+                    }
+                }
                 recorder::SHOW_CONTEXT => {
                     if let Some(k) = r.payload["key"].as_str() {
                         engine.set_context(k, r.payload["value"].clone());
@@ -250,6 +301,16 @@ impl Show {
                     // a live edit replaced the show: carry on with the show as it was then
                     if let Some(c) = r.payload.get("chart").and_then(|c| serde_json::from_value::<Showchart>(c.clone()).ok()) {
                         engine.chart = c;
+                    }
+                    if r.payload["undo"] == json!(true) {
+                        history.pop();
+                    } else if let Some(b) = r.payload.get("before") {
+                        if let Ok(c) = serde_json::from_value::<Showchart>(b["chart"].clone()) {
+                            history.push((c, b.get("devices").filter(|d| !d.is_null()).and_then(|d| serde_json::from_value(d.clone()).ok())));
+                            if history.len() > UNDO_DEPTH {
+                                history.remove(0);
+                            }
+                        }
                     }
                 }
                 recorder::SHOW_INPUT => {
@@ -283,6 +344,10 @@ impl Show {
         let _ = store.append(now, "runtime", Some(&show_id), "show.resume", &info);
         let show = Self::assemble(engine, store, output, entered);
         *show.resumed.lock().unwrap() = Some(info.clone());
+        *show.votes.lock().unwrap() = votes;
+        *show.gov.proposals.lock().unwrap() = proposals;
+        *show.history.lock().unwrap() = history;
+        show.supersede(); // a proposal made against a show that is no longer the running one is marked so
         show.watch_links();
         show.arm_from(0, elapsed);
         Ok((show, info))
@@ -559,11 +624,62 @@ impl Show {
     pub fn allow(&self, actor: &Actor, perm: Perm, device_dept: Option<&str>) -> bool {
         match actor {
             Actor::Agent(_) => false,
-            Actor::Member { role, .. } => governance::role_allows(role, perm) && (role != "lso" || !matches!(perm, Perm::Try | Perm::Test) || device_dept == Some("laser")),
+            Actor::Member { name, role } => {
+                if !governance::role_allows(role, perm) || (role == "lso" && matches!(perm, Perm::Try | Perm::Test) && device_dept != Some("laser")) {
+                    return false;
+                }
+                // a person limited to some departments: GO moves every department's scene, so it is not theirs; a cue, a test or an arm must be on a device of theirs;
+                // what an edit touches is checked against the edit itself (`allow_edit`)
+                let depts = self.roster.lock().unwrap().depts_of(name);
+                if depts.is_empty() {
+                    return true;
+                }
+                match perm {
+                    Perm::Go => false,
+                    Perm::Try | Perm::Test | Perm::Arm => device_dept.is_some_and(|d| depts.iter().any(|x| x == d)),
+                    Perm::Edit | Perm::Approve | Perm::Undo => true,
+                }
+            }
             Actor::Person(_) => true,
             // an operator-key-only show leaves GO open to the button box; a roster does not
             Actor::Anonymous => perm == Perm::Go && !self.roster_active(),
         }
+    }
+
+    /// The departments `actor` is limited to (empty: the whole show).
+    pub fn depts_of(&self, actor: &Actor) -> Vec<String> {
+        match actor {
+            Actor::Member { name, .. } => self.roster.lock().unwrap().depts_of(name),
+            _ => Vec::new(),
+        }
+    }
+
+    /// May `actor` make an edit that changes `scope`? Anyone whose powers are not limited by department may; someone who is limited may only change
+    /// cues, lanes' devices and rig devices of their own departments, and nothing that belongs to the show as a whole (scenes, transitions, minimums, timecode lock).
+    pub fn allow_edit(&self, actor: &Actor, scope: &diff::Diff) -> bool {
+        let depts = self.depts_of(actor);
+        depts.is_empty() || (!scope.general && scope.depts.iter().all(|d| depts.contains(d)))
+    }
+
+    /// What sending `chart` (and `devices`) would touch, without sending it.
+    pub fn edit_scope(&self, chart: &Showchart, devices: Option<&Vec<rig::Device>>) -> diff::Diff {
+        let old_dev: Vec<rig::Device> = self.output.lock().unwrap().as_ref().map(|o| o.devices().to_vec()).unwrap_or_default();
+        let new_dev = devices.cloned().unwrap_or_else(|| old_dev.clone());
+        let g = self.inner.lock().unwrap();
+        let elapsed = (now_ms() - g.entered_at).max(0) as u64;
+        diff::diff(&g.engine.chart, chart, &old_dev, &new_dev, &g.engine.current_state, elapsed)
+    }
+
+    /// What undoing the last send would touch (or nothing, if there is none).
+    pub fn undo_scope(&self) -> Option<diff::Diff> {
+        let (chart, devices) = self.history.lock().unwrap().last().cloned()?;
+        Some(self.edit_scope(&chart, devices.as_ref()))
+    }
+
+    /// What a waiting proposal would touch.
+    pub fn proposal_scope(&self, id: u32) -> Option<diff::Diff> {
+        let (chart, devices) = self.gov.proposals.lock().unwrap().iter().find(|p| p.id == id).map(|p| (p.chart.clone(), p.devices.clone()))?;
+        Some(self.edit_scope(&chart, devices.as_ref()))
     }
 
     /// The department of a rig device, if there is one with that id.
@@ -668,6 +784,7 @@ impl Show {
 
     /// The log as records (for a recording).
     pub fn records(&self) -> Vec<pchi_eventstore::EventRecord> {
+        self.flush_votes();
         self.inner.lock().unwrap().store.all().unwrap_or_default()
     }
 
@@ -904,11 +1021,12 @@ impl Show {
                     h.remove(0);
                 }
             }
+            let before = json!({"chart": g.engine.chart, "devices": self.output.lock().unwrap().as_ref().map(|o| o.devices().to_vec())});
             g.engine.chart = chart;
             g.generation += 1;
             let show_id = g.engine.chart.id.clone().unwrap_or_else(|| "show".into());
             let ts = now_ms();
-            let _ = g.store.append(ts, "studio", Some(&show_id), "show.edit", &json!({"changes": d.changes, "notes": d.notes, "undo": is_undo, "chart": g.engine.chart, "devices": new_dev}));
+            let _ = g.store.append(ts, "studio", Some(&show_id), "show.edit", &json!({"changes": d.changes, "notes": d.notes, "undo": is_undo, "chart": g.engine.chart, "devices": new_dev, "before": before}));
             (d, g.generation, elapsed)
         };
         if devices.is_some() {
@@ -1151,8 +1269,29 @@ impl Show {
     }
 
     /// A person opens a poll.
+    /// Write one record of the show's own state to the log (polls, proposals): what a restart or a takeover rebuilds them from.
+    fn log_event(&self, kind: &str, payload: &Value) {
+        let g = self.inner.lock().unwrap();
+        let show_id = g.engine.chart.id.clone().unwrap_or_else(|| "show".into());
+        let _ = g.store.append(now_ms(), "runtime", Some(&show_id), kind, payload);
+    }
+
+    /// Write the votes counted since the last time to the log, as one record per poll.
+    fn flush_votes(&self) {
+        let buf = std::mem::take(&mut *self.vote_buf.lock().unwrap());
+        let mut by_poll: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+        for (poll, option, voter) in buf {
+            by_poll.entry(poll).or_default().push(json!([option, voter]));
+        }
+        for (poll, votes) in by_poll {
+            self.log_event("poll.votes", &json!({"poll": poll, "votes": votes}));
+        }
+    }
+
     pub fn poll_open(&self, actor: &Actor, id: &str, options: &[String]) -> Result<Value, String> {
+        self.flush_votes();
         let t = self.votes.lock().unwrap().open(id, options)?;
+        self.log_event("poll.open", &json!({"id": id, "options": options}));
         self.poll_pub.lock().unwrap().remove(id);
         self.publish_poll(&t);
         self.receipt("poll.open", "ALLOW", actor, &format!("opened poll '{id}' with {}", options.join(", ")));
@@ -1161,7 +1300,9 @@ impl Show {
 
     /// A person closes it: the result stays in the context for the show to read.
     pub fn poll_close(&self, actor: &Actor, id: &str) -> Result<Value, String> {
+        self.flush_votes();
         let t = self.votes.lock().unwrap().close(id)?;
+        self.log_event("poll.close", &json!({"id": id}));
         self.poll_pub.lock().unwrap().remove(id);
         self.publish_poll(&t);
         let said = t.counts.iter().map(|(o, n)| format!("{o} {n}")).collect::<Vec<_>>().join(", ");
@@ -1188,6 +1329,15 @@ impl Show {
             }
         }
         let t = self.votes.lock().unwrap().vote(poll, option, voter).map_err(|e| (if e.contains("no poll") { 404 } else if e.contains("closed") { 409 } else { 400 }, e))?;
+        self.vote_buf.lock().unwrap().push((poll.to_string(), option.to_string(), voter.to_string()));
+        if !self.vote_flush.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            let show = Arc::clone(self);
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                show.vote_flush.store(false, std::sync::atomic::Ordering::SeqCst);
+                show.flush_votes();
+            });
+        }
         let now = now_ms();
         let wait = {
             let mut m = self.poll_pub.lock().unwrap();
@@ -1372,6 +1522,7 @@ impl Show {
             return Err((409, json!({"error": "nothing to propose: that is the show already running"})));
         }
         let base = self.base_hash();
+        let (base_for_log, chart_for_log, devices_for_log) = (base.clone(), chart.clone(), devices.clone());
         let ts = now_ms();
         // how it would have gone against the run so far, so the person deciding sees the effect, not just the edit
         let rehearsal = self.rehearse(chart.clone(), devices.clone()).map(|r| json!({"different": r["summary"]["different"], "verdict": r["summary"]["verdict"], "lines": r["summary"]["lines"]})).unwrap_or(Value::Null);
@@ -1390,6 +1541,7 @@ impl Show {
             }
             (id, ps.iter().find(|p| p.id == id).map(Proposal::json).unwrap_or(Value::Null))
         };
+        self.log_event("proposal.new", &json!({"id": id, "actor": actor.name(), "ts": ts, "changes": view["changes"], "notes": view["notes"], "receipt": view["receipt"], "said": said, "rehearsal": view["rehearsal"], "base": base_for_log, "chart": chart_for_log, "devices": devices_for_log}));
         self.publish(json!({"type": "proposal", "ts": ts, "proposal": view}));
         Ok(json!({"proposed": true, "id": id, "status": "pending", "proposal": view, "diff": preview["diff"]}))
     }
@@ -1413,6 +1565,7 @@ impl Show {
         match self.replace(chart, devices, true) {
             Ok(mut v) => {
                 set("approved");
+                self.log_event("proposal.status", &json!({"id": id, "status": "approved"}));
                 v["approved"] = json!(id);
                 v["receipt"] = json!(self.receipt("show.edit", "ALLOW", actor, &format!("approved proposal #{id} from {by} and applied it ({changes} change(s)){}", said_suffix(&said))));
                 let view = self.gov.proposals.lock().unwrap().iter().find(|p| p.id == id).map(Proposal::json);
@@ -1438,6 +1591,7 @@ impl Show {
             p.status = "rejected".into();
             p.actor.clone()
         };
+        self.log_event("proposal.status", &json!({"id": id, "status": "rejected"}));
         let receipt = self.receipt("show.reject", "DENY", actor, &format!("rejected proposal #{id} from {by}"));
         let view = self.gov.proposals.lock().unwrap().iter().find(|p| p.id == id).map(Proposal::json);
         self.publish(json!({"type": "proposal", "ts": now_ms(), "proposal": view}));
@@ -1451,6 +1605,7 @@ impl Show {
         for p in self.gov.proposals.lock().unwrap().iter_mut() {
             if p.status == "pending" && p.base != base {
                 p.status = "superseded".into();
+                self.log_event("proposal.status", &json!({"id": p.id, "status": "superseded"}));
                 changed.push(p.json());
             }
         }
@@ -1531,6 +1686,7 @@ impl Show {
     /// The log after record `after`, for a standby. `last_ts` is the timestamp the standby holds for record `after`: if the log
     /// here has a different one, this is not the log the standby has been following and it must start again.
     pub fn replicate_json(&self, after: i64, last_ts: Option<i64>) -> Result<Value, (u16, String)> {
+        self.flush_votes();
         let g = self.inner.lock().unwrap();
         if after > 0 {
             match (g.store.timestamp_of(after).map_err(|e| (500u16, e.to_string()))?, last_ts) {
@@ -1671,6 +1827,32 @@ pub fn router(show: Arc<Show>) -> Router {
 }
 
 /// Like `router`, but every request must present `token` (as `?token=` or a Bearer header).
+/// Let a Studio served from another address talk to this runtime (the backup address Studio follows a takeover to). Only the origins listed
+/// are answered; nothing else changes, and a request still needs the token and key it always needed. `*` is not accepted.
+pub fn with_cors(app: Router, origins: Vec<String>) -> Router {
+    use axum::{extract::Request, http::{header, HeaderValue, Method}, middleware::Next, response::Response};
+    if origins.is_empty() {
+        return app;
+    }
+    app.layer(axum::middleware::from_fn(move |req: Request, next: Next| {
+        let origins = origins.clone();
+        async move {
+            let allowed = req.headers().get(header::ORIGIN).and_then(|v| v.to_str().ok()).filter(|o| origins.iter().any(|a| a == o)).map(String::from);
+            let preflight = req.method() == Method::OPTIONS;
+            let mut resp: Response = if preflight { StatusCode::NO_CONTENT.into_response() } else { next.run(req).await };
+            if let Some(o) = allowed.and_then(|o| HeaderValue::from_str(&o).ok()) {
+                let h = resp.headers_mut();
+                h.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, o);
+                h.insert(header::VARY, HeaderValue::from_static("Origin"));
+                h.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("authorization, content-type, x-pchi-edit-key, x-pchi-session, x-pchi-actor"));
+                h.insert(header::ACCESS_CONTROL_ALLOW_METHODS, HeaderValue::from_static("GET, POST, OPTIONS"));
+                h.insert(header::ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static("600"));
+            }
+            resp
+        }
+    }))
+}
+
 pub fn router_with_token(show: Arc<Show>, token: Option<String>) -> Router {
     Router::new()
         .route("/state", get(|State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap| async move {
@@ -1820,8 +2002,10 @@ async fn get_whoami(State(a): State<App>, q: Query<HashMap<String, String>>, h: 
         return unauthorized();
     }
     let actor = who(&a, &q, &h);
-    let can: Vec<&str> = governance::ALL_PERMS.iter().filter(|(p, _)| a.show.allow(&actor, *p, Some("laser"))).map(|(_, n)| *n).collect();
-    (StatusCode::OK, Json(json!({"name": actor.name(), "role": actor.role(), "signed_in": !matches!(actor, Actor::Anonymous), "locked": a.show.is_locked(), "can": can})))
+    let depts = a.show.depts_of(&actor);
+    let probe: Vec<&str> = if depts.is_empty() { vec!["laser"] } else { depts.iter().map(String::as_str).collect() };
+    let can: Vec<&str> = governance::ALL_PERMS.iter().filter(|(p, _)| probe.iter().any(|d| a.show.allow(&actor, *p, Some(d)))).map(|(_, n)| *n).collect();
+    (StatusCode::OK, Json(json!({"name": actor.name(), "role": actor.role(), "signed_in": !matches!(actor, Actor::Anonymous), "locked": a.show.is_locked(), "can": can, "depts": a.show.depts_of(&actor)})))
 }
 
 /// `POST /show` (a show file, as Studio saves it) replaces the running show's definition;
@@ -1842,6 +2026,9 @@ async fn post_show(State(a): State<App>, q: Query<HashMap<String, String>>, h: H
         Ok(x) => x,
         Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))),
     };
+    if !dry && !actor.is_agent() && !a.show.allow_edit(&actor, &a.show.edit_scope(&chart, devices.as_ref())) {
+        return refuse(&a.show, &actor, "show.edit", &format!("send an edit that goes beyond {} (they are limited to those departments, and scenes, transitions and minimums belong to the whole show)", a.show.depts_of(&actor).join(" and ")));
+    }
     // what the sender said they wanted (a typed or narrated line, or an agent's reason): kept with the proposal and in the record
     let said = governance::clean_said(q.get("said").map(String::as_str));
     // anyone who may edit can also ask for a second pair of eyes: `?propose=1` stores the edit instead of applying it
@@ -1883,6 +2070,9 @@ async fn post_undo(State(a): State<App>, q: Query<HashMap<String, String>>, h: H
         if let Err(r) = gate(&a, &actor, Perm::Undo, "show.undo", "undo a send", None) {
             return r;
         }
+    }
+    if !dry && a.show.undo_scope().is_some_and(|s| !a.show.allow_edit(&actor, &s)) {
+        return refuse(&a.show, &actor, "show.undo", &format!("undo a send that touched more than {}", a.show.depts_of(&actor).join(" and ")));
     }
     match a.show.undo(!dry) {
         Ok(v) => {
@@ -1933,7 +2123,7 @@ async fn post_arm(State(a): State<App>, Path(id): Path<String>, q: Query<HashMap
     let actor = who(&a, &q, &h);
     let armed = q.get("armed").is_some_and(|v| v == "1" || v == "true");
     if armed {
-        if let Err(r) = gate(&a, &actor, Perm::Arm, "laser.arm", "arm a laser", None) {
+        if let Err(r) = gate(&a, &actor, Perm::Arm, "laser.arm", "arm a laser", Some(&id)) {
             return r;
         }
     }
@@ -2045,6 +2235,9 @@ async fn post_decide(State(a): State<App>, Path((id, verb)): Path<(u32, String)>
     };
     if let Err(r) = gate(&a, &actor, Perm::Approve, rule, what, None) {
         return r;
+    }
+    if a.show.proposal_scope(id).is_some_and(|s| !a.show.allow_edit(&actor, &s)) {
+        return refuse(&a.show, &actor, rule, &format!("{} a proposal that touches more than {}", verb, a.show.depts_of(&actor).join(" and ")));
     }
     let r = if verb == "approve" { a.show.approve(id, &actor) } else { a.show.reject(id, &actor) };
     match r {
@@ -4948,5 +5141,310 @@ mod tests {
         std::fs::write(&path, "not json").unwrap();
         assert!(fresh_show_with(&roster, None).use_sessions_file(&path).is_err());
         let _ = std::fs::remove_file(&path);
+    }
+
+    // ---- a Studio on another address ----
+
+    async fn raw(addr: std::net::SocketAddr, request: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+        s.write_all(request.as_bytes()).await.unwrap();
+        let mut out = Vec::new();
+        s.read_to_end(&mut out).await.unwrap();
+        String::from_utf8_lossy(&out).to_ascii_lowercase()
+    }
+
+    #[tokio::test]
+    async fn only_a_listed_origin_is_answered_across_origins() {
+        let show = primary_show();
+        let app = with_cors(router(show), vec!["http://10.0.0.7:5173".into()]);
+        let (addr, _s) = serve_app(app).await;
+        let get = |origin: &str| format!("GET /role HTTP/1.1\r\nHost: x\r\nConnection: close\r\nOrigin: {origin}\r\n\r\n");
+        let ok = raw(addr, &get("http://10.0.0.7:5173")).await;
+        assert!(ok.contains("access-control-allow-origin: http://10.0.0.7:5173"), "{ok}");
+        assert!(ok.contains("vary: origin") && ok.contains("200 ok"), "{ok}");
+        let other = raw(addr, &get("http://evil.example")).await;
+        assert!(!other.contains("access-control-allow-origin"), "{other}");
+        assert!(other.contains("200 ok"), "the request itself is not refused, the browser just may not read it");
+        let none = raw(addr, "GET /role HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await;
+        assert!(!none.contains("access-control-allow-origin"));
+        // the preflight a browser sends before a request with our headers
+        let pre = raw(addr, "OPTIONS /input HTTP/1.1\r\nHost: x\r\nConnection: close\r\nOrigin: http://10.0.0.7:5173\r\nAccess-Control-Request-Method: POST\r\nAccess-Control-Request-Headers: x-pchi-session\r\n\r\n").await;
+        assert!(pre.contains("204") && pre.contains("x-pchi-session") && pre.contains("access-control-allow-methods"), "{pre}");
+        let pre_bad = raw(addr, "OPTIONS /input HTTP/1.1\r\nHost: x\r\nConnection: close\r\nOrigin: http://evil.example\r\n\r\n").await;
+        assert!(!pre_bad.contains("access-control-allow-origin"), "{pre_bad}");
+        // nothing is added when no origin is listed
+        let (addr2, _t) = serve_app(with_cors(router(primary_show()), vec![])).await;
+        assert!(!raw(addr2, &get("http://10.0.0.7:5173")).await.contains("access-control-allow-origin"));
+    }
+
+    #[tokio::test]
+    async fn a_standby_answers_across_origins_too_so_studio_can_find_it() {
+        let primary = primary_show();
+        let (paddr, _p) = serve_app(router(primary)).await;
+        let sb = standby_of(paddr, false);
+        let (saddr, _s) = serve_app(with_cors(failover::standby_router(sb), vec!["http://10.0.0.7:5173".into()])).await;
+        let r = raw(saddr, "GET /role HTTP/1.1\r\nHost: x\r\nConnection: close\r\nOrigin: http://10.0.0.7:5173\r\n\r\n").await;
+        assert!(r.contains("200 ok") && r.contains("access-control-allow-origin: http://10.0.0.7:5173") && r.contains("\"standby\""), "{r}");
+        let refused = raw(saddr, "GET /state HTTP/1.1\r\nHost: x\r\nConnection: close\r\nOrigin: http://10.0.0.7:5173\r\n\r\n").await;
+        assert!(refused.contains("503") && refused.contains("access-control-allow-origin"), "even the refusal can be read: {refused}");
+    }
+
+    // ---- what a takeover (or a restart) keeps besides the scene ----
+
+    #[tokio::test]
+    async fn a_takeover_keeps_the_open_poll_its_votes_the_proposals_and_what_can_be_undone() {
+        let primary = primary_show();
+        primary.apply("studio", "START");
+        let mut e1 = quick();
+        move_cue(&mut e1, "INTRO", "laser", 1500);
+        primary.replace(e1.clone(), None, true).unwrap(); // a send that can be undone
+
+        // an agent proposes something, and then a person sends a different edit: that proposal no longer applies
+        let mut stale = e1.clone();
+        move_cue(&mut stale, "INTRO", "lighting", 700);
+        primary.propose(&Actor::Agent("nova".into()), stale, None, "an earlier idea").unwrap();
+        let mut e3 = e1.clone();
+        move_cue(&mut e3, "INTRO", "laser", 1700);
+        primary.replace(e3.clone(), None, true).unwrap();
+        let mut waiting = e3.clone();
+        move_cue(&mut waiting, "INTRO", "lighting", 600);
+        primary.propose(&Actor::Agent("nova".into()), waiting, None, "let the lights breathe").unwrap();
+
+        // a poll with votes, still open
+        primary.poll_open(&Actor::Person(None), "next", &["calm".into(), "hype".into()]).unwrap();
+        for (i, o) in ["hype", "hype", "calm"].iter().enumerate() {
+            primary.cast_vote("next", o, &format!("voter{i}")).unwrap();
+        }
+        let (paddr, ptask) = serve_app(router(primary.clone())).await;
+        let sb = standby_of(paddr, true);
+        tokio::spawn(sb.clone().follow());
+        let (saddr, _s) = serve_app(failover::standby_router(sb.clone())).await;
+        // the last votes are written to the log half a second after they come: the copy catches up
+        assert!(fo_until(5, || sb.copied() as usize >= primary.records().len()).await, "copied {} of {}", sb.copied(), primary.records().len());
+
+        ptask.abort();
+        assert!(fo_until(6, || sb.is_active()).await);
+        let (_, snap) = fo_get(saddr, "/state", None).await;
+
+        // the poll is where it was: open, three votes, hype leading
+        let poll = snap["polls"].as_array().unwrap().iter().find(|p| p["id"] == "next").unwrap();
+        assert_eq!((poll["open"].as_bool(), poll["total"].as_u64(), poll["winner"].as_str()), (Some(true), Some(3), Some("hype")), "{poll}");
+        // the proposals: the old one is superseded, the new one is waiting, with what was said
+        let (_, props) = fo_get(saddr, "/proposals", None).await;
+        let list = props.as_array().unwrap_or_else(|| panic!("{props}")).clone();
+        assert_eq!(list.iter().map(|p| p["status"].as_str().unwrap().to_string()).collect::<Vec<_>>(), ["superseded", "pending"], "{props}");
+        assert_eq!(list[1]["said"], "let the lights breathe");
+        assert_eq!(list[1]["actor"], "agent:nova");
+        // two sends can still be undone
+        assert_eq!(snap["undo_depth"], 2);
+
+        // and they work: a person closes the poll, approves the waiting edit, then undoes it and the send before it
+        let post = |path: &str| {
+            let addr = saddr.to_string();
+            let path = path.to_string();
+            async move { failover::http(&addr, "POST", &path, &[], Some("{}")).await.unwrap() }
+        };
+        let (code, closed) = post("/polls/next/close").await;
+        assert_eq!(code, 200, "{closed}");
+        assert_eq!(closed["winner"], "hype");
+        let (code, v) = post("/proposals/2/approve").await;
+        assert_eq!(code, 200, "{v}");
+        assert_eq!(post("/show/undo").await.0, 200);
+        assert_eq!(post("/show/undo").await.0, 200);
+        let (_, after) = fo_get(saddr, "/state", None).await;
+        assert_eq!(after["undo_depth"], 1);
+        assert_eq!(after["context"]["vote"]["next"]["winner"], "hype", "the result is in the show's context for its guards");
+    }
+
+    #[tokio::test]
+    async fn a_restart_with_resume_keeps_them_too() {
+        let path = temp_db("carry-resume");
+        let a = Show::start(quick(), EventStore::open(&path).unwrap()).unwrap();
+        a.apply("studio", "START");
+        let mut e = quick();
+        move_cue(&mut e, "INTRO", "laser", 1500);
+        a.replace(e.clone(), None, true).unwrap();
+        a.poll_open(&Actor::Person(None), "p", &["a".into(), "b".into()]).unwrap();
+        a.cast_vote("p", "b", "v1").unwrap();
+        let mut idea = e.clone();
+        move_cue(&mut idea, "INTRO", "lighting", 600);
+        a.propose(&Actor::Agent("nova".into()), idea, None, "an idea").unwrap();
+        tokio::time::sleep(Duration::from_millis(700)).await; // the vote is written to the log
+        crash(a);
+
+        let (b, _) = Show::resume(quick(), EventStore::open(&path).unwrap(), None).unwrap();
+        let snap = b.snapshot();
+        assert_eq!(snap["polls"][0]["total"], 1);
+        assert_eq!(snap["polls"][0]["winner"], "b");
+        assert_eq!(snap["proposals"][0]["status"], "pending");
+        assert_eq!(snap["undo_depth"], 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // ---- roles limited to departments ----
+
+    const DEPT_ROSTER: &str = r#"{"people": [
+        {"name": "Alex", "role": "operator", "key": "alex-key-12345"},
+        {"name": "Sam", "role": "editor", "depts": ["lighting"], "key": "sam-key-12345"},
+        {"name": "Lou", "role": "lso", "depts": ["laser"], "key": "lou-key-12345"}
+    ]}"#;
+
+    async fn dept_show() -> (Arc<Show>, std::net::SocketAddr) {
+        let out = Output::new(vec![device("e1", "eos", 9), device("b1", "beyond", 9)], false);
+        let show = Show::start_with(quick(), EventStore::open_in_memory().unwrap(), Some(out)).unwrap();
+        show.set_roster(governance::Roster::parse(DEPT_ROSTER).unwrap());
+        show.apply_checked("studio", "START");
+        let (addr, _s) = serve_app(router(show.clone())).await;
+        std::mem::forget(_s);
+        (show, addr)
+    }
+
+    async fn as_(addr: std::net::SocketAddr, who: &str, method: &str, path: &str, body: Option<&str>) -> (u16, Value) {
+        let key = format!("{}-key-12345", who.to_lowercase());
+        failover::http(&addr.to_string(), method, path, &[("X-Pchi-Edit-Key", &key)], Some(body.unwrap_or("{}"))).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_person_limited_to_a_department_can_only_act_on_that_department() {
+        let (show, addr) = dept_show().await;
+        // Sam (editor, lighting): the lighting device yes, the laser no, and never GO
+        assert_eq!(as_(addr, "Sam", "POST", "/devices/e1/test", None).await.0, 200);
+        assert_eq!(as_(addr, "Sam", "POST", "/devices/b1/test", None).await.0, 403);
+        assert_eq!(as_(addr, "Sam", "POST", "/devices/e1/try", Some(r#"{"value":"3"}"#)).await.0, 200);
+        assert_eq!(as_(addr, "Sam", "POST", "/devices/b1/try", Some(r#"{"value":"3"}"#)).await.0, 403);
+        let (code, v) = as_(addr, "Sam", "POST", "/input", Some(r#"{"event":"DROP"}"#)).await;
+        assert_eq!(code, 403, "GO moves every department: {v}");
+        // Lou (lso, laser): arms the laser, touches nothing else
+        assert_eq!(as_(addr, "Lou", "POST", "/devices/b1/arm?armed=1", None).await.0, 200);
+        assert_eq!(as_(addr, "Lou", "POST", "/devices/e1/test", None).await.0, 403);
+        // Alex, whose powers are not limited, does everything
+        assert_eq!(as_(addr, "Alex", "POST", "/devices/b1/test", None).await.0, 200);
+        assert_eq!(as_(addr, "Alex", "POST", "/devices/e1/test", None).await.0, 200);
+        // refusals are in the record with the person's name
+        let refusals: Vec<_> = show.events().into_iter().filter(|e| e["type"] == "show.decision" && e["payload"]["gate"] == "DENY").collect();
+        assert!(refusals.iter().any(|e| e["payload"]["by"].as_str().unwrap().contains("Sam")), "{refusals:?}");
+
+        // what the Live tab is told they may do
+        let (_, me) = as_(addr, "Sam", "GET", "/whoami", None).await;
+        assert_eq!(me["depts"], json!(["lighting"]));
+        let can: Vec<&str> = me["can"].as_array().unwrap().iter().filter_map(|c| c.as_str()).collect();
+        assert!(can.contains(&"edit") && can.contains(&"test") && !can.contains(&"go") && !can.contains(&"arm"), "{can:?}");
+        let (_, lou) = as_(addr, "Lou", "GET", "/whoami", None).await;
+        let lou_can: Vec<&str> = lou["can"].as_array().unwrap().iter().filter_map(|c| c.as_str()).collect();
+        assert!(lou_can.contains(&"arm") && !lou_can.contains(&"go"), "{lou_can:?}");
+        assert_eq!(as_(addr, "Alex", "GET", "/whoami", None).await.1["depts"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn a_limited_editor_may_send_undo_and_approve_only_edits_inside_their_department() {
+        let (_show, addr) = dept_show().await;
+        let send = |who: &'static str, chart: Showchart| async move { as_(addr, who, "POST", "/show", Some(&serde_json::to_string(&chart).unwrap())).await };
+
+        // Sam moves a lighting cue: fine. A laser cue, or a new scene: refused
+        let mut light = quick();
+        move_cue(&mut light, "INTRO", "lighting", 600);
+        assert_eq!(send("Sam", light.clone()).await.0, 200);
+        let mut laser = light.clone();
+        move_cue(&mut laser, "INTRO", "laser", 1500);
+        let (code, v) = send("Sam", laser.clone()).await;
+        assert_eq!(code, 403, "{v}");
+        assert!(v["error"].as_str().unwrap().contains("lighting"), "{v}");
+        let mut scene = light.clone();
+        let mut extra = scene.states[0].clone();
+        extra.id = "EXTRA".into();
+        scene.states.push(extra);
+        assert_eq!(send("Sam", scene).await.0, 403, "a scene belongs to the whole show");
+        // a preview is only a look: allowed
+        assert_eq!(as_(addr, "Sam", "POST", "/show?dry=1", Some(&serde_json::to_string(&laser).unwrap())).await.0, 200);
+        // Alex may send the laser edit
+        assert_eq!(send("Alex", laser.clone()).await.0, 200);
+
+        // undo goes back through the sends, newest first: the last was the laser, which Sam may not undo; Alex does, then Sam may undo the lighting one
+        assert_eq!(as_(addr, "Sam", "POST", "/show/undo", None).await.0, 403);
+        assert_eq!(as_(addr, "Alex", "POST", "/show/undo", None).await.0, 200);
+        assert_eq!(as_(addr, "Sam", "POST", "/show/undo", None).await.0, 200);
+
+        // proposals: an agent proposes a laser edit and a lighting edit
+        let mut p_laser = quick();
+        move_cue(&mut p_laser, "INTRO", "laser", 1400);
+        let mut p_light = quick();
+        move_cue(&mut p_light, "INTRO", "lighting", 500);
+        let agent = |chart: Showchart| async move { failover::http(&addr.to_string(), "POST", "/show?said=idea", &[("X-Pchi-Actor", "agent:nova")], Some(&serde_json::to_string(&chart).unwrap())).await.unwrap() };
+        assert_eq!(agent(p_laser).await.0, 202);
+        // the lighting edit is made against the same running show, so both are pending
+        assert_eq!(agent(p_light).await.0, 202);
+        let (_, list) = as_(addr, "Alex", "GET", "/proposals", None).await;
+        let (laser_id, light_id) = (list[0]["id"].as_u64().unwrap(), list[1]["id"].as_u64().unwrap());
+        assert_eq!(as_(addr, "Sam", "POST", &format!("/proposals/{laser_id}/approve"), None).await.0, 403);
+        assert_eq!(as_(addr, "Sam", "POST", &format!("/proposals/{laser_id}/reject"), None).await.0, 403);
+        assert_eq!(as_(addr, "Alex", "POST", &format!("/proposals/{laser_id}/reject"), None).await.0, 200);
+        assert_eq!(as_(addr, "Sam", "POST", &format!("/proposals/{light_id}/approve"), None).await.0, 200);
+    }
+
+    #[test]
+    fn a_roster_entry_may_be_limited_to_departments_and_says_so_when_it_cannot_be() {
+        let ok = governance::Roster::parse(DEPT_ROSTER).unwrap();
+        assert_eq!(ok.depts_of("Sam"), ["lighting"]);
+        assert!(ok.depts_of("Alex").is_empty());
+        assert!(ok.summary().contains("Sam (editor, lighting only)"), "{}", ok.summary());
+        let bad = |entry: &str| governance::Roster::parse(&format!(r#"{{"people":[{entry}]}}"#)).err().unwrap_or_default();
+        assert!(bad(r#"{"name":"G","role":"guest","depts":["audio"],"key":"guest-key-1234"}"#).contains("no powers to limit"));
+        assert!(bad(r#"{"name":"E","role":"editor","depts":["pyro"],"key":"editor-key-1234"}"#).contains("not a department"));
+        assert!(bad(r#"{"name":"E","role":"editor","depts":[],"key":"editor-key-1234"}"#).contains("empty"));
+        assert!(bad(r#"{"name":"E","role":"editor","depts":"lighting","key":"editor-key-1234"}"#).contains("list"));
+        // case and repeats do not matter
+        let r = governance::Roster::parse(r#"{"people":[{"name":"E","role":"editor","depts":["Lighting","lighting","AUDIO"],"key":"editor-key-1234"}]}"#).unwrap();
+        assert_eq!(r.depts_of("E"), ["lighting", "audio"]);
+    }
+
+    #[tokio::test]
+    async fn a_restored_session_keeps_its_departments() {
+        // depts live in the roster, not the session: restoring a session for Sam still limits Sam
+        let path = temp_db("sessions-depts");
+        let first = Show::start(quick(), EventStore::open_in_memory().unwrap()).unwrap();
+        first.set_roster(governance::Roster::parse(DEPT_ROSTER).unwrap());
+        first.use_sessions_file(&path).unwrap();
+        let token = first.sign_in("sam-key-12345").unwrap()["token"].as_str().unwrap().to_string();
+        let second = Show::start(quick(), EventStore::open_in_memory().unwrap()).unwrap();
+        second.set_roster(governance::Roster::parse(DEPT_ROSTER).unwrap());
+        assert_eq!(second.use_sessions_file(&path).unwrap(), 1);
+        let sam = second.identify_with(Some(&token), None, Actor::Person(None));
+        assert_eq!(second.depts_of(&sam), ["lighting"]);
+        assert!(!second.allow(&sam, governance::Perm::Go, None));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // ---- a slow sign-in must not stall the runtime ----
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn hashing_a_key_does_not_stall_the_rest_of_the_runtime() {
+        // 150000 rounds: over a second of work in a debug build (the one this guards), a fraction of that in a release build
+        let (key, entry) = governance::new_entry("Alex", "operator", 150_000).unwrap();
+        let roster = json!({"people": [entry]}).to_string();
+        let show = Show::start(quick(), EventStore::open_in_memory().unwrap()).unwrap();
+        show.set_roster(governance::Roster::parse(&roster).unwrap());
+        let (addr, _s) = serve_app(router(show.clone())).await;
+
+        let signing_in = tokio::spawn({
+            let addr = addr.to_string();
+            async move { failover::http(&addr, "POST", "/signin", &[], Some(&json!({"key": key}).to_string())).await }
+        });
+        // meanwhile the runtime keeps answering and its timers keep ticking (this is what a standby's polls depend on): the longest silence is what matters
+        let mut worst = Duration::ZERO;
+        let began = std::time::Instant::now();
+        let mut last = began;
+        while !signing_in.is_finished() && began.elapsed() < Duration::from_secs(20) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let (code, _) = fo_get(addr, "/role", None).await;
+            assert_eq!(code, 200);
+            let now = std::time::Instant::now();
+            worst = worst.max(now - last);
+            last = now;
+        }
+        let (code, v) = signing_in.await.unwrap().unwrap();
+        eprintln!("longest silence while a key was hashed: {worst:?}");
+        assert_eq!(code, 200, "{v}");
+        assert!(worst < Duration::from_millis(700), "the runtime went silent for {worst:?} while a key was being checked");
     }
 }

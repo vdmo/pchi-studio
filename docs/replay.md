@@ -35,6 +35,10 @@ Everything the log holds for the run: inputs and who sent them, context values, 
 decisions with the names from the roster and the reasons people and agents gave, and the rig's addresses. It holds **no keys, tokens or passwords** (a test checks this). Treat it
 like the show file: it says who pressed what.
 
+## Polls, proposals and undo are in the log too
+
+Opening and closing a poll, the votes (written in batches every half second), a proposal and what became of it, and the show before every send are all recorded. That is what lets a standby that takes over, or a runtime restarted with `--resume`, bring back an open poll with its votes, the proposals still waiting, and what can still be undone. A recording therefore also holds the voter ids the audience gateway chose (never a key or token) and the whole show before and after each send.
+
 ## What it is not
 
 - It does not record what the tools did, only what the runtime sent and what came back.

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { clock, notable, position, replayAt, type ReplayView } from '@pchi/sdk'
-import { feedToken, signedInSession } from './liveFeed'
+import { apiBase, feedToken, signedInSession } from './liveFeed'
 
 const SPEEDS = [1, 2, 4, 8, 16]
 const COLORS = ['#38bdf8', '#a78bfa', '#34d399', '#f472b6', '#fbbf24', '#fb923c', '#22d3ee', '#a3e635']
@@ -8,7 +8,7 @@ const COLORS = ['#38bdf8', '#a78bfa', '#34d399', '#f472b6', '#fbbf24', '#fb923c'
 async function call(path: string, init: RequestInit = {}) {
   const t = feedToken()
   const sess = signedInSession()
-  const res = await fetch(`/api${path}`, { ...init, headers: { ...(init.headers ?? {}), ...(t ? { Authorization: `Bearer ${t}` } : {}), ...(sess ? { 'X-Pchi-Session': sess } : {}) } })
+  const res = await fetch(`${apiBase()}${path}`, { ...init, headers: { ...(init.headers ?? {}), ...(t ? { Authorization: `Bearer ${t}` } : {}), ...(sess ? { 'X-Pchi-Session': sess } : {}) } })
   let body: any = null
   const text = await res.text()
   try {

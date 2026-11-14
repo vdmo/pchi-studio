@@ -100,7 +100,7 @@ pub struct Standby {
 }
 
 /// One HTTP request to a runtime, over a plain socket. `Err` means it could not be reached or did not answer in time.
-pub(crate) async fn http(addr: &str, method: &str, path: &str, headers: &[(&str, &str)], body: Option<&str>) -> Result<(u16, Value), String> {
+pub async fn http(addr: &str, method: &str, path: &str, headers: &[(&str, &str)], body: Option<&str>) -> Result<(u16, Value), String> {
     let io = async {
         let mut s = TcpStream::connect(addr).await.map_err(|e| format!("cannot reach {addr}: {e}"))?;
         let body = body.unwrap_or("");

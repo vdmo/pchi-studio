@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { deptOf, type ShowCue, type Showchart } from '@pchi/sdk'
 import Logo from './Logo'
 import { fmt } from './TimelineStrip'
-import { feedUrl, HEARTBEAT_MS, HEARTBEAT_SOURCE } from './liveFeed'
+import { feedUrl, HEARTBEAT_MS, HEARTBEAT_SOURCE, useRuntimeWhich } from './liveFeed'
 
 type RunDevice = { id: string; label: string; dept: string }
 type Status = 'connecting' | 'online' | 'offline'
@@ -16,6 +16,7 @@ const STANDBY_MS = 10_000
  * sees "no link" if the tablet drops off the network instead of a stale READY.
  */
 export default function DeptPage({ who }: { who: string }) {
+  const which = useRuntimeWhich() // reconnect when Studio follows a takeover
   const [status, setStatus] = useState<Status>('connecting')
   const [def, setDef] = useState<Showchart | null>(null)
   const [devices, setDevices] = useState<RunDevice[]>([])
@@ -84,7 +85,7 @@ export default function DeptPage({ who }: { who: string }) {
       window.clearTimeout(timer)
       ws.current?.close()
     }
-  }, [])
+  }, [which])
 
   // check in while READY or on HOLD (anything the operator should keep seeing)
   useEffect(() => {

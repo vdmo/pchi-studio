@@ -190,6 +190,8 @@ pub struct Member {
     cred: Cred,
     /// When the key stops working (ms since the epoch), if it has an end date.
     expires_ms: Option<i64>,
+    /// The departments this person's powers are limited to (empty: the whole show).
+    pub depts: Vec<String>,
 }
 
 /// Who may sign in, from a roster file: `[{"name": "Alex", "role": "operator", "salt": "...", "key_hash": "..."}]` (or `{"people": [...]}`).
@@ -273,6 +275,43 @@ pub fn new_entry(name: &str, role: &str, iters: u32) -> Result<(String, Value), 
     Ok((key, entry))
 }
 
+/// Run work that takes real time (hashing a key) without stalling the runtime: on a multi-threaded tokio runtime the other tasks move to other
+/// threads meanwhile. Elsewhere (a test on one thread, the command line) it simply runs. A slow sign-in must never make a standby think the primary is dead.
+fn heavy<T>(f: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => tokio::task::block_in_place(f),
+        _ => f(),
+    }
+}
+
+/// The departments a roster entry may be limited to.
+pub const DEPTS: [&str; 4] = ["visual", "lighting", "laser", "audio"];
+
+/// `"depts": ["lighting"]` on a roster entry: this person's powers apply to those departments only. Only for roles that have powers to limit.
+fn parse_depts(v: &Value, role: &str) -> Result<Vec<String>, String> {
+    if v.is_null() {
+        return Ok(Vec::new());
+    }
+    let list = v.as_array().ok_or("depts must be a list such as [\"lighting\"]")?;
+    if !matches!(role, "operator" | "editor" | "lso") {
+        return Err(format!("a {role} has no powers to limit: depts is for operator, editor and lso"));
+    }
+    let mut out: Vec<String> = Vec::new();
+    for d in list {
+        let d = d.as_str().unwrap_or("").trim().to_ascii_lowercase();
+        if !DEPTS.contains(&d.as_str()) {
+            return Err(format!("'{d}' is not a department: {}", DEPTS.join(", ")));
+        }
+        if !out.contains(&d) {
+            out.push(d);
+        }
+    }
+    if out.is_empty() {
+        return Err("depts is empty: leave it out to give the whole show".into());
+    }
+    Ok(out)
+}
+
 impl Roster {
     pub fn parse(text: &str) -> Result<Roster, String> {
         let v: Value = serde_json::from_str(text).map_err(|e| format!("the roster is not valid JSON: {e}"))?;
@@ -294,6 +333,7 @@ impl Roster {
                 Some(e) => Some(parse_expiry(e).map_err(|e| format!("{name}: {e}"))?),
                 None => None,
             };
+            let depts = parse_depts(&p["depts"], &role).map_err(|e| format!("{name}: {e}"))?;
             let cred = match (p["key"].as_str(), p["key_hash"].as_str()) {
                 (Some(key), None) => {
                     if key.len() < 8 {
@@ -316,7 +356,7 @@ impl Roster {
                 }
                 _ => return Err(format!("{name}: give either \"key\" or \"key_hash\" with \"salt\", not both and not neither")),
             };
-            members.push(Member { name, role, cred, expires_ms });
+            members.push(Member { name, role, cred, expires_ms, depts });
         }
         Ok(Roster { members, proved: Mutex::new(HashMap::new()) })
     }
@@ -349,9 +389,12 @@ impl Roster {
         let idx = match cached {
             Some(i) => Some(i),
             None => {
-                let hit = self.members.iter().position(|m| match &m.cred {
-                    Cred::Plain(h) => *h == digest,
-                    Cred::Pbkdf2 { salt, iters, hash } => same(&pbkdf2_key(key, salt, *iters), hash),
+                // checking a hashed key is hundreds of thousands of rounds: never on a thread the runtime needs to answer others
+                let hit = heavy(|| {
+                    self.members.iter().position(|m| match &m.cred {
+                        Cred::Plain(h) => *h == digest,
+                        Cred::Pbkdf2 { salt, iters, hash } => same(&pbkdf2_key(key, salt, *iters), hash),
+                    })
                 });
                 if let Some(i) = hit {
                     self.proved.lock().unwrap().insert(digest, i);
@@ -371,6 +414,11 @@ impl Roster {
         self.members.iter().any(|m| m.name == name && m.role == role && !m.expires_ms.is_some_and(|e| now_ms > e))
     }
 
+    /// The departments a person is limited to (empty: not limited, or not on the roster).
+    pub fn depts_of(&self, name: &str) -> Vec<String> {
+        self.members.iter().find(|m| m.name == name).map(|m| m.depts.clone()).unwrap_or_default()
+    }
+
     /// How many people's keys are written in the roster file in clear.
     pub fn plaintext_count(&self) -> usize {
         self.members.iter().filter(|m| matches!(m.cred, Cred::Plain(_))).count()
@@ -383,7 +431,7 @@ impl Roster {
 
     /// "Alex (operator), Sam (lso)" for the startup line.
     pub fn summary(&self) -> String {
-        self.members.iter().map(|m| format!("{} ({})", m.name, m.role)).collect::<Vec<_>>().join(", ")
+        self.members.iter().map(|m| if m.depts.is_empty() { format!("{} ({})", m.name, m.role) } else { format!("{} ({}, {} only)", m.name, m.role, m.depts.join("+")) }).collect::<Vec<_>>().join(", ")
     }
 
     pub fn has_role(&self, role: &str) -> bool {

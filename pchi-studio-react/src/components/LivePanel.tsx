@@ -8,7 +8,7 @@ import { sceneInfo } from './sceneInfo'
 import LiveCallSheet from './LiveCallSheet'
 import RoleBanner from './RoleBanner'
 import RuntimeTools, { armLaser, decideProposal, getInputs, pollAction, signIn, signOut, stopLasers, testFire, tryCue, whoami, type OscInput, type Poll, type WhoAmI } from './RuntimeTools'
-import { STALE_MS, feedUrl, type Ready } from './liveFeed'
+import { STALE_MS, feedUrl, useRuntimeWhich, type Ready } from './liveFeed'
 import { fmt } from './TimelineStrip'
 import {
   DEPTS,
@@ -124,6 +124,7 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile, onAddCa
   const [tc, setTc] = useState<{ state: string; position: string | null; fps: string | null; source: string } | null>(null) // timecode being heard
   const [oscIn, setOscIn] = useState<OscInput[]>([]) // OSC inputs listening for button presses
   const [me, setMe] = useState<WhoAmI | null>(null) // who the runtime takes this tab to be
+  const which = useRuntimeWhich() // the runtime this tab talks to: the feed reconnects when it changes
   const [authTick, setAuthTick] = useState(0) // bumped on sign in / out: the feed reconnects so the runtime knows who is pressing GO
   const [signErr, setSignErr] = useState('')
   const [decideErr, setDecideErr] = useState('')
@@ -256,11 +257,11 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile, onAddCa
       window.clearTimeout(timer)
       ws.current?.close()
     }
-  }, [authTick])
+  }, [authTick, which])
 
   useEffect(() => {
     if (status === 'online') whoami().then(setMe)
-  }, [status, authTick])
+  }, [status, authTick, which])
 
   // the OSC inputs' counters change without any message on the feed: look again now and then
   useEffect(() => {
@@ -608,7 +609,7 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile, onAddCa
             {me?.signed_in ? (
               <>
                 Signed in as <b>{me.name}</b>
-                {me.can.length ? ' · may ' + me.can.join(', ') : ' · look only'}{' '}
+                {me.can.length ? ' · may ' + me.can.join(', ') : ' · look only'}{me.depts?.length ? ' · ' + me.depts.join(' + ') + ' only' : ''}{' '}
                 <button className="ghost" onClick={async () => { await signOut(); setMe(null); setAuthTick((t) => t + 1) }}>Sign out</button>
               </>
             ) : (

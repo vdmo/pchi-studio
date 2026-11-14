@@ -36,6 +36,17 @@ A roster with keys in clear holds the keys themselves: protect it like the show 
 - **Sessions.** Studio's **Sign in** sends the key once to `POST /signin` and gets a token that lasts `--session-hours` (default 8). This tab keeps the token, not the key; **Sign out** ends it at once on the runtime. Ten wrong keys in a minute make sign-in wait. Machines (a button box, an agent) can still send their key with each request. With `--sessions FILE` sessions survive a restart (only a hash of each token is kept): see `tls.md`, which also says how to put HTTPS in front.
 - **The receipt-signing key** is the one thing that makes the record trustworthy. `--governance-key <file>` keeps it outside the show folder; on Linux and macOS it is made owner-only. Keep a copy of the **verifying key** (printed at startup) somewhere the runtime's machine cannot change, so a forged log can be told from the real one.
 
+## Limit a person to a department
+
+An operator, editor or lighting-safety entry may carry `"depts": ["lighting"]` (any of `visual`, `lighting`, `laser`, `audio`), or be made with `--new-roster-entry Sam:editor:lighting`. Their powers then apply to those departments only:
+
+- **try, test-fire, arm**: only a device of their department.
+- **send an edit, undo a send, approve or reject a proposal**: only if every change is a cue of their department, a lane's device in it, or a rig device of it. Scenes, transitions, scene minimums and the timecode lock belong to the whole show, so an edit that touches any of them is refused for a limited person.
+- **GO**: never. GO moves every department's scene. A limited person who needs to press GO needs a second entry without `depts`.
+- A preview (`dry`) is only a look, so it is always allowed. Refusals are written to the record with the person's name.
+
+`depts` is for operator, editor and lso (guest, agent and button have no powers to limit). The roster is read at startup; a restored session takes its departments from the roster, not from the session file.
+
 ## The roles
 
 | Role | May | May not |

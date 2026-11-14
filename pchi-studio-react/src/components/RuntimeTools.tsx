@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { feedToken, signedInSession } from './liveFeed'
+import { apiBase, feedToken, signedInSession } from './liveFeed'
 import { clearSaid, peekSaid } from './said'
 import RunReplay from './RunReplay'
 
@@ -26,7 +26,7 @@ async function api(path: string, init: RequestInit = {}) {
   const t = feedToken()
   const k = editKey()
   const sess = signedInSession()
-  const res = await fetch(`/api${path}`, { ...init, headers: { ...(init.headers ?? {}), ...(t ? { Authorization: `Bearer ${t}` } : {}), ...(k ? { 'X-Pchi-Edit-Key': k } : {}), ...(sess ? { 'X-Pchi-Session': sess } : {}) } })
+  const res = await fetch(`${apiBase()}${path}`, { ...init, headers: { ...(init.headers ?? {}), ...(t ? { Authorization: `Bearer ${t}` } : {}), ...(k ? { 'X-Pchi-Edit-Key': k } : {}), ...(sess ? { 'X-Pchi-Session': sess } : {}) } })
   let body: unknown = null
   try {
     body = await res.json()
@@ -454,7 +454,7 @@ export async function pollAction(id: string, verb: 'open' | 'close', options: st
   return r.ok ? { ok: true } : { ok: false, error: String(r.body?.error ?? `refused (${r.status})`) }
 }
 
-export type WhoAmI = { name: string; role: string; signed_in: boolean; locked: boolean; can: string[] }
+export type WhoAmI = { name: string; role: string; signed_in: boolean; locked: boolean; can: string[]; depts?: string[] }
 
 /** Who the runtime takes this tab to be, and what that person may do. */
 export async function whoami(): Promise<WhoAmI | null> {
@@ -468,7 +468,7 @@ export async function whoami(): Promise<WhoAmI | null> {
  */
 export async function signIn(key: string): Promise<WhoAmI | null> {
   const t = feedToken()
-  const res = await fetch('/api/signin', { method: 'POST', headers: { 'Content-Type': 'application/json', ...(t ? { Authorization: `Bearer ${t}` } : {}) }, body: JSON.stringify({ key: key.trim() }) }).catch(() => null)
+  const res = await fetch(`${apiBase()}/signin`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(t ? { Authorization: `Bearer ${t}` } : {}) }, body: JSON.stringify({ key: key.trim() }) }).catch(() => null)
   const body = res ? ((await res.json().catch(() => null)) as { token?: string } | null) : null
   if (!res?.ok || !body?.token) return null
   try {
