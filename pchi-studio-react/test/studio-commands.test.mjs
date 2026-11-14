@@ -161,3 +161,32 @@ test('use <device> for <department> picks the device on the lanes, in every scen
   assert.equal(run('use qlab for audio', base, rig).rig.nodes.filter((x) => x.type === 'qlab').length, 1, 'use an existing one, do not add another')
   assert.match(run('use foh for audio', show(), rig).error, /no audio lane/)
 })
+
+test('a scene minimum can be set, changed and removed by sentence', () => {
+  const minOf = (c) => c.states.find((s) => s.id === 'INTRO').min_ms
+  for (const t of ['hold intro for at least 8 seconds', 'intro must run at least 8 seconds', 'set intro minimum to 8 seconds', 'keep the intro at least 8s']) {
+    const r = runCommandText(t, show())
+    assert.ok(r.ok, `${t}: ${r.error}`)
+    assert.equal(minOf(r.chart), 8000, t)
+  }
+  const r = runCommandText('hold intro for at least 8 seconds', show())
+  assert.match(r.steps[0].summary, /Hold INTRO for at least 8 s/)
+  const back = runCommandText('remove the minimum from intro', r.chart)
+  assert.ok(back.ok && minOf(back.chart) === undefined)
+  assert.equal(runCommandText('hold nowhere for at least 3 seconds', show()).ok, false)
+})
+
+test('a timer shorter than the scene minimum is refused with the reason', () => {
+  const withTimer = runCommandText('from intro to drop after 3 seconds', show()).chart
+  const r = runCommandText('hold intro for at least 8 seconds', withTimer)
+  assert.equal(r.ok, false)
+  assert.match(r.error, /timer after 3000 ms but must run at least 8000 ms/)
+})
+
+test('a timer cannot be added that is shorter than the scene minimum', () => {
+  const held = runCommandText('hold intro for at least 8 seconds', show()).chart
+  const r = runCommandText('from intro to drop after 3 seconds', held)
+  assert.equal(r.ok, false)
+  assert.match(r.error, /must run at least 8000 ms/)
+  assert.ok(runCommandText('from intro to drop after 8 seconds', held).ok)
+})

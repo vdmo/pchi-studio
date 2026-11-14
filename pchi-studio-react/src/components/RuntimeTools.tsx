@@ -420,6 +420,14 @@ export async function testFire(id: string): Promise<{ status: string; error?: st
   return { status: String(r.body?.status), error: r.body?.error }
 }
 
+export type OscInput = { name: string; listen: string; bindings: number; received: number; pressed: number; unlisted_sender: number; unbound: number; dropped: number; refused: number; heard_ms_ago: number | null; last_address: string }
+
+/** The OSC inputs the runtime is listening on (Stream Deck, tablet, button box) and what they have done. */
+export async function getInputs(): Promise<OscInput[]> {
+  const r = await api('/inputs').catch(() => null)
+  return r?.ok && Array.isArray(r.body) ? (r.body as unknown as OscInput[]) : []
+}
+
 export type WhoAmI = { name: string; role: string; signed_in: boolean; locked: boolean; can: string[] }
 
 /** Who the runtime takes this tab to be, and what that person may do. */

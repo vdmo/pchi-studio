@@ -343,6 +343,8 @@ export interface ShowState {
   enter_actions?: ShowAction[]
   exit_actions?: ShowAction[]
   timeline?: ShowTimeline
+  /** The scene must run at least this long: an input that would leave it sooner is held until then. */
+  min_ms?: number
 }
 
 export interface ShowTransition {
@@ -532,6 +534,12 @@ export function validateShowchart(c: Showchart): string[] {
       const k = `${t.source}\u0000${trig}`
       if (seen.has(k)) errs.push(`state '${t.source}' has two unguarded transitions on '${trig}' (the second can never fire)`)
       seen.add(k)
+    }
+  }
+  for (const t of c.transitions) {
+    const min = c.states.find((s) => s.id === t.source)?.min_ms
+    if (t.after_ms !== undefined && min !== undefined && t.after_ms < min) {
+      errs.push(`state '${t.source}' has a timer after ${t.after_ms} ms but must run at least ${min} ms: the timer would be cut short`)
     }
   }
   if (ids.has(c.initial)) {

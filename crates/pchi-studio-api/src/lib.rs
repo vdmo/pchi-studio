@@ -44,6 +44,7 @@ use axum::{
 pub mod diff;
 pub mod gearcheck;
 pub mod governance;
+pub mod inputs;
 pub mod links;
 pub mod output;
 pub mod preflight;
@@ -61,6 +62,27 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::broadcast;
+
+/// What happened to an input fed to the show.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Applied {
+    /// It moved the show to another scene.
+    Moved,
+    /// It did nothing (no transition for it here).
+    Ignored,
+    /// It would have moved the scene on, but the scene has not run its minimum yet.
+    Held { scene: String, remaining_ms: u64, min_ms: u64 },
+}
+
+impl Applied {
+    /// Words for a person: why a press did nothing.
+    pub fn held_text(&self) -> Option<String> {
+        match self {
+            Applied::Held { scene, remaining_ms, .. } => Some(format!("held: {scene} must run {:.1} s more before it can be moved on", *remaining_ms as f64 / 1000.0)),
+            _ => None,
+        }
+    }
+}
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -98,6 +120,8 @@ pub struct Show {
     gov: governance::Gov,
     /// Named people and their roles (empty: the single operator key, or an open show).
     roster: Mutex<governance::Roster>,
+    /// OSC inputs listening for button presses (see `inputs`).
+    inputs: Mutex<Vec<Arc<inputs::Input>>>,
 }
 
 /// How long a department page may stay silent before it counts as not linked (mirrors the Studio).
@@ -136,6 +160,7 @@ impl Show {
             resumed: Mutex::new(None),
             gov: Default::default(),
             roster: Mutex::new(Default::default()),
+            inputs: Mutex::new(Vec::new()),
         })
     }
 
@@ -266,6 +291,15 @@ impl Show {
         *self.roster.lock().unwrap() = roster;
     }
 
+    /// Keep an OSC input so its counters can be shown.
+    pub fn add_input(&self, input: Arc<inputs::Input>) {
+        self.inputs.lock().unwrap().push(input);
+    }
+
+    pub fn inputs_json(&self) -> Value {
+        Value::Array(self.inputs.lock().unwrap().iter().map(|i| i.json()).collect())
+    }
+
     pub fn roster_active(&self) -> bool {
         !self.roster.lock().unwrap().is_empty()
     }
@@ -345,6 +379,7 @@ impl Show {
             "server_ts": now_ms(),
             "edit_locked": self.is_locked(),
             "roster": self.roster_active(),
+            "inputs": self.inputs_json(),
             "resumed": self.resumed.lock().unwrap().clone(),
             "undo_depth": self.history.lock().unwrap().len(),
             "governed": self.gov.log.get().is_some(),
@@ -420,6 +455,41 @@ impl Show {
 
     /// Feed an event to the show. Returns whether it caused a transition.
     pub fn apply(self: &Arc<Self>, source: &str, event: &str) -> bool {
+        matches!(self.apply_checked(source, event), Applied::Moved)
+    }
+
+    /// Like `apply`, but says why nothing happened when the scene has not yet run its minimum: an input (not the
+    /// show's own timer) that would move the scene on too early is HELD, meaning ignored, recorded and reported.
+    pub fn apply_checked(self: &Arc<Self>, source: &str, event: &str) -> Applied {
+        if source != "timer" {
+            let held = {
+                let g = self.inner.lock().unwrap();
+                let min = g.engine.chart.state(&g.engine.current_state).and_then(|s| s.min_ms);
+                let elapsed = (now_ms() - g.entered_at).max(0) as u64;
+                match min {
+                    Some(min) if elapsed < min && g.engine.clone().try_dispatch(event).is_some() => Some((min - elapsed, min, g.engine.current_state.clone())),
+                    _ => None,
+                }
+            };
+            if let Some((remaining_ms, min_ms, scene)) = held {
+                let ts = now_ms();
+                {
+                    let g = self.inner.lock().unwrap();
+                    let show_id = g.engine.chart.id.clone().unwrap_or_else(|| "show".into());
+                    let _ = g.store.append(ts, source, Some(&show_id), "show.held", &json!({"event": event, "scene": scene, "remaining_ms": remaining_ms, "min_ms": min_ms}));
+                }
+                self.publish(json!({"type": "held", "ts": ts, "event": event, "scene": scene, "remaining_ms": remaining_ms, "min_ms": min_ms, "source": source}));
+                return Applied::Held { scene, remaining_ms, min_ms };
+            }
+        }
+        if self.apply_inner(source, event) {
+            Applied::Moved
+        } else {
+            Applied::Ignored
+        }
+    }
+
+    fn apply_inner(self: &Arc<Self>, source: &str, event: &str) -> bool {
         let ts = now_ms();
         let mut out = Vec::new();
         let mut armed = None;
@@ -1045,6 +1115,10 @@ pub fn router_with_token(show: Arc<Show>, token: Option<String>) -> Router {
             (StatusCode::OK, Json(a.show.preflight()))
         }))
         .route("/whoami", get(get_whoami))
+        .route("/inputs", get(|State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap| async move {
+            if !authorized(&a.token, &q, &h) { return (StatusCode::UNAUTHORIZED, Json(json!({"error": "token required"}))); }
+            (StatusCode::OK, Json(a.show.inputs_json()))
+        }))
         .route("/rehearse", post(post_rehearse))
         .route("/proposals", get(get_proposals))
         .route("/proposals/:id/:verb", post(post_decide))
@@ -1341,11 +1415,18 @@ async fn post_input(State(a): State<App>, q: Query<HashMap<String, String>>, h: 
     if let Err(r) = gate(&a, &actor, Perm::Go, "show.go", "run the show (send an input)", None) {
         return r;
     }
-    let applied = a.show.apply("http", event);
-    if applied {
-        a.show.receipt("show.go", "ALLOW", &actor, &format!("input '{event}' moved the show to {}", a.show.current_state()));
+    let outcome = a.show.apply_checked("http", event);
+    match &outcome {
+        Applied::Moved => {
+            a.show.receipt("show.go", "ALLOW", &actor, &format!("input '{event}' moved the show to {}", a.show.current_state()));
+        }
+        Applied::Held { remaining_ms, min_ms, .. } => {
+            a.show.receipt("show.go", "DENY", &actor, &format!("input '{event}' {}", outcome.held_text().unwrap_or_default()));
+            return (StatusCode::OK, Json(json!({"applied": false, "held": {"remaining_ms": remaining_ms, "min_ms": min_ms}})));
+        }
+        Applied::Ignored => {}
     }
-    (StatusCode::OK, Json(json!({"applied": applied})))
+    (StatusCode::OK, Json(json!({"applied": outcome == Applied::Moved})))
 }
 
 async fn ws_upgrade(ws: WebSocketUpgrade, State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap) -> impl IntoResponse {
@@ -1401,8 +1482,14 @@ fn handle_client(show: &Arc<Show>, actor: &Actor, text: &str) {
     match kind {
         Some("input") => {
             if let Some(e) = v["event"].as_str() {
-                if show.apply("studio", e) {
-                    show.receipt("show.go", "ALLOW", actor, &format!("input '{e}' moved the show to {}", show.current_state()));
+                match show.apply_checked("studio", e) {
+                    Applied::Moved => {
+                        show.receipt("show.go", "ALLOW", actor, &format!("input '{e}' moved the show to {}", show.current_state()));
+                    }
+                    held @ Applied::Held { .. } => {
+                        show.receipt("show.go", "DENY", actor, &format!("input '{e}' {}", held.held_text().unwrap_or_default()));
+                    }
+                    Applied::Ignored => {}
                 }
             }
         }
@@ -2730,5 +2817,170 @@ mod tests {
         assert_eq!(governance::clean_said(None), "");
         assert_eq!(governance::clean_said(Some(&"x".repeat(500))).len(), 300);
         assert_eq!(governance::said_suffix(""), "");
+    }
+
+    // ---- a scene's minimum: an input that would leave it too early is held ----
+
+    fn with_min(ms: u64) -> Showchart {
+        let mut c = quick();
+        c.states.iter_mut().find(|s| s.id == "INTRO").unwrap().min_ms = Some(ms);
+        c
+    }
+
+    #[test]
+    fn a_timer_shorter_than_the_scene_minimum_is_a_mistake() {
+        let mut c = with_min(5_000);
+        let mut t = c.transitions.iter().find(|t| t.source == "INTRO").unwrap().clone();
+        t.event = None;
+        t.after_ms = Some(2_000);
+        c.transitions.push(t);
+        let errs = c.validate().iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; ");
+        assert!(errs.contains("timer after 2000 ms but must run at least 5000 ms"), "{errs}");
+        c.transitions.last_mut().unwrap().after_ms = Some(5_000);
+        assert!(c.validate().is_empty(), "a timer at the minimum is fine");
+    }
+
+    #[tokio::test]
+    async fn an_input_before_the_scene_minimum_is_held_and_the_scenes_own_timer_is_not() {
+        let show = Show::start(with_min(700), EventStore::open_in_memory().unwrap()).unwrap();
+        let mut rx = show.subscribe();
+        // START leaves PRESHOW, which has no minimum
+        assert_eq!(show.apply_checked("studio", "START"), Applied::Moved);
+        // DROP at once: INTRO must run 0.7 s
+        let held = show.apply_checked("studio", "DROP");
+        let Applied::Held { remaining_ms, min_ms, ref scene } = held else { panic!("{held:?}") };
+        assert!(remaining_ms <= 700 && remaining_ms > 400 && min_ms == 700 && scene == "INTRO", "{held:?}");
+        assert!(held.held_text().unwrap().contains("INTRO must run"), "{held:?}");
+        assert_eq!(show.snapshot()["state"], "INTRO", "a held press changes nothing");
+        // it was reported to clients and written into the run
+        let msgs: Vec<Value> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(msgs.iter().any(|m| m["type"] == "held" && m["event"] == "DROP"), "{msgs:?}");
+        assert!(show.events().iter().any(|e| e["type"] == "show.held"));
+        // an event with no transition is just ignored, not "held"
+        assert_eq!(show.apply_checked("studio", "NOPE"), Applied::Ignored);
+        // after the minimum it goes through
+        tokio::time::sleep(Duration::from_millis(750)).await;
+        assert_eq!(show.apply_checked("studio", "DROP"), Applied::Moved);
+        assert_eq!(show.snapshot()["state"], "DROP");
+    }
+
+    #[tokio::test]
+    async fn the_http_input_says_how_long_to_wait_and_the_record_says_it_was_held() {
+        let (show, addr) = governed("held").await;
+        let mut c = with_min(5_000);
+        c.states.iter_mut().find(|s| s.id == "INTRO").unwrap().min_ms = Some(5_000);
+        show.replace(c, None, true).unwrap();
+        assert_eq!(http(addr, "POST", "/input", r#"{"event":"START"}"#, KEY).await.0, 200);
+        let (st, v) = http(addr, "POST", "/input", r#"{"event":"DROP"}"#, KEY).await;
+        assert_eq!((st, v["applied"].clone(), v["held"]["min_ms"].clone()), (200, json!(false), json!(5000)), "{v}");
+        assert!(v["held"]["remaining_ms"].as_u64().unwrap() > 4_000);
+        let r = receipts(&show);
+        assert!(r.iter().any(|(ru, g, m)| ru == "show.go" && g == "DENY" && m.contains("INTRO must run")), "{r:?}");
+    }
+
+    // ---- OSC input: a Stream Deck or tablet presses things, and only presses ----
+
+    fn osc(addr: &str, args: Vec<rosc::OscType>) -> Vec<u8> {
+        rosc::encoder::encode(&rosc::OscPacket::Message(rosc::OscMessage { addr: addr.into(), args })).unwrap()
+    }
+
+    async fn deck(show: &Arc<Show>, allow: &str) -> (Arc<inputs::Input>, std::net::SocketAddr) {
+        let text = format!(r#"[{{"name":"Stream Deck","listen":"127.0.0.1:0","allow":[{allow}],"bindings":[
+            {{"address":"/go","event":"START"}},{{"address":"/drop","event":"DROP"}},
+            {{"address":"/energy","context":"energy"}},{{"address":"/stop","action":"laser.stop"}}]}}]"#);
+        let spec = inputs::parse(&text).unwrap().remove(0);
+        let input = inputs::start(show, spec).await.unwrap();
+        let addr = input.bound.lock().unwrap().unwrap();
+        (input, addr)
+    }
+
+    async fn send_osc(to: std::net::SocketAddr, addr: &str, args: Vec<rosc::OscType>) {
+        let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        sock.send_to(&osc(addr, args), to).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(120)).await;
+    }
+
+    #[tokio::test]
+    async fn a_stream_deck_presses_events_sets_values_and_stops_lasers_and_the_record_names_it() {
+        let (show, _) = governed("deck").await;
+        show.set_edit_key(None);
+        let (input, to) = deck(&show, "").await;
+        // a press moves the show; the same press again finds no transition
+        send_osc(to, "/go", vec![rosc::OscType::Int(1)]).await;
+        assert_eq!(show.snapshot()["state"], "INTRO");
+        send_osc(to, "/go", vec![rosc::OscType::Int(1)]).await;
+        assert_eq!(show.snapshot()["state"], "INTRO");
+        // releasing the button (0) is not a press
+        send_osc(to, "/drop", vec![rosc::OscType::Int(0)]).await;
+        assert_eq!(show.snapshot()["state"], "INTRO");
+        send_osc(to, "/drop", vec![rosc::OscType::Float(1.0)]).await;
+        assert_eq!(show.snapshot()["state"], "DROP");
+        // a fader sets a context value
+        send_osc(to, "/energy", vec![rosc::OscType::Float(0.8)]).await;
+        assert!((show.snapshot()["context"]["energy"].as_f64().unwrap() - 0.8).abs() < 1e-6, "{}", show.snapshot()["context"]);
+        // an address with no binding is counted, never acted on
+        send_osc(to, "/arm", vec![rosc::OscType::Int(1)]).await;
+        // STOP LASERS
+        show.set_armed("b1", true).unwrap();
+        send_osc(to, "/stop", vec![rosc::OscType::Int(1)]).await;
+        assert_eq!(show.snapshot()["devices"][0]["armed"], false, "the hard stop disarmed the laser");
+
+        let j = input.json();
+        assert_eq!((j["unbound"].clone(), j["last_address"].clone()), (json!(1), json!("/stop")), "the unbound /arm was counted, then /stop was the last heard: {j}");
+        assert!(j["pressed"].as_u64().unwrap() >= 4, "{j}");
+        assert_eq!(show.snapshot()["inputs"][0]["name"], "Stream Deck");
+        let r = receipts(&show);
+        assert!(r.iter().any(|(ru, g, m)| ru == "show.go" && g == "ALLOW" && m.starts_with("Stream Deck (button): /go sent 'START': moved the show to INTRO")), "{r:?}");
+        assert!(r.iter().any(|(ru, g, m)| ru == "laser.stop" && g == "ALLOW" && m.starts_with("Stream Deck (button): hard stop from /stop")), "{r:?}");
+    }
+
+    #[tokio::test]
+    async fn an_input_can_only_press_whatever_its_bindings_say() {
+        let (show, _) = rostered("deckrole").await;
+        let (input, _) = deck(&show, "").await;
+        let a = input.actor();
+        assert_eq!(a.name(), "Stream Deck (button)");
+        assert!(show.allow(&a, governance::Perm::Go, None));
+        for p in [governance::Perm::Edit, governance::Perm::Approve, governance::Perm::Undo, governance::Perm::Arm, governance::Perm::Try, governance::Perm::Test] {
+            assert!(!show.allow(&a, p, Some("laser")), "{p:?}");
+        }
+        // an input cannot be bound to anything but a press, a value or the hard stop
+        assert!(inputs::parse(r#"[{"name":"X","listen":"127.0.0.1:1","bindings":[{"address":"/a","action":"laser.arm"}]}]"#).is_err());
+    }
+
+    #[tokio::test]
+    async fn datagrams_from_unlisted_senders_are_dropped_and_a_flood_is_capped() {
+        let (show, _) = governed("deckallow").await;
+        show.set_edit_key(None);
+        let (input, to) = deck(&show, r#""10.9.9.9""#).await;
+        send_osc(to, "/go", vec![rosc::OscType::Int(1)]).await;
+        assert_eq!(show.snapshot()["state"], "PRESHOW", "127.0.0.1 is not on the allow list");
+        assert_eq!(input.json()["unlisted_sender"], 1);
+
+        let (show2, _) = governed("deckflood").await;
+        show2.set_edit_key(None);
+        let (flooded, to2) = deck(&show2, "").await;
+        let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        for i in 0..300 {
+            sock.send_to(&osc("/energy", vec![rosc::OscType::Float(i as f32)]), to2).await.unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let j = flooded.json();
+        assert!(j["dropped"].as_u64().unwrap() > 0, "more than 100 a second are dropped: {j}");
+        assert!(j["received"].as_u64().unwrap() <= 100, "{j}");
+    }
+
+    #[tokio::test]
+    async fn a_press_before_the_scene_minimum_is_held_for_a_button_too() {
+        let (show, _) = governed("deckheld").await;
+        show.set_edit_key(None);
+        show.replace(with_min(5_000), None, true).unwrap();
+        let (_input, to) = deck(&show, "").await;
+        send_osc(to, "/go", vec![rosc::OscType::Int(1)]).await;
+        assert_eq!(show.snapshot()["state"], "INTRO");
+        send_osc(to, "/drop", vec![rosc::OscType::Int(1)]).await;
+        assert_eq!(show.snapshot()["state"], "INTRO", "INTRO must run 5 s first");
+        let r = receipts(&show);
+        assert!(r.iter().any(|(ru, g, m)| ru == "show.go" && g == "DENY" && m.contains("/drop sent 'DROP' held: INTRO must run")), "{r:?}");
     }
 }

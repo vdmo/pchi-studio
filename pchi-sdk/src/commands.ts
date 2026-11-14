@@ -44,6 +44,8 @@ export type ShowCommand =
   | { op: 'moveCue'; state: string; dept?: string; laneName?: string; from_ms: number; to_ms: number }
   | { op: 'removeCue'; state: string; dept?: string; laneName?: string; at_ms: number }
   | { op: 'setTimelineLength'; state: string; duration_ms: number }
+  /** A scene must run at least this long before an input can move it on (null removes the minimum). */
+  | { op: 'setMinimum'; state: string; ms: number | null }
   | { op: 'clearTimeline'; state: string }
   | { op: 'undo' }
   | { op: 'redo' }
@@ -86,6 +88,7 @@ export const COMMAND_EXAMPLES = [
   'move the lighting cue at 2 seconds to 5 seconds in intro',
   'remove the laser cue at 4 seconds in intro',
   'set intro length to 20 seconds',
+  'hold intro for at least 8 seconds',
   'undo',
 ]
 
@@ -264,6 +267,10 @@ export function applyCommand(chart: Showchart, cmd: ShowCommand): { chart: Showc
       return { chart: c, summary: `Start the show at ${cmd.id}` }
 
     case 'addTransition': {
+      const srcMin = c.states.find((st) => st.id === cmd.source)?.min_ms
+      if (cmd.after_ms !== undefined && srcMin !== undefined && cmd.after_ms < srcMin) {
+        throw new CommandError(`state '${cmd.source}' has a timer after ${cmd.after_ms} ms but must run at least ${srcMin} ms: the timer would be cut short`, 'Make the timer at least as long as the minimum')
+      }
       const created: string[] = []
       for (const id of [cmd.source, cmd.target]) {
         if (!c.states.some((s) => s.id === id)) {
@@ -340,6 +347,20 @@ export function applyCommand(chart: Showchart, cmd: ShowCommand): { chart: Showc
     case 'setTimelineLength':
     case 'clearTimeline':
       return applyTimeline(c, cmd)
+
+    case 'setMinimum': {
+      need(cmd.state)
+      if (cmd.ms !== null) {
+        const clash = c.transitions.find((t) => t.source === cmd.state && t.after_ms !== undefined && t.after_ms < cmd.ms!)
+        if (clash) throw new CommandError(`state '${cmd.state}' has a timer after ${clash.after_ms} ms but must run at least ${cmd.ms} ms: the timer would be cut short`, 'Lengthen the timer or shorten the minimum')
+      }
+      c.states = c.states.map((st) => {
+        if (st.id !== cmd.state) return st
+        const { min_ms: _old, ...rest } = st
+        return cmd.ms === null ? rest : { ...rest, min_ms: cmd.ms }
+      })
+      return { chart: c, summary: cmd.ms === null ? `Remove the minimum from ${cmd.state}` : `Hold ${cmd.state} for at least ${fmtSecs(cmd.ms)}: a press before then is held` }
+    }
 
     case 'undo':
     case 'redo':
@@ -863,6 +884,24 @@ function parseTimelineFragment(text: string, chart: Showchart, notes: string[], 
   // clear the timeline
   let m = match(/^(?:clear|empty|reset)\s+(?:the\s+)?(?:(.+?)\s+)?timeline(?:\s+(?:of|in|for)\s+(?:the\s+)?(.+))?$/i)
   if (m) return [{ op: 'clearTimeline', state: needState(stateNamed(m[2] ?? m[1])) }]
+
+  // minimum: "hold intro for at least 8 seconds", "intro must run at least 8 seconds", "set intro minimum to 8 seconds", "no minimum for intro"
+  m =
+    match(new RegExp(`^(?:hold|keep)\\s+(?:the\\s+)?(.+?)\\s+(?:for\\s+)?at\\s+least\\s+(${TIME_SRC})$`, 'i')) ??
+    match(new RegExp(`^(?:the\\s+)?(.+?)\\s+(?:must|should|has\\s+to|needs\\s+to)\\s+(?:run|last|play|stay)\\s+(?:for\\s+)?at\\s+least\\s+(${TIME_SRC})$`, 'i'))
+  if (m) {
+    const ms = parseTime(m[2])
+    if (ms === null) throw new CommandError(`I couldn't read the time "${m[2]}".`, 'Say a number: at least 8 seconds')
+    return [{ op: 'setMinimum', state: needState(stateNamed(m[1])), ms }]
+  }
+  m = match(new RegExp(`^(?:set|make)\\s+(?:the\\s+)?(?:(.+?)\\s+)?minimum\\s+(?:length\\s+|duration\\s+|time\\s+)?(?:to|=|of)\\s+(${TIME_SRC})(?:\\s+(?:in|for)\\s+(?:the\\s+)?(.+))?$`, 'i'))
+  if (m) {
+    const ms = parseTime(m[2])
+    if (ms === null) throw new CommandError(`I couldn't read the time "${m[2]}".`, 'Say a number: 8 seconds')
+    return [{ op: 'setMinimum', state: needState(stateNamed((m[3] ?? m[1])?.trim())), ms }]
+  }
+  m = match(/^(?:remove|clear|no|drop)\s+(?:the\s+)?minimum\s+(?:for|on|from|in)\s+(?:the\s+)?(.+)$/i)
+  if (m) return [{ op: 'setMinimum', state: needState(stateNamed(m[1])), ms: null }]
 
   // timeline length: "set intro length to 20 seconds", "make the intro timeline 20 seconds long"
   m = match(new RegExp(`^(?:set|make)\\s+(?:the\\s+)?(?:(.+?)\\s+)?(?:timeline\\s+)?(?:length|duration)\\s+(?:to|=|of)\\s+(${TIME_SRC})(?:\\s+(?:in|for)\\s+(?:the\\s+)?(.+))?$`, 'i'))

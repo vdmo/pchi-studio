@@ -57,6 +57,14 @@ pub fn diff(old: &Showchart, new: &Showchart, old_dev: &[Device], new_dev: &[Dev
             d.changes.push(format!("- scene {}", s.id));
         }
     }
+    for n in &new.states {
+        if let Some(o) = old.states.iter().find(|o| o.id == n.id) {
+            if o.min_ms != n.min_ms {
+                let word = |m: Option<u64>| m.map_or("none".to_string(), secs);
+                d.changes.push(format!("~ scene {}: minimum {} → {}", n.id, word(o.min_ms), word(n.min_ms)));
+            }
+        }
+    }
     let tkey = |t: &pchi_showchart::Transition| format!("{} → {} ({})", t.source, t.target, t.event.clone().or(t.after_ms.map(|a| format!("after {}", secs(a)))).unwrap_or_default());
     for t in &new.transitions {
         if !old.transitions.iter().any(|o| tkey(o) == tkey(t)) {
@@ -169,5 +177,14 @@ mod tests {
         assert_eq!(d.blockers.len(), 1);
         assert!(d.blockers[0].contains("running scene A"));
         assert!(d.changes.contains(&"- scene A".to_string()));
+    }
+
+    #[test]
+    fn a_changed_scene_minimum_is_reported() {
+        let old = Showchart::from_json(include_str!("../../pchi-showchart/examples/timelines.pchi.json")).unwrap();
+        let mut new = old.clone();
+        new.states.iter_mut().find(|s| s.id == "INTRO").unwrap().min_ms = Some(8_000);
+        let d = diff(&old, &new, &[], &[], "INTRO", 0);
+        assert!(d.changes.contains(&"~ scene INTRO: minimum none → 8.0s".to_string()), "{:?}", d.changes);
     }
 }

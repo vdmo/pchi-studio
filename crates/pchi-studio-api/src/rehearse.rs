@@ -153,6 +153,12 @@ pub fn run(records: &[EventRecord], chart: &Showchart, devices: &[rig::Device], 
             }
             let ev = ev.unwrap_or_default();
             let was = engine.current_state.clone();
+            if let Some(min) = chart.state(&was).and_then(|s| s.min_ms) {
+                if t - cur.entered < min && engine.clone().try_dispatch(&ev).is_some() {
+                    divergences.push(format!("{}: the recorded input '{ev}' would be held: {was} must run {} and had run {}", secs(t), secs(min), secs(t - cur.entered)));
+                    continue;
+                }
+            }
             let moved = engine.try_dispatch(&ev).is_some();
             if !moved {
                 divergences.push(format!("{}: the recorded input '{ev}' would do nothing: this show is in {was}", secs(t)));
@@ -396,6 +402,19 @@ mod tests {
         c.states.iter_mut().find(|s| s.id == "INTRO").unwrap().timeline.as_mut().unwrap().lanes[0].cues[0].action.payload = json!({"scene": "3"});
         let r = run(&real_run(), &c, &[dev("r1", "resolume")], T0 + 6000).unwrap();
         assert_eq!(r["visits"][1]["fires"][0]["sent_as"][0]["address"], "/composition/columns/3/connect");
+    }
+
+    #[test]
+    fn a_scene_minimum_would_have_held_a_press_that_came_too_early() {
+        let mut c = chart();
+        c.states.iter_mut().find(|s| s.id == "INTRO").unwrap().min_ms = Some(5_000);
+        let r = run(&real_run(), &c, &[], T0 + 6000).unwrap();
+        let l = lines(&r).join("\n");
+        assert!(l.contains("the recorded input 'DROP' would be held: INTRO must run 5.0s and had run 3.0s"), "{l}");
+        assert_eq!(r["rehearsed_path"], json!(["PRESHOW", "INTRO"]), "the show never reaches DROP");
+        // a minimum the real run already met changes nothing
+        c.states.iter_mut().find(|s| s.id == "INTRO").unwrap().min_ms = Some(2_000);
+        assert_eq!(run(&real_run(), &c, &[], T0 + 6000).unwrap()["summary"]["different"], false);
     }
 
     #[test]

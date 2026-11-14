@@ -33,6 +33,9 @@ struct Cli {
     /// Named people and their roles, a JSON list of {"name", "role", "key"}: operator (everything), editor (edit, approve, undo, try, test), lso (arm lasers; try and test lasers only), guest (look only), agent (a named agent: proposes only). Each person signs in with their own key (Studio's Sign in). The file holds the keys: protect it. See docs/roles.md.
     #[arg(long, value_name = "FILE", env = "PCHI_ROSTER")]
     roster: Option<String>,
+    /// OSC inputs, a JSON file: a Stream Deck, tablet or button box that presses GO, sets a context value or hits STOP LASERS (never arms or edits). Listening beyond this machine needs an allow list of sender addresses. See docs/osc-input.md.
+    #[arg(long, value_name = "FILE", env = "PCHI_INPUTS")]
+    inputs: Option<String>,
     /// Write a signed, hash-chained receipt for every decision (edits, arming, GO, refusals, proposals) into this folder, in the format scripts/verify_governance_chain.py checks offline. The folder keeps the signing key too: protect it like the show file.
     #[arg(long, env = "PCHI_GOVERNANCE")]
     governance: Option<String>,
@@ -104,6 +107,15 @@ async fn main() -> anyhow::Result<()> {
         show.set_governance(log);
         let how = if cli.resume { "resumed the run recorded in the database" } else { "started the show" };
         show.receipt("show.start", "ALLOW", &pchi_studio_api::governance::Actor::Person(None), &format!("runtime {how}{}", if cli.send { " with sending ON" } else { " (dry-run)" }));
+    }
+    if let Some(path) = &cli.inputs {
+        let specs = pchi_studio_api::inputs::parse(&std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?).map_err(anyhow::Error::msg).with_context(|| format!("inputs {path}"))?;
+        for spec in specs {
+            let n = spec.bindings.len();
+            let from = if spec.allow.is_empty() { "this machine only".to_string() } else { format!("from {}", spec.allow.join(", ")) };
+            let input = pchi_studio_api::inputs::start(&show, spec).await.map_err(anyhow::Error::msg)?;
+            println!("input: {} listening on {} ({n} binding(s), {from})", input.spec.name, input.bound.lock().unwrap().map(|a| a.to_string()).unwrap_or_default());
+        }
     }
     let listener = tokio::net::TcpListener::bind(&cli.bind).await.with_context(|| format!("binding {}", cli.bind))?;
     println!("pchi-studio-api: {} on http://{} (ws://{}/ws), recording to {}",

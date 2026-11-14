@@ -324,7 +324,7 @@ mod tests {
     #[test]
     fn unreachable_states_are_reported_by_validate() {
         let mut c = portal();
-        c.states.push(crate::State { id: "ORPHAN".into(), label: String::new(), enter_actions: vec![], exit_actions: vec![], timeline: None });
+        c.states.push(crate::State { id: "ORPHAN".into(), label: String::new(), enter_actions: vec![], exit_actions: vec![], timeline: None, min_ms: None });
         assert_eq!(c.validate(), vec![ValidationError::Unreachable("ORPHAN".into())]);
         assert!(ShowEngine::new(c).is_ok());
     }

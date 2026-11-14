@@ -162,13 +162,15 @@ pub enum Perm {
 pub const ALL_PERMS: [(Perm, &str); 7] = [(Perm::Go, "go"), (Perm::Edit, "edit"), (Perm::Approve, "approve"), (Perm::Undo, "undo"), (Perm::Arm, "arm"), (Perm::Try, "try"), (Perm::Test, "test")];
 
 /// The roles a roster may give. An "lso" (laser safety officer) may only try or test lasers.
-pub const ROLES: [&str; 5] = ["operator", "editor", "lso", "guest", "agent"];
+/// "button" may only press (GO and the show's own events): a Stream Deck or button box, also what every OSC input acts as.
+pub const ROLES: [&str; 6] = ["operator", "editor", "lso", "guest", "agent", "button"];
 
 pub fn role_allows(role: &str, perm: Perm) -> bool {
     match role {
         "operator" => true,
         "editor" => matches!(perm, Perm::Edit | Perm::Approve | Perm::Undo | Perm::Try | Perm::Test),
         "lso" => matches!(perm, Perm::Arm | Perm::Try | Perm::Test),
+        "button" => perm == Perm::Go,
         _ => false, // guest, and agent (which proposes instead)
     }
 }

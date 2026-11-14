@@ -6,7 +6,7 @@ import CommandBar from './CommandBar'
 import TimelineStrip, { useStripLayout } from './TimelineStrip'
 import { sceneInfo } from './sceneInfo'
 import LiveCallSheet from './LiveCallSheet'
-import RuntimeTools, { armLaser, decideProposal, signIn, signOut, stopLasers, testFire, tryCue, whoami, type WhoAmI } from './RuntimeTools'
+import RuntimeTools, { armLaser, decideProposal, getInputs, signIn, signOut, stopLasers, testFire, tryCue, whoami, type OscInput, type WhoAmI } from './RuntimeTools'
 import { STALE_MS, feedUrl, type Ready } from './liveFeed'
 import { fmt } from './TimelineStrip'
 import {
@@ -108,6 +108,7 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
   const [undoDepth, setUndoDepth] = useState(0) // sends that can still be undone
   const [proposals, setProposals] = useState<{ id: number; actor: string; status: string; changes: string[]; notes: string[]; said?: string; rehearsal?: { different: boolean; verdict: string; lines: string[] } | null }[]>([]) // edits an agent proposed
   const [governed, setGoverned] = useState(false) // the runtime writes signed receipts
+  const [oscIn, setOscIn] = useState<OscInput[]>([]) // OSC inputs listening for button presses
   const [me, setMe] = useState<WhoAmI | null>(null) // who the runtime takes this tab to be
   const [authTick, setAuthTick] = useState(0) // bumped on sign in / out: the feed reconnects so the runtime knows who is pressing GO
   const [signErr, setSignErr] = useState('')
@@ -153,6 +154,7 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
             setLocked(!!msg.edit_locked)
             setUndoDepth(Number(msg.undo_depth ?? 0))
             setGoverned(!!msg.governed)
+            setOscIn(Array.isArray(msg.inputs) ? (msg.inputs as OscInput[]) : [])
             setProposals(Array.isArray(msg.proposals) ? (msg.proposals as typeof proposals) : [])
             setDef(msg.definition as Showchart)
             setState(String(msg.state))
@@ -204,6 +206,9 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
             if (p) setProposals((ps) => [...ps.filter((x) => x.id !== p.id), p].sort((a, b) => a.id - b.id))
             break
           }
+          case 'held':
+            setTrail((t) => [...t.slice(-49), { ts: Number(msg.ts), text: `${msg.event} held in ${msg.scene}: ${(Number(msg.remaining_ms) / 1000).toFixed(1)} s more (${msg.source})` }])
+            break
           case 'context':
             setCtx((c) => ({ ...c, [String(msg.key)]: msg.value }))
             break
@@ -225,6 +230,11 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
   useEffect(() => {
     if (status === 'online') whoami().then(setMe)
   }, [status, authTick])
+
+  // the OSC inputs' counters change without any message on the feed: look again now and then
+  useEffect(() => {
+    if (status === 'online' && oscIn.length) getInputs().then((i) => i.length && setOscIn(i))
+  }, [status, beat, oscIn.length])
 
   // timed transitions leaving the current state, with whether each would fire right now
   const timerRows = useMemo(
@@ -288,6 +298,9 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
   // GO takes the first way out that would actually fire now; the others stay available as smaller buttons.
   const goOptions = available.filter((t) => t.event !== undefined && !!def && step(def, ctx, state, t.event)?.target === t.target)
   const go = goOptions[0]
+  // the scene's own minimum: until it is met a press is held by the runtime (and only the clock here is shown)
+  const sceneMin = def?.states.find((x) => x.id === state)?.min_ms
+  const minLeft = sceneMin ? Math.max(0, sceneMin - (now - enteredAt)) : 0
   const autoNext = timerRows.filter((r) => r.open).sort((a, b) => a.ms - b.ms)[0]
   const autoLeft = autoNext ? Math.max(0, autoNext.ms - elapsed) : undefined
   const nextCue = lanes
@@ -407,7 +420,7 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
         </div>
         <button className={`go ${armed ? 'armed' : onHold.length ? 'warn' : ''}`} disabled={!go} onClick={pressGo} title="Send the next event (Space)">
           {!go ? (autoNext ? 'WAITING' : 'GO') : armed ? `GO ANYWAY → ${go.target}` : `GO → ${go.target}`}
-          <small>{!go ? (autoNext ? `moves on by itself in ${fmt(autoLeft ?? 0)}` : 'nothing to send') : onHold.length + noReply.length ? `${[...onHold, ...noReply].join(', ')} needed in ${nextScene}${armed ? ': press again to go' : ''}` : heldElsewhere.length ? `Space · ${heldElsewhere.join(', ')} on hold but not needed in ${nextScene}` : 'Space'}</small>
+          <small>{go && minLeft > 0 ? `held for ${fmt(minLeft)}: ${state} must run ${fmt(sceneMin ?? 0)} first` : !go ? (autoNext ? `moves on by itself in ${fmt(autoLeft ?? 0)}` : 'nothing to send') : onHold.length + noReply.length ? `${[...onHold, ...noReply].join(', ')} needed in ${nextScene}${armed ? ': press again to go' : ''}` : heldElsewhere.length ? `Space · ${heldElsewhere.join(', ')} on hold but not needed in ${nextScene}` : 'Space'}</small>
         </button>
 
         {view === 'calls' && def && (
@@ -585,6 +598,13 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
             {signErr && <span role="alert"> {signErr}</span>}
           </p>
         )}
+        {oscIn.map((i) => (
+          <p key={i.name} className="muted gov-badge" title="Presses arriving by OSC. It can only press GO and the show's own events, set a value, or hit STOP LASERS.">
+            OSC in · <b>{i.name}</b> {i.listen.split(':').pop() ? ':' + i.listen.split(':').pop() : ''} · {i.bindings} binding{i.bindings === 1 ? '' : 's'} ·{' '}
+            {i.heard_ms_ago === null ? 'nothing heard yet' : `last ${i.last_address} ${Math.round(i.heard_ms_ago / 1000)} s ago`} · {i.pressed} pressed
+            {i.unlisted_sender + i.dropped + i.refused > 0 && <span> · ignored {i.unlisted_sender} from other senders, {i.dropped} over the rate cap, {i.refused} refused</span>}
+          </p>
+        ))}
         {governed && <p className="muted gov-badge" title="Every edit, arming, GO and refusal is written to a signed, hash-chained log you can verify offline">Signed receipts are on</p>}
         {proposals.some((p) => p.status === 'pending') && (
           <section className="proposals" aria-label="Edits waiting for a person">
