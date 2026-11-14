@@ -27,6 +27,9 @@ struct Cli {
     /// Require this key (`X-Pchi-Edit-Key`, or `?edit_key=`) to send an edited show, undo a send, or test-fire a device. Keeps department pages and viewers from changing the show.
     #[arg(long, env = "PCHI_EDIT_KEY")]
     edit_key: Option<String>,
+    /// Carry on the run recorded in --db instead of starting a new one: the scene the show was in, its context and the cues still ahead. Cues that came due while the runtime was down are skipped (and listed), lasers start disarmed, and departments report READY again.
+    #[arg(long, requires = "db")]
+    resume: bool,
     /// Really send cues to the rig's devices (UDP/OSC to each device's host and port). Without it, deliveries are only reported as "dry-run".
     #[arg(long)]
     send: bool,
@@ -46,7 +49,21 @@ async fn main() -> anyhow::Result<()> {
     if cli.send && routed.is_none() {
         eprintln!("warning: --send has no effect: {} has no rig (open it in Studio, add devices and Save as .pchi)", cli.file);
     }
-    let show = Show::start_with(chart, store, devices.map(|d| Output::new(d, cli.send))).map_err(anyhow::Error::msg)?;
+    let output = devices.map(|d| Output::new(d, cli.send));
+    let show = if cli.resume {
+        let (show, info) = Show::resume(chart, store, output).map_err(anyhow::Error::msg).context("resuming")?;
+        println!(
+            "resumed in {} after {:.0} s ({:.0} s with the runtime down); skipped {} cue(s) and {} timer(s) that came due meanwhile",
+            info["state"], info["elapsed_ms"].as_f64().unwrap_or(0.0) / 1000.0, info["downtime_ms"].as_f64().unwrap_or(0.0) / 1000.0,
+            info["skipped_cues"].as_array().map_or(0, |a| a.len()), info["skipped_timers"].as_array().map_or(0, |a| a.len())
+        );
+        for c in info["skipped_cues"].as_array().into_iter().flatten() {
+            println!("  skipped cue: {c}");
+        }
+        show
+    } else {
+        Show::start_with(chart, store, output).map_err(anyhow::Error::msg)?
+    };
     show.set_edit_key(cli.edit_key.clone());
     let listener = tokio::net::TcpListener::bind(&cli.bind).await.with_context(|| format!("binding {}", cli.bind))?;
     println!("pchi-studio-api: {} on http://{} (ws://{}/ws), recording to {}",

@@ -97,6 +97,21 @@ The five dialects live in `crates/pchi-studio-api/src/profiles.rs`, each with te
   still the department's word. They are shown separately on purpose.
 - A device that cannot listen on its port (already in use) is reported once as an error.
 
+### Before the doors: check, try, resume
+
+See `foh-proof.md` for what is measured and what still needs real equipment.
+
+- **Doors check** (Live tab, or `GET /preflight`): every cue and scene action against the device and the tool's own
+  profile, each device's address, link, READY and laser arming, as ok / look at it / will not work. A value a tool
+  cannot use is caught here, not during the show.
+- **Try a cue** (Live tab, or `POST /devices/<id>/try` with `{"value":"3"}`): one cue to one device, no show needed,
+  showing the exact OSC address and values. In a dry run it shows what *would* be sent. Needs the operator key; a
+  laser needs arming first.
+- **Resume after a restart:** run with `--db show.db` always, and after a restart use `--db show.db --resume`. It
+  continues in the scene the show was in with its context. Cues still ahead fire; cues that came due while the runtime
+  was down are skipped and listed, never fired late. Lasers start disarmed and departments report READY again. It
+  refuses if the file no longer reproduces the recorded run.
+
 ### Laser safety
 
 - **Lasers start disarmed on every runtime start.** A laser device gets no cues, and no test-fire, until the

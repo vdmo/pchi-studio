@@ -187,7 +187,7 @@ impl Output {
     }
 }
 
-fn packets_for(dev: &Device, action: &Action) -> Result<Vec<Vec<u8>>, String> {
+pub fn packets_for(dev: &Device, action: &Action) -> Result<Vec<Vec<u8>>, String> {
     Ok(match (action.kind.as_str(), profiles::encode(&dev.kind, action)) {
         ("test", _) | (_, None) => vec![encode(action)?],
         (_, Some(r)) => r?,

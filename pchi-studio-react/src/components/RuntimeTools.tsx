@@ -34,6 +34,7 @@ async function api(path: string, init: RequestInit = {}) {
 }
 
 type Diff = { changes: string[]; notes: string[]; blockers: string[] }
+type DoorCheck = { level: 'ok' | 'warn' | 'fail'; area: string; text: string; device?: string; scene?: string }
 
 function Dialog({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
   const ref = useRef<HTMLDivElement>(null)
@@ -67,6 +68,13 @@ export default function RuntimeTools({ getFile, locked = false, undoDepth = 0 }:
   const [send, setSend] = useState<{ mode: 'send' | 'undo'; diff?: Diff; error?: string; done?: boolean; busy?: boolean; needKey?: boolean; keyWrong?: boolean } | null>(null)
   const [report, setReport] = useState<Record<string, any> | { error: string } | null>(null)
   const [keyText, setKeyText] = useState('')
+  const [doors, setDoors] = useState<{ summary?: { go: boolean; fail: number; warn: number; ok: number }; checks?: DoorCheck[]; error?: string; busy?: boolean } | null>(null)
+  const openDoors = async () => {
+    setDoors({ busy: true })
+    const r = await api('/preflight').catch(() => null)
+    if (!r?.ok) return setDoors({ error: 'Could not run the check. Is the runtime running?' })
+    setDoors({ summary: r.body?.summary, checks: r.body?.checks })
+  }
 
   const post = (mode: 'send' | 'undo', dry: boolean) =>
     api(mode === 'send' ? `/show${dry ? '?dry=1' : ''}` : `/show/undo${dry ? '?dry=1' : ''}`, {
@@ -112,6 +120,7 @@ export default function RuntimeTools({ getFile, locked = false, undoDepth = 0 }:
       <div className="rt-tools">
         <button onClick={() => open('send')} title="Show what would change in the running show, then send it">{locked ? '🔒 ' : ''}Send show to runtime…</button>
         {undoDepth > 0 && <button onClick={() => open('undo')} title="Put the running show back as it was before the last send">Undo last send ({undoDepth})</button>}
+        <button onClick={openDoors} title="Check the whole show against the rig and each tool before the doors open">Doors check</button>
         <button onClick={openReport} title="How the run went: cue timing, failed sends, edits made mid-show">Run report</button>
       </div>
 
@@ -177,6 +186,37 @@ export default function RuntimeTools({ getFile, locked = false, undoDepth = 0 }:
         </Dialog>
       )}
 
+      {doors && (
+        <Dialog title="Doors check" onClose={() => setDoors(null)}>
+          {doors.busy && <p className="muted">Checking…</p>}
+          {doors.error && <p className="rt-err" role="alert">{doors.error}</p>}
+          {doors.summary && (
+            <p className={`doors-sum ${doors.summary.go ? 'go' : 'nogo'}`} role="status">
+              {doors.summary.go ? (doors.summary.warn ? 'No failures: look at the warnings below.' : 'All clear.') : `${doors.summary.fail} thing${doors.summary.fail > 1 ? 's' : ''} will not work.`}
+              <span className="muted"> {doors.summary.fail} failed · {doors.summary.warn} to look at · {doors.summary.ok} fine</span>
+            </p>
+          )}
+          {(['fail', 'warn', 'ok'] as const).map((lvl) => {
+            const rows = (doors.checks ?? []).filter((c) => c.level === lvl)
+            if (!rows.length) return null
+            return (
+              <ul className={`doors-list ${lvl}`} key={lvl}>
+                {rows.map((c, i) => (
+                  <li key={i}>
+                    <b>{lvl === 'fail' ? '✗' : lvl === 'warn' ? '⚠' : '✓'}</b> {c.text}
+                  </li>
+                ))}
+              </ul>
+            )
+          })}
+          <div className="rt-actions">
+            <button onClick={openDoors}>Check again</button>
+            <button onClick={() => setDoors(null)}>Close</button>
+          </div>
+          <p className="muted">This checks the show as the runtime has it. It never blocks the show. Failed lines are cues that cannot reach a device or that a tool cannot understand: fix those first.</p>
+        </Dialog>
+      )}
+
       {report && (
         <Dialog title="Run report" onClose={() => setReport(null)}>
           {'error' in report ? (
@@ -234,6 +274,26 @@ export default function RuntimeTools({ getFile, locked = false, undoDepth = 0 }:
       )}
     </>
   )
+}
+
+/** Send one cue to one device by hand (through its profile). Returns what was, or would be, sent. */
+export async function tryCue(id: string, value: string): Promise<{ ok: boolean; status?: string; sentAs?: string; error?: string }> {
+  const go = () => api(`/devices/${encodeURIComponent(id)}/try`, { method: 'POST', body: JSON.stringify({ value }), headers: { 'Content-Type': 'application/json' } }).catch(() => null)
+  let r = await go()
+  if (r?.status === 403) {
+    const k = window.prompt('This runtime needs the operator key to send a cue by hand:')
+    if (!k) return { ok: false, error: 'Not sent: the operator key is needed.' }
+    setEditKey(k.trim())
+    r = await go()
+  }
+  if (!r) return { ok: false, error: 'The runtime did not answer.' }
+  if (r.status === 403) {
+    setEditKey('')
+    return { ok: false, error: 'That key was not accepted.' }
+  }
+  if (!r.ok) return { ok: false, error: String(r.body?.error ?? `refused (${r.status})`) }
+  const sent = (r.body?.sent_as as { address: string; args: unknown[] }[] | undefined) ?? []
+  return { ok: true, status: String(r.body?.status), sentAs: sent.map((m) => `${m.address}${m.args.length ? ' ' + m.args.map((a) => JSON.stringify(a)).join(' ') : ''}`).join(', '), error: r.body?.error as string | undefined }
 }
 
 /** Arm or disarm a laser. Arming needs the operator key when the runtime has one; it is asked for once per tab. */

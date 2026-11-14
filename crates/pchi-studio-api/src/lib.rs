@@ -20,7 +20,7 @@
 //!   {"type":"ready","dept":"lighting","ready":true,"note":"cue 12 loaded","source":"dept-page"}
 //!       (a client that repeats the same report every few seconds is a heartbeat: it is not logged)
 //!
-//! HTTP: `POST /show` (send an edited show; `?dry=1` previews the changes), `POST /laser/stop` (hard stop), `POST /devices/<id>/arm?armed=1|0`, `POST /show/undo` (back to before the last send; with `--edit-key` both need `X-Pchi-Edit-Key`), `GET /report` (planned vs actual cue times, delivery problems),
+//! HTTP: `POST /show` (send an edited show; `?dry=1` previews the changes), `GET /preflight` (the doors check), `POST /devices/<id>/try` (one cue to one device), `POST /laser/stop` (hard stop), `POST /devices/<id>/arm?armed=1|0`, `POST /show/undo` (back to before the last send; with `--edit-key` both need `X-Pchi-Edit-Key`), `GET /report` (planned vs actual cue times, delivery problems),
 //! `POST /devices/<id>/test` (one harmless test message to a device), `GET /state` (the hello snapshot), `GET /events` (the event log),
 //! `GET /ready`, `POST /ready/<dept>` {"ready":true,"note":"..."} and
 //! `POST /input` {"event":"GO"}: plain HTTP so any desk, script or button box can take part.
@@ -44,6 +44,7 @@ use axum::{
 pub mod diff;
 pub mod links;
 pub mod output;
+pub mod preflight;
 pub mod profiles;
 pub mod rig;
 
@@ -87,6 +88,8 @@ pub struct Show {
     history: Mutex<Vec<(Showchart, Option<Vec<rig::Device>>)>>,
     /// Whether the link watcher task is running (see `watch_links`).
     watching: std::sync::atomic::AtomicBool,
+    /// Set when this run was resumed from the log after a restart (shown to clients in the hello).
+    resumed: Mutex<Option<Value>>,
 }
 
 /// How long a department page may stay silent before it counts as not linked (mirrors the Studio).
@@ -107,18 +110,79 @@ impl Show {
         let ts = now_ms();
         recorder::begin_run(&store, &engine, ts).map_err(|e| e.to_string())?;
         recorder::record_start(&store, &engine, ts).map_err(|e| e.to_string())?;
-        let show = Arc::new(Self {
-            inner: Mutex::new(Inner { engine, store, generation: 0, entered_at: ts }),
+        let show = Self::assemble(engine, store, output, ts);
+        show.watch_links();
+        show.arm(0);
+        Ok(show)
+    }
+
+    fn assemble(engine: ShowEngine, store: EventStore, output: Option<Output>, entered_at: i64) -> Arc<Self> {
+        Arc::new(Self {
+            inner: Mutex::new(Inner { engine, store, generation: 0, entered_at }),
             tx: broadcast::channel(1024).0,
             readiness: Mutex::new(BTreeMap::new()),
             output: Mutex::new(output.map(Arc::new)),
             edit_key: Mutex::new(None),
             history: Mutex::new(Vec::new()),
             watching: std::sync::atomic::AtomicBool::new(false),
-        });
+            resumed: Mutex::new(None),
+        })
+    }
+
+    /// Carry on a run that was interrupted (the runtime was restarted) from what the log recorded.
+    ///
+    /// The recorded inputs are replayed through `chart` (the show file given now), which gives the scene the show
+    /// was in and its context. The scene's clock continues from when it was entered, so cues still ahead are
+    /// armed and cues that came due while the runtime was down are NOT fired late: they are listed instead.
+    /// Not restored, on purpose: arming (lasers start disarmed again) and readiness (departments report again).
+    /// Refused if the file no longer reproduces the recorded run (a transition was changed, say).
+    pub fn resume(chart: Showchart, store: EventStore, output: Option<Output>) -> Result<(Arc<Self>, Value), String> {
+        let records = store.all().map_err(|e| e.to_string())?;
+        let start = records.iter().rposition(|r| r.event_type == recorder::RUN_START).ok_or("there is no earlier run in that database to resume")?;
+        let mut engine = ShowEngine::new(chart).map_err(|errs| errs.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; "))?;
+        let mut entered = records[start].timestamp;
+        let mut divergences = Vec::new();
+        for r in &records[start + 1..] {
+            match r.event_type.as_str() {
+                recorder::SHOW_CONTEXT => {
+                    if let Some(k) = r.payload["key"].as_str() {
+                        engine.set_context(k, r.payload["value"].clone());
+                    }
+                }
+                recorder::SHOW_INPUT => {
+                    let event = r.payload["event"].as_str().unwrap_or("");
+                    let applied = engine.try_dispatch(event).is_some();
+                    let (rec_applied, rec_to) = (r.payload["applied"].as_bool().unwrap_or(false), r.payload["to"].as_str().unwrap_or(""));
+                    if applied != rec_applied || engine.current_state != rec_to {
+                        divergences.push(format!("'{event}' went to {} but was recorded going to {}", engine.current_state, rec_to));
+                    } else if applied {
+                        entered = r.timestamp;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !divergences.is_empty() {
+            return Err(format!("the show file no longer matches the recorded run ({}). Start without --resume for a fresh run, or use the version of the file the run started with", divergences[0]));
+        }
+        let now = now_ms();
+        let elapsed = (now - entered).max(0) as u64;
+        let last = records.last().map_or(now, |r| r.timestamp);
+        let fired: std::collections::BTreeSet<String> = records
+            .iter()
+            .filter(|r| r.event_type == "show.cue" && r.timestamp >= entered && r.payload["scene"] == json!(engine.current_state))
+            .filter_map(|r| r.payload["cue"].as_str().map(String::from))
+            .collect();
+        let skipped_cues: Vec<String> = engine.pending_cues().iter().filter(|c| c.at_ms <= elapsed && !fired.contains(&c.cue)).map(|c| format!("{} at {:.1}s", c.action.kind, c.at_ms as f64 / 1000.0)).collect();
+        let skipped_timers: Vec<String> = engine.pending_timers().iter().filter(|&&ms| ms <= elapsed).map(|ms| format!("after {:.1}s", *ms as f64 / 1000.0)).collect();
+        let info = json!({"state": engine.current_state, "elapsed_ms": elapsed, "downtime_ms": (now - last).max(0), "skipped_cues": skipped_cues, "skipped_timers": skipped_timers});
+        let show_id = engine.chart.id.clone().unwrap_or_else(|| "show".into());
+        let _ = store.append(now, "runtime", Some(&show_id), "show.resume", &info);
+        let show = Self::assemble(engine, store, output, entered);
+        *show.resumed.lock().unwrap() = Some(info.clone());
         show.watch_links();
-        show.arm(0);
-        Ok(show)
+        show.arm_from(0, elapsed);
+        Ok((show, info))
     }
 
     /// Keep an eye on the devices we send to, while the runtime is really sending: open the sockets of the
@@ -216,6 +280,7 @@ impl Show {
             // the server's clock now, so a client can tell how old each readiness report is without trusting its own clock
             "server_ts": now_ms(),
             "edit_locked": self.edit_key.lock().unwrap().is_some(),
+            "resumed": self.resumed.lock().unwrap().clone(),
             "undo_depth": self.history.lock().unwrap().len(),
             // elapsed, not a timestamp: the client counts from its own clock
             "elapsed_ms": (now_ms() - g.entered_at).max(0),
@@ -565,6 +630,66 @@ impl Show {
         json!({"stopped": stopped, "notes": notes})
     }
 
+    /// The doors check: every cue against its device and profile, every device's address, link,
+    /// readiness and (for lasers) arming, as a list the operator can read in a minute.
+    pub fn preflight(&self) -> Value {
+        let out = self.output.lock().unwrap().clone();
+        let (chart, state) = {
+            let g = self.inner.lock().unwrap();
+            (g.engine.chart.clone(), g.engine.current_state.clone())
+        };
+        let ready: BTreeMap<String, Value> = self.readiness.lock().unwrap().clone();
+        let checks = preflight::run(&chart, out.as_deref(), &ready, &state);
+        json!({"summary": preflight::summary(&checks), "checks": checks})
+    }
+
+    /// Send ONE cue to ONE device through its profile, without any show: the quickest way to find out whether
+    /// a tool answers to what PCHI sends. Returns exactly what was (or in a dry run would be) sent.
+    /// Lasers are held until armed, as everywhere else.
+    pub async fn try_cue(self: &Arc<Self>, id: &str, value: &str) -> Result<Value, String> {
+        let out = self.output.lock().unwrap().clone().ok_or("this show has no rig")?;
+        let dev = out.devices().iter().find(|d| d.id == id).cloned().ok_or_else(|| format!("no device '{id}' in the rig"))?;
+        let value = value.trim();
+        if value.is_empty() || value.len() > 200 {
+            return Err("give a value, for example a cue number".into());
+        }
+        let (kind, field) = match dev.dept.as_str() {
+            "visual" => ("scene.activate", "scene"),
+            "lighting" => ("lighting.look", "look"),
+            "laser" => ("laser.cue", "cue"),
+            _ => ("audio.snapshot", "snapshot"),
+        };
+        let action = Action::new(kind, json!({ field: value }));
+        let packets = match output::packets_for(&dev, &action) {
+            Ok(p) => p,
+            Err(e) => return Err(e),
+        };
+        let sent_as: Vec<Value> = packets.iter().flat_map(|p| links::flatten(p)).map(|(a, args)| json!({"address": a, "args": args})).collect();
+        let mut m = json!({"type": "delivery", "ts": now_ms(), "kind": kind, "lane": null, "cue": null, "device": dev.id, "label": dev.label, "dept": dev.dept, "target": dev.address(), "sent_as": sent_as, "manual": true});
+        if dev.dept == "laser" && !out.is_armed(&dev.id) {
+            m["status"] = json!("held");
+            m["error"] = json!(format!("{} is not armed: arm it first", dev.label));
+        } else if !out.sending() {
+            m["status"] = json!("dry-run");
+            m["note"] = json!("sending is off: this is exactly what WOULD be sent");
+        } else {
+            match out.send_packets(&dev, packets).await {
+                Ok(_) => m["status"] = json!("sent"),
+                Err(e) => {
+                    m["status"] = json!("failed");
+                    m["error"] = json!(e);
+                }
+            }
+        }
+        self.report(m.clone());
+        Ok(m)
+    }
+
+    /// Whether a restarted runtime carried on a run (see `resume`).
+    pub fn was_resumed(&self) -> bool {
+        self.resumed.lock().unwrap().is_some()
+    }
+
     /// The run so far: every cue's planned and actual time, deliveries that went wrong, and edits made mid-show.
     pub fn run_report(&self) -> Value {
         let events = self.events();
@@ -694,6 +819,11 @@ pub fn router_with_token(show: Arc<Show>, token: Option<String>) -> Router {
         }))
         .route("/show", post(post_show))
         .route("/show/undo", post(post_undo))
+        .route("/preflight", get(|State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap| async move {
+            if !authorized(&a.token, &q, &h) { return (StatusCode::UNAUTHORIZED, Json(json!({"error": "token required"}))); }
+            (StatusCode::OK, Json(a.show.preflight()))
+        }))
+        .route("/devices/:id/try", post(post_try))
         .route("/laser/stop", post(post_laser_stop))
         .route("/devices/:id/arm", post(post_arm))
         .route("/devices/:id/test", post(post_test))
@@ -750,6 +880,20 @@ async fn post_undo(State(a): State<App>, q: Query<HashMap<String, String>>, h: H
     match a.show.undo(!dry) {
         Ok(v) => (StatusCode::OK, Json(v)),
         Err((code, v)) => (StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST), Json(v)),
+    }
+}
+
+/// `POST /devices/<id>/try` {"value": "3"}: one cue to one device through its profile. Needs the operator key.
+async fn post_try(State(a): State<App>, Path(id): Path<String>, q: Query<HashMap<String, String>>, h: HeaderMap, Json(body): Json<Value>) -> impl IntoResponse {
+    if !authorized(&a.token, &q, &h) {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "token required"})));
+    }
+    if !a.show.edit_ok(edit_key_of(&q, &h)) {
+        return locked();
+    }
+    match a.show.try_cue(&id, body["value"].as_str().unwrap_or("")).await {
+        Ok(v) => (StatusCode::OK, Json(v)),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"error": e}))),
     }
 }
 
@@ -1517,6 +1661,216 @@ mod tests {
         assert_eq!(live.snapshot()["devices"][0]["link"]["state"], "none");
         let dry = Show::start_with(quick(), EventStore::open_in_memory().unwrap(), Some(Output::new(vec![device("n1", "notch", 9)], false))).unwrap();
         assert!(dry.snapshot()["devices"][0].get("link").is_none());
+    }
+
+    /// A measurement, not a pass/fail test: run it with
+    /// `cargo test -p pchi-studio-api --lib soak -- --ignored --nocapture`.
+    /// 600 cues spread over 20 s plus a burst of 200 at the same instant, across four real devices on
+    /// loopback. It reports how late cues fire and whether every packet arrives.
+    #[tokio::test]
+    #[ignore]
+    async fn soak_timing_report() {
+        use std::time::Instant;
+        let kinds = [("visual", "scene.activate", "scene", "2/5", "resolume"), ("lighting", "lighting.look", "look", "402", "grandma3"), ("laser", "laser.cue", "cue", "sweep", "beyond"), ("audio", "audio.snapshot", "snapshot", "3", "x32")];
+        let (spread, burst, span_ms, burst_at) = (150u64, 50u64, 20_000u64, 1_000u64);
+        // the chart: PRE -START-> MAIN, four lanes of cues
+        let mut lanes = Vec::new();
+        for (dept, kind, field, val, _) in kinds {
+            let mut cues = Vec::new();
+            for i in 0..spread {
+                cues.push(json!({"id": format!("{dept}-{i}"), "at_ms": 1_500 + i * (span_ms / spread), "action": {"kind": kind, "payload": {field: val}}}));
+            }
+            for i in 0..burst {
+                cues.push(json!({"id": format!("{dept}-b{i}"), "at_ms": burst_at, "action": {"kind": kind, "payload": {field: val}}}));
+            }
+            lanes.push(json!({"id": dept, "name": dept, "dept": dept, "cues": cues}));
+        }
+        let chart = Showchart::from_json(&json!({"initial": "PRE", "states": [{"id": "PRE"}, {"id": "MAIN", "timeline": {"lanes": lanes}}], "transitions": [{"source": "PRE", "target": "MAIN", "event": "START"}]}).to_string()).unwrap();
+
+        // four listeners, one per device, noting when each packet arrives
+        let mut devices = Vec::new();
+        let mut counters = Vec::new();
+        for (dept, _, _, _, tool) in kinds {
+            let sock = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+            let port = sock.local_addr().unwrap().port();
+            devices.push(device(&format!("{tool}-1"), tool, port));
+            let arrivals = Arc::new(Mutex::new(Vec::<Instant>::new()));
+            let (s, a) = (Arc::clone(&sock), Arc::clone(&arrivals));
+            tokio::spawn(async move {
+                let mut buf = [0u8; 512];
+                while let Ok((n, _)) = s.recv_from(&mut buf).await {
+                    // the X32 probe (/info every few seconds) is the runtime checking the link, not a cue
+                    if !buf[..n].starts_with(b"/info") {
+                        a.lock().unwrap().push(Instant::now());
+                    }
+                }
+            });
+            counters.push((dept, arrivals));
+        }
+        let out = Output::new(devices, true);
+        let show = Show::start_with(chart, EventStore::open_in_memory().unwrap(), Some(out)).unwrap();
+        show.set_armed("beyond-1", true).unwrap();
+        let t0 = Instant::now();
+        show.apply("soak", "START");
+        tokio::time::sleep(Duration::from_millis(1_500 + span_ms + 1_500)).await;
+
+        // when each cue fired, against when it was due
+        let r = show.run_report();
+        let mut drift: Vec<i64> = r["cues"].as_array().unwrap().iter().map(|c| c["drift_ms"].as_i64().unwrap()).collect();
+        drift.sort_unstable();
+        let pct = |v: &[i64], p: f64| v[((v.len() as f64 - 1.0) * p).round() as usize];
+        let expected = (spread + burst) as usize;
+        println!("\n=== SOAK: {} cues fired (expected {}), debug build, loopback ===", drift.len(), expected * 4);
+        println!("fire drift (actual - planned), ms: p50 {}  p95 {}  p99 {}  max {}", pct(&drift, 0.5), pct(&drift, 0.95), pct(&drift, 0.99), drift.last().unwrap());
+        assert_eq!(drift.len(), expected * 4, "every cue must fire exactly once");
+        // when each packet arrived, against the planned time of the cue it belongs to
+        let mut planned: Vec<u64> = (0..spread).map(|i| 1_500 + i * (span_ms / spread)).chain((0..burst).map(|_| burst_at)).collect();
+        planned.sort_unstable();
+        for (dept, arrivals) in &counters {
+            let mut a: Vec<u128> = arrivals.lock().unwrap().iter().map(|t| t.duration_since(t0).as_millis()).collect();
+            a.sort_unstable();
+            let late: Vec<i64> = a.iter().zip(&planned).map(|(x, p)| *x as i64 - *p as i64).collect();
+            let mut l = late.clone();
+            l.sort_unstable();
+            println!("{dept:<9} packets {:>3}/{}  arrival lateness ms: p50 {}  p99 {}  max {}", a.len(), expected, pct(&l, 0.5), pct(&l, 0.99), l.last().unwrap());
+            assert_eq!(a.len(), expected, "{dept}: every packet must arrive on loopback");
+        }
+        println!("failed or held deliveries: {}\n", r["summary"]["failed"]);
+        assert_eq!(r["summary"]["failed"], 0);
+        assert!(*drift.last().unwrap() < 250, "no cue may fire more than a quarter second late");
+    }
+
+    fn temp_db(tag: &str) -> String {
+        std::env::temp_dir().join(format!("pchi-{tag}-{}-{}.db", std::process::id(), now_ms())).to_string_lossy().into_owned()
+    }
+
+    /// Stand in for a crash: the old show's pending cues and timers never fire, and it writes nothing more.
+    fn crash(show: Arc<Show>) {
+        show.inner.lock().unwrap().generation += 1_000;
+    }
+
+    #[tokio::test]
+    async fn a_restarted_runtime_resumes_in_the_same_scene_and_fires_only_what_is_still_ahead() {
+        let path = temp_db("resume");
+        let before = Output::new(vec![device("b1", "beyond", 9)], false);
+        let a = Show::start_with(quick(), EventStore::open(&path).unwrap(), Some(before)).unwrap();
+        a.apply("studio", "START"); // INTRO: visual 0, lighting 0.4 s, laser 0.8 s
+        a.set_context("energy", json!(0.9));
+        a.set_armed("b1", true).unwrap();
+        tokio::time::sleep(Duration::from_millis(550)).await;
+        crash(a);
+
+        let (b, info) = Show::resume(quick(), EventStore::open(&path).unwrap(), Some(Output::new(vec![device("b1", "beyond", 9)], false))).unwrap();
+        assert_eq!(info["state"], "INTRO");
+        assert!(info["skipped_cues"].as_array().unwrap().is_empty(), "{info}");
+        assert_eq!(b.snapshot()["state"], "INTRO");
+        assert_eq!(b.snapshot()["context"]["energy"], 0.9, "the context comes back");
+        assert!(b.was_resumed());
+        assert_eq!(b.snapshot()["resumed"]["state"], "INTRO");
+        assert_eq!(b.snapshot()["devices"][0]["armed"], false, "arming is never restored: lasers start disarmed");
+        // the cues already fired are not fired again; the one still ahead is
+        let mut rx = b.subscribe();
+        let m = wait_for(&mut rx, |m| m["type"] == "action").await.expect("the laser cue");
+        assert_eq!(m["event"]["type"], "laser.cue");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let more = std::iter::from_fn(|| rx.try_recv().ok()).filter(|m| m["type"] == "action").count();
+        assert_eq!(more, 0, "nothing fires twice");
+        // the log is one continuous run, with the resume noted
+        let ev = b.events();
+        assert_eq!(ev.iter().filter(|e| e["type"] == "run.start").count(), 1);
+        assert_eq!(ev.iter().filter(|e| e["type"] == "show.resume").count(), 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn cues_that_came_due_while_the_runtime_was_down_are_skipped_and_listed_not_fired_late() {
+        let path = temp_db("downtime");
+        let a = Show::start(quick(), EventStore::open(&path).unwrap()).unwrap();
+        a.apply("studio", "START");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        crash(a);
+        tokio::time::sleep(Duration::from_millis(700)).await; // the laser cue (0.8 s) comes due while down
+        let (b, info) = Show::resume(quick(), EventStore::open(&path).unwrap(), None).unwrap();
+        assert_eq!(info["skipped_cues"].as_array().unwrap().iter().map(|x| x.as_str().unwrap()).collect::<Vec<_>>(), ["laser.cue at 0.8s"], "{info}");
+        assert!(info["downtime_ms"].as_i64().unwrap() >= 600);
+        let mut rx = b.subscribe();
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert_eq!(std::iter::from_fn(|| rx.try_recv().ok()).filter(|m| m["type"] == "action").count(), 0, "a skipped cue is not fired late");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn resume_refuses_when_there_is_nothing_to_resume_or_the_show_no_longer_matches() {
+        let path = temp_db("refuse");
+        // nothing recorded yet
+        assert!(Show::resume(quick(), EventStore::open(&path).unwrap(), None).err().expect("nothing to resume").contains("no earlier run"));
+        let a = Show::start(quick(), EventStore::open(&path).unwrap()).unwrap();
+        a.apply("studio", "START");
+        crash(a);
+        // the START transition is gone from the file now given
+        let mut changed = quick();
+        changed.transitions.retain(|t| !(t.source == "PRESHOW" && t.event.as_deref() == Some("START")));
+        let e = Show::resume(changed, EventStore::open(&path).unwrap(), None).err().expect("refused");
+        assert!(e.contains("no longer matches"), "{e}");
+        // but a change that does not touch the path the run took is fine (a cue edited)
+        let mut edited = quick();
+        move_cue(&mut edited, "INTRO", "lighting", 2_000);
+        assert!(Show::resume(edited, EventStore::open(&path).unwrap(), None).is_ok());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn try_a_cue_shows_exactly_what_is_sent_and_respects_dry_run_arming_and_the_key() {
+        // dry run: nothing leaves, but the exact message is shown
+        let dry = Show::start_with(quick(), EventStore::open_in_memory().unwrap(), Some(Output::new(vec![device("q1", "qlab", 9)], false))).unwrap();
+        let r = dry.try_cue("q1", "12").await.unwrap();
+        assert_eq!(r["status"], "dry-run");
+        assert_eq!(r["sent_as"][0]["address"], "/cue/12/start");
+        // a value the tool cannot use is an error that says why
+        let e = Show::start_with(quick(), EventStore::open_in_memory().unwrap(), Some(Output::new(vec![device("x1", "x32", 9)], false))).unwrap().try_cue("x1", "intro").await.unwrap_err();
+        assert!(e.contains("scene number"), "{e}");
+
+        // live: it really arrives, and a laser is held until armed
+        let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = sock.local_addr().unwrap().port();
+        let live = Show::start_with(quick(), EventStore::open_in_memory().unwrap(), Some(Output::new(vec![device("e1", "eos", port), device("b1", "beyond", port)], true))).unwrap();
+        assert_eq!(live.try_cue("e1", "3/9").await.unwrap()["status"], "sent");
+        assert_eq!(recv_osc(&sock).await, "/eos/cue/3/9/fire");
+        assert_eq!(live.try_cue("b1", "sweep").await.unwrap()["status"], "held");
+        live.set_armed("b1", true).unwrap();
+        assert_eq!(live.try_cue("b1", "sweep").await.unwrap()["status"], "sent");
+        assert_eq!(recv_osc(&sock).await, "/beyond/general/StartCue");
+        assert!(live.try_cue("e1", "  ").await.is_err());
+        assert!(live.try_cue("nope", "1").await.is_err());
+
+        // over HTTP it needs the operator key
+        live.set_edit_key(Some("k".into()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = router_with_token(Arc::clone(&live), None);
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        assert_eq!(http(addr, "POST", "/devices/e1/try", r#"{"value":"1"}"#, "").await.0, 403);
+        let (st, v) = http(addr, "POST", "/devices/e1/try", r#"{"value":"1"}"#, "X-Pchi-Edit-Key: k\r\n").await;
+        assert_eq!((st, v["sent_as"][0]["address"].as_str()), (200, Some("/eos/cue/1/fire")));
+    }
+
+    #[tokio::test]
+    async fn the_doors_check_over_http_lists_what_will_and_will_not_work() {
+        // the demo show has visual, lighting and laser cues; the rig covers visuals and audio only
+        let out = Output::new(vec![device("n1", "notch", 9), device("x1", "x32", 10023)], false);
+        let show = Show::start_with(timelines(), EventStore::open_in_memory().unwrap(), Some(out)).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = router_with_token(Arc::clone(&show), Some("tok".into()));
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        assert_eq!(http(addr, "GET", "/preflight", "", "").await.0, 401);
+        let (st, v) = http(addr, "GET", "/preflight?token=tok", "", "").await;
+        assert_eq!(st, 200);
+        assert_eq!(v["summary"]["go"], false);
+        let fails: Vec<&str> = v["checks"].as_array().unwrap().iter().filter(|c| c["level"] == "fail").map(|c| c["text"].as_str().unwrap()).collect();
+        assert!(fails.iter().any(|t| t.contains("no lighting device")), "{fails:?}");
+        assert!(fails.iter().any(|t| t.contains("no laser device")), "{fails:?}");
+        assert!(v["checks"].as_array().unwrap().iter().any(|c| c["area"] == "output" && c["level"] == "warn"), "dry run is a warning");
     }
 
     #[tokio::test]

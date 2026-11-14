@@ -124,7 +124,7 @@ async fn listen(socket: Arc<UdpSocket>, from_ip: IpAddr, id: String, label: Stri
 }
 
 /// The messages in an OSC packet (bundles are opened), as (address, arguments).
-fn flatten(bytes: &[u8]) -> Vec<(String, Vec<Value>)> {
+pub fn flatten(bytes: &[u8]) -> Vec<(String, Vec<Value>)> {
     fn walk(p: OscPacket, out: &mut Vec<(String, Vec<Value>)>) {
         match p {
             OscPacket::Message(m) => out.push((m.addr, m.args.iter().map(arg).collect())),

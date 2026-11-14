@@ -6,7 +6,7 @@ import CommandBar from './CommandBar'
 import TimelineStrip, { useStripLayout } from './TimelineStrip'
 import { sceneInfo } from './sceneInfo'
 import LiveCallSheet from './LiveCallSheet'
-import RuntimeTools, { armLaser, stopLasers, testFire } from './RuntimeTools'
+import RuntimeTools, { armLaser, stopLasers, testFire, tryCue } from './RuntimeTools'
 import { STALE_MS, feedUrl, type Ready } from './liveFeed'
 import { fmt } from './TimelineStrip'
 import {
@@ -101,6 +101,9 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
   const [testing, setTesting] = useState<string | null>(null)
   const [heard, setHeard] = useState<Feedback[]>([])
   const [laserNote, setLaserNote] = useState('')
+  const [tryDev, setTryDev] = useState('')
+  const [tryVal, setTryVal] = useState('')
+  const [tryOut, setTryOut] = useState('')
   const [locked, setLocked] = useState(false) // the runtime wants an operator key for edits
   const [undoDepth, setUndoDepth] = useState(0) // sends that can still be undone
   const [armed, setArmed] = useState(false) // GO pressed once while a department is on hold
@@ -509,6 +512,33 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
               </button>
             ))}
           </div>
+        )}
+        {devices.length > 0 && (
+          <form
+            className="try-cue"
+            onSubmit={async (e) => {
+              e.preventDefault()
+              const id = tryDev || devices[0].id
+              if (!tryVal.trim()) return
+              const dev = devices.find((x) => x.id === id)
+              if (output === 'live' && !confirm(`Send "${tryVal.trim()}" to ${dev?.label} now?${dev?.dept === 'laser' ? ' It is a laser: check the area is clear.' : ''}`)) return
+              setTryOut('sending…')
+              const r = await tryCue(id, tryVal.trim())
+              setTryOut(r.ok ? `→ ${r.sentAs} (${r.status}${r.error ? ': ' + r.error : ''})` : `✗ ${r.error}`)
+            }}
+          >
+            <h5>Try a cue</h5>
+            <div className="trow2">
+              <select value={tryDev || devices[0].id} onChange={(e) => setTryDev(e.target.value)} aria-label="Device to send to">
+                {devices.map((x) => (
+                  <option key={x.id} value={x.id}>{x.label}</option>
+                ))}
+              </select>
+              <input value={tryVal} onChange={(e) => setTryVal(e.target.value)} placeholder="e.g. 3 or 3/9" aria-label="Cue value" spellCheck={false} />
+              <button type="submit" disabled={!tryVal.trim()}>Send</button>
+            </div>
+            {tryOut && <p className="muted try-out" role="status">{tryOut}</p>}
+          </form>
         )}
         {getFile && <RuntimeTools getFile={getFile} locked={locked} undoDepth={undoDepth} />}
         {timerRows.map((r, i) => {
