@@ -1,0 +1,13 @@
+{
+  "id": "resolume",
+  "name": "Resolume Arena",
+  "dept": "visual",
+  "kinds": ["scene.activate"],
+  "hint": "a column number (3), layer/clip (2/5), or an address from Resolume's OSC Shortcut mode (/composition/...)",
+  "rules": [
+    {"match": "/[A-Za-z0-9/_.-]{1,199}", "send": "{0}", "args": [{"int": 1}], "basis": "community", "source": "Resolume's OSC Shortcut mode shows each control's own address; the integer 1 is what community sources send"},
+    {"match": "\\d+", "send": "/composition/columns/{0}/connect", "args": [{"int": 1}], "basis": "community", "source": "a Workcad manual shows the exact column packet with integer 1; not a Resolume page"},
+    {"match": "(\\d+)/(\\d+)", "send": "/composition/layers/{1}/clips/{2}/connect", "args": [{"int": 1}], "basis": "community", "source": "community sources"}
+  ],
+  "notes": "Any other address can be used by giving it in full."
+}

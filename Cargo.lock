@@ -1179,6 +1179,7 @@ dependencies = [
  "pchi-eventstore",
  "pchi-showchart",
  "primeswarm-pchi",
+ "regex",
  "rosc",
  "serde",
  "serde_json",

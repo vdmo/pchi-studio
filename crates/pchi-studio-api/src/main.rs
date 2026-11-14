@@ -39,6 +39,9 @@ struct Cli {
     /// List the MIDI input ports this machine has (needs a build with --features midi) and exit.
     #[arg(long)]
     midi_ports: bool,
+    /// A folder of tool profile files (*.json) to add to the built-in ones: how an action becomes the OSC a tool understands. A file with a built-in's id replaces it. See docs/profiles.md.
+    #[arg(long, value_name = "DIR", env = "PCHI_PROFILES")]
+    profiles: Option<String>,
     /// Write a signed, hash-chained receipt for every decision (edits, arming, GO, refusals, proposals) into this folder, in the format scripts/verify_governance_chain.py checks offline. The folder keeps the signing key too: protect it like the show file.
     #[arg(long, env = "PCHI_GOVERNANCE")]
     governance: Option<String>,
@@ -62,6 +65,12 @@ async fn main() -> anyhow::Result<()> {
             println!("{p}");
         }
         return Ok(());
+    }
+    if let Some(dir) = &cli.profiles {
+        let lines = pchi_studio_api::profiles::load_dir(std::path::Path::new(dir)).map_err(anyhow::Error::msg).with_context(|| format!("profiles {dir}"))?;
+        for l in lines {
+            println!("profile: {l}");
+        }
     }
     let (chart, devices) = rig::load(&std::fs::read_to_string(&cli.file).with_context(|| format!("reading {}", cli.file))?)
         .map_err(anyhow::Error::msg)

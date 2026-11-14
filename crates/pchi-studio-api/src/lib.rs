@@ -42,6 +42,7 @@ use axum::{
     Json, Router,
 };
 pub mod diff;
+pub mod dmx;
 pub mod gearcheck;
 pub mod governance;
 pub mod inputs;
@@ -137,6 +138,8 @@ pub struct Show {
     tc: Mutex<timecode::Clock>,
     /// When a timecode message last went out to clients (they get at most five a second).
     tc_published: std::sync::atomic::AtomicI64,
+    /// Cues the tools themselves fired (heard as feedback), newest last: what Studio can add to the show.
+    captures: Mutex<std::collections::VecDeque<Value>>,
 }
 
 /// How long a department page may stay silent before it counts as not linked (mirrors the Studio).
@@ -178,6 +181,7 @@ impl Show {
             inputs: Mutex::new(Vec::new()),
             tc: Mutex::new(timecode::Clock::default()),
             tc_published: std::sync::atomic::AtomicI64::new(0),
+            captures: Mutex::new(std::collections::VecDeque::new()),
         })
     }
 
@@ -261,6 +265,7 @@ impl Show {
                 let sink_show = Arc::downgrade(&show);
                 out.links().set_sink(Arc::new(move |m| {
                     if let Some(s) = sink_show.upgrade() {
+                        s.note_capture(&m);
                         s.publish(m);
                     }
                 }));
@@ -274,7 +279,7 @@ impl Show {
                                 }
                             }
                             Ok(_) => {
-                                if let Some(p) = profiles::probe(&dev.kind) {
+                                if let Some(p) = profiles::probe(dev.profile_key()) {
                                     if now - probed.get(&dev.id).copied().unwrap_or(0) >= out.probe_every.as_millis() as i64 {
                                         probed.insert(dev.id.clone(), now);
                                         let _ = out.send_packets(dev, vec![p]).await;
@@ -398,6 +403,7 @@ impl Show {
             "roster": self.roster_active(),
             "inputs": self.inputs_json(),
             "timecode": self.timecode_json(),
+            "captures": Value::Array(self.captures.lock().unwrap().iter().cloned().collect()),
             "resumed": self.resumed.lock().unwrap().clone(),
             "undo_depth": self.history.lock().unwrap().len(),
             "governed": self.gov.log.get().is_some(),
@@ -760,7 +766,7 @@ impl Show {
             out.set_armed(&dev.id, false);
             self.publish(json!({"type": "arming", "ts": ts, "device": dev.id, "armed": false}));
             stopped.push(dev.id.clone());
-            let msgs = profiles::stop_messages(&dev.kind);
+            let msgs = profiles::stop_messages(dev.profile_key());
             let base = json!({"type": "delivery", "ts": ts, "kind": "laser.stop", "lane": null, "cue": null, "device": dev.id, "label": dev.label, "dept": dev.dept, "target": dev.address()});
             if msgs.is_empty() {
                 notes.push(format!("{}: disarmed here, but no stop message is known for this tool: use its own stop", dev.label));
@@ -829,11 +835,8 @@ impl Show {
             _ => ("audio.snapshot", "snapshot"),
         };
         let action = Action::new(kind, json!({ field: value }));
-        let packets = match output::packets_for(&dev, &action) {
-            Ok(p) => p,
-            Err(e) => return Err(e),
-        };
-        let sent_as: Vec<Value> = packets.iter().flat_map(|p| links::flatten(p)).map(|(a, args)| json!({"address": a, "args": args})).collect();
+        let sent_as: Vec<Value> = output::wire_lines(&dev, &action)?.into_iter().map(|(a, args)| json!({"address": a, "args": args})).collect();
+        let packets = if dev.is_dmx() { Vec::new() } else { output::packets_for(&dev, &action)? };
         let mut m = json!({"type": "delivery", "ts": now_ms(), "kind": kind, "lane": null, "cue": null, "device": dev.id, "label": dev.label, "dept": dev.dept, "target": dev.address(), "sent_as": sent_as, "manual": true});
         if dev.dept == "laser" && !out.is_armed(&dev.id) {
             m["status"] = json!("held");
@@ -842,7 +845,7 @@ impl Show {
             m["status"] = json!("dry-run");
             m["note"] = json!("sending is off: this is exactly what WOULD be sent");
         } else {
-            match out.send_packets(&dev, packets).await {
+            match if dev.is_dmx() { out.deliver(&dev, &action).await } else { out.send_packets(&dev, packets).await } {
                 Ok(_) => m["status"] = json!("sent"),
                 Err(e) => {
                     m["status"] = json!("failed");
@@ -864,6 +867,41 @@ impl Show {
         let dev = devices.unwrap_or_else(|| self.output.lock().unwrap().as_ref().map(|o| o.devices().to_vec()).unwrap_or_default());
         let records = self.inner.lock().unwrap().store.all().map_err(|e| e.to_string())?;
         rehearse::run(&records, &chart, &dev, now_ms())
+    }
+
+    /// A message a tool sent back. If its profile says that message means "I fired this cue", remember it as a capture:
+    /// where in the show it was heard, and the cue that would fire the same thing. Studio offers to add it to the show.
+    pub fn note_capture(&self, m: &Value) {
+        if m["type"] != "feedback" {
+            return;
+        }
+        let (Some(id), Some(address)) = (m["device"].as_str(), m["address"].as_str()) else { return };
+        let Some(out) = self.output.lock().unwrap().clone() else { return };
+        let Some(dev) = out.devices().iter().find(|d| d.id == id) else { return };
+        let Some((kind, value, basis)) = profiles::capture(dev.profile_key(), address) else { return };
+        let ts = now_ms();
+        let (scene, at_ms) = {
+            let g = self.inner.lock().unwrap();
+            (g.engine.current_state.clone(), (ts - g.entered_at).max(0))
+        };
+        let mut caps = self.captures.lock().unwrap();
+        // a tool that repeats itself is one cue, not several
+        if caps.back().is_some_and(|c| c["device"] == json!(id) && c["kind"] == json!(kind) && c["value"] == json!(value) && ts - c["ts"].as_i64().unwrap_or(0) < 400) {
+            return;
+        }
+        let n = caps.back().and_then(|c| c["id"].as_u64()).unwrap_or(0) + 1;
+        let rec = json!({"type": "capture", "id": n, "ts": ts, "device": dev.id, "label": dev.label, "dept": dev.dept, "kind": kind, "value": value,
+                         "address": address, "scene": scene, "at_ms": at_ms, "basis": basis.word()});
+        caps.push_back(rec.clone());
+        while caps.len() > 30 {
+            caps.pop_front();
+        }
+        drop(caps);
+        self.publish(rec);
+    }
+
+    pub fn captures_json(&self) -> Value {
+        Value::Array(self.captures.lock().unwrap().iter().cloned().collect())
     }
 
     /// What the timecode is doing, for clients: {state: none|running|stopped, position, fps, source, heard_ms_ago}.
@@ -1246,6 +1284,14 @@ pub fn router_with_token(show: Arc<Show>, token: Option<String>) -> Router {
             (StatusCode::OK, Json(a.show.preflight()))
         }))
         .route("/whoami", get(get_whoami))
+        .route("/captures", get(|State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap| async move {
+            if !authorized(&a.token, &q, &h) { return (StatusCode::UNAUTHORIZED, Json(json!({"error": "token required"}))); }
+            (StatusCode::OK, Json(a.show.captures_json()))
+        }))
+        .route("/profiles", get(|State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap| async move {
+            if !authorized(&a.token, &q, &h) { return (StatusCode::UNAUTHORIZED, Json(json!({"error": "token required"}))); }
+            (StatusCode::OK, Json(profiles::summary()))
+        }))
         .route("/inputs", get(|State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap| async move {
             if !authorized(&a.token, &q, &h) { return (StatusCode::UNAUTHORIZED, Json(json!({"error": "token required"}))); }
             (StatusCode::OK, Json(a.show.inputs_json()))
@@ -1784,7 +1830,7 @@ mod tests {
     }
 
     fn device(id: &str, kind: &str, port: u16) -> rig::Device {
-        rig::Device { id: id.into(), label: id.into(), kind: kind.into(), dept: rig::dept_of_type(kind).unwrap().into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None }
+        rig::Device { id: id.into(), label: id.into(), kind: kind.into(), dept: rig::dept_of_type(kind).unwrap().into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None, profile: None, universe: None }
     }
 
     fn deliveries(rx: &mut broadcast::Receiver<Value>) -> Vec<Value> {
@@ -3328,5 +3374,174 @@ mod tests {
         let f = inputs::parse_file(r#"{"inputs":[{"name":"Deck","listen":"127.0.0.1:1","bindings":[{"address":"/a","event":"X"}]}],"midi":[{"name":"Pedal","bindings":[{"note":60,"event":"X"}]}]}"#).unwrap();
         assert_eq!((f.inputs.len(), f.midi.len()), (1, 1));
         assert!(inputs::parse_file(r#"{"inputs":[{"name":"Deck","listen":"127.0.0.1:1","bindings":[{"address":"/a","event":"X"}]}],"midi":[{"name":"deck","bindings":[{"note":60,"event":"X"}]}]}"#).is_err(), "names are unique across OSC and MIDI");
+    }
+
+    // ---- profiles as data, at the device and the Doors check ----
+
+    #[test]
+    fn a_device_can_name_a_profile_and_the_runtime_uses_it() {
+        let dir = std::env::temp_dir().join(format!("pchi-profiles-dev-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("rack.json"), r#"{"id":"rackdesk","name":"Rack Desk","dept":"lighting","kinds":["lighting.look"],"hint":"a playback","rules":[{"match":"\\d+","send":"/rack/{0}/go","basis":"vendor","source":"manual"}]}"#).unwrap();
+        profiles::load_dir(&dir).unwrap();
+        let file = r#"{"showchart": {"initial":"A","states":[{"id":"A"}],"transitions":[]},
+            "nodes":[{"id":"d1","type":"osc","label":"Rack","params":{"host":"127.0.0.1","port":9000,"profile":"rackdesk"}},
+                     {"id":"d2","type":"osc","label":"Plain","params":{"host":"127.0.0.1","port":9000}}]}"#;
+        let (_, devs) = rig::load(file).unwrap();
+        let devs = devs.unwrap();
+        assert_eq!(devs.len(), 1, "an osc device with no department and no profile has no job, as before");
+        let d = &devs[0];
+        assert_eq!((d.dept.as_str(), d.profile_key()), ("lighting", "rackdesk"), "the profile gives the department");
+        let packets = output::packets_for(d, &Action::new("lighting.look", json!({"look": "7"}))).unwrap();
+        assert_eq!(links::flatten(&packets[0])[0].0, "/rack/7/go");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn the_doors_check_says_which_tools_rest_on_less_than_the_vendors_word() {
+        let show = |kind: &str| {
+            let out = Output::new(vec![device("d1", kind, 9)], false);
+            Show::start_with(quick(), EventStore::open_in_memory().unwrap(), Some(out)).unwrap()
+        };
+        let weak = |show: &Show| show.preflight()["checks"].as_array().unwrap().iter().filter(|c| c["text"].as_str().is_some_and(|t| t.contains("rest on"))).map(|c| c["text"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        let x32 = weak(&show("x32"));
+        assert_eq!(x32.len(), 1);
+        assert!(x32[0].contains("1 of 1") && x32[0].contains("memory") && x32[0].contains("pchi-gearcheck"), "{x32:?}");
+        assert!(weak(&show("eos")).is_empty(), "Eos rests on the vendor's own article");
+        assert!(weak(&show("magicq"))[0].contains("community"));
+    }
+
+    #[tokio::test]
+    async fn the_loaded_profiles_can_be_listed_with_what_each_rule_rests_on() {
+        let (_show, addr) = serve(None).await;
+        let (st, v) = http(addr, "GET", "/profiles", "", "").await;
+        assert_eq!(st, 200);
+        let all = v.as_array().unwrap();
+        let eos = all.iter().find(|p| p["id"] == "eos").unwrap();
+        assert_eq!((eos["built_in"].clone(), eos["rules"][0]["basis"].clone(), eos["rules"][0]["send"].clone()), (json!(true), json!("vendor"), json!("/eos/cue/{0}/fire")));
+        assert!(all.iter().any(|p| p["id"] == "x32" && p["probe"] == "/info"));
+        assert!(all.iter().any(|p| p["id"] == "beyond" && p["stop"].as_array().unwrap().len() == 2));
+    }
+
+    // ---- capture: cues the tools themselves fire, offered to Studio ----
+
+    #[tokio::test]
+    async fn a_cue_fired_on_the_console_is_captured_where_in_the_show_it_was_heard() {
+        let out = Output::new(vec![device("e1", "eos", 9), device("r1", "resolume", 9)], false);
+        let show = Show::start_with(quick(), EventStore::open_in_memory().unwrap(), Some(out)).unwrap();
+        let mut rx = show.subscribe();
+        show.apply("studio", "START");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let fb = |dev: &str, addr: &str| json!({"type": "feedback", "device": dev, "address": addr, "args": []});
+        show.note_capture(&fb("e1", "/eos/out/event/cue/3/9/fire"));
+        let c = show.captures_json();
+        assert_eq!(c.as_array().unwrap().len(), 1);
+        let c0 = &c[0];
+        assert_eq!((c0["kind"].clone(), c0["value"].clone(), c0["scene"].clone(), c0["dept"].clone(), c0["basis"].clone()), (json!("lighting.look"), json!("3/9"), json!("INTRO"), json!("lighting"), json!("community")), "{c0}");
+        assert!(c0["at_ms"].as_i64().unwrap() >= 250, "heard about 0.3 s into INTRO: {c0}");
+        assert_eq!(c0["id"], 1);
+        // clients are told as it happens, and a newcomer gets the list
+        let msgs: Vec<Value> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(msgs.iter().any(|m| m["type"] == "capture" && m["value"] == "3/9"));
+        assert_eq!(show.snapshot()["captures"][0]["value"], "3/9");
+        // the same cue repeated at once is one cue; a different one is the next
+        show.note_capture(&fb("e1", "/eos/out/event/cue/3/9/fire"));
+        assert_eq!(show.captures_json().as_array().unwrap().len(), 1);
+        show.note_capture(&fb("e1", "/eos/out/event/cue/3/10/fire"));
+        assert_eq!(show.captures_json()[1]["id"], 2);
+        // messages that are not cues, from tools with no capture rules, or from nobody, are not captured
+        show.note_capture(&fb("e1", "/eos/out/event/cue/-1/0/stop"));
+        show.note_capture(&fb("e1", "/eos/out/active/cue/3/9"));
+        show.note_capture(&fb("r1", "/eos/out/event/cue/5/5/fire"));
+        show.note_capture(&fb("ghost", "/eos/out/event/cue/5/5/fire"));
+        show.note_capture(&json!({"type": "delivery", "device": "e1", "address": "/eos/out/event/cue/5/5/fire"}));
+        assert_eq!(show.captures_json().as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn captures_are_listed_over_http_and_the_list_is_bounded() {
+        let out = Output::new(vec![device("e1", "eos", 9)], false);
+        let show = Show::start_with(quick(), EventStore::open_in_memory().unwrap(), Some(out)).unwrap();
+        for n in 0..40 {
+            show.note_capture(&json!({"type": "feedback", "device": "e1", "address": format!("/eos/out/event/cue/1/{n}/fire"), "args": []}));
+        }
+        let c = show.captures_json();
+        assert_eq!(c.as_array().unwrap().len(), 30, "the newest thirty are kept");
+        assert_eq!(c[29]["value"], "1/39");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = router_with_token(Arc::clone(&show), None);
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (st, v) = http(addr, "GET", "/captures", "", "").await;
+        assert_eq!((st, v.as_array().unwrap().len()), (200, 30));
+    }
+
+    // ---- DMX over the network: a lighting cue becomes Art-Net or sACN ----
+
+    fn dmx_device(kind: &str, port: u16) -> rig::Device {
+        rig::Device { id: "d1".into(), label: "Rack".into(), kind: kind.into(), dept: "lighting".into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None, profile: None, universe: Some(if kind == "sacn" { 1 } else { 0 }) }
+    }
+
+    fn lit(look: &str) -> Showchart {
+        let mut c = quick();
+        let lane = c.states.iter_mut().find(|s| s.id == "INTRO").unwrap().timeline.as_mut().unwrap().lanes.iter_mut().find(|l| l.id == "lighting").unwrap();
+        lane.cues[0].action.payload = json!({"look": look});
+        c
+    }
+
+    #[test]
+    fn dmx_devices_get_standard_ports_universes_and_a_department_from_the_rig_file() {
+        let file = r#"{"showchart": {"initial":"A","states":[{"id":"A"}],"transitions":[]},
+            "nodes":[{"id":"a","type":"artnet","params":{"host":"10.0.0.9"}},
+                     {"id":"s","type":"sacn","params":{}},
+                     {"id":"s2","type":"sacn","params":{"universe":"258","host":"10.0.0.7","port":5570}}]}"#;
+        let devs = rig::load(file).unwrap().1.unwrap();
+        let by = |id: &str| devs.iter().find(|d| d.id == id).unwrap();
+        assert_eq!((by("a").dept.as_str(), by("a").port, by("a").universe, by("a").address()), ("lighting", Some(6454), Some(0), Some("10.0.0.9:6454".into())));
+        assert_eq!((by("s").port, by("s").universe, by("s").address()), (Some(5568), Some(1), Some("239.255.0.1:5568".into())), "no host: the universe's multicast address");
+        assert_eq!((by("s2").universe, by("s2").address()), (Some(258), Some("10.0.0.7:5570".into())));
+        assert!(by("a").is_dmx() && !devs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_lighting_cue_in_a_scene_reaches_the_universe_as_artnet() {
+        let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = sock.local_addr().unwrap().port();
+        let out = Output::new(vec![dmx_device("artnet", port)], true);
+        let show = Show::start_with(lit("1-3=100%"), EventStore::open_in_memory().unwrap(), Some(out)).unwrap();
+        let mut rx = show.subscribe();
+        show.apply("studio", "START");
+        let mut buf = vec![0u8; 2048];
+        let mut got = None;
+        for _ in 0..40 {
+            let Ok(Ok((n, _))) = tokio::time::timeout(Duration::from_millis(300), sock.recv_from(&mut buf)).await else { continue };
+            if n == 18 + 512 && buf[18] == 255 {
+                got = Some(buf[..n].to_vec());
+                break;
+            }
+        }
+        let p = got.expect("the lighting cue arrived as an Art-Net frame with channels 1-3 at full");
+        assert_eq!((&p[0..8], p[14], p[15], p[18], p[19], p[20], p[21]), (&b"Art-Net\0"[..], 0, 0, 255, 255, 255, 0));
+        let sent: Vec<Value> = deliveries(&mut rx).into_iter().filter(|d| d["kind"] == "lighting.look").collect();
+        assert!(sent.iter().any(|d| d["status"] == "sent"), "{sent:?}");
+    }
+
+    #[tokio::test]
+    async fn the_doors_check_and_try_a_cue_understand_dmx() {
+        // a cue written for a console ("blue") is a mistake for a DMX output, and the Doors check says so before the show
+        let out = Output::new(vec![dmx_device("sacn", 9)], false);
+        let show = Show::start_with(lit("blue"), EventStore::open_in_memory().unwrap(), Some(out)).unwrap();
+        let fails: Vec<String> = show.preflight()["checks"].as_array().unwrap().iter().filter(|c| c["level"] == "fail").map(|c| c["text"].as_str().unwrap().to_string()).collect();
+        assert!(fails.iter().any(|t| t.contains("\"blue\"") && t.contains("use channels like")), "{fails:?}");
+        let good = Output::new(vec![dmx_device("sacn", 9)], false);
+        let show = Show::start_with(lit("1-3=100% over 2"), EventStore::open_in_memory().unwrap(), Some(good)).unwrap();
+        assert!(!show.preflight()["checks"].as_array().unwrap().iter().any(|c| c["level"] == "fail" && c["text"].as_str().unwrap().contains("Rack")));
+        // try a cue shows what would go out
+        let m = show.try_cue("d1", "5=50% over 1").await.unwrap();
+        assert_eq!(m["status"], "dry-run");
+        assert_eq!(m["sent_as"][0]["address"], "sACN universe 1");
+        assert_eq!(m["sent_as"][0]["args"][0], "5=50% over 1");
+        assert!(show.try_cue("d1", "nonsense").await.is_err());
     }
 }

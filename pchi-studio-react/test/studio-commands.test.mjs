@@ -227,3 +227,18 @@ test('a show with unreadable timecode does not validate', () => {
   assert.equal(sdk.validTimecode('01:02:03;04'), true)
   assert.equal(sdk.validTimecode('01:61:03:04'), false)
 })
+
+test('a cue heard from a tool is added to the show with its real action at the moment it was heard', () => {
+  const ids = ['c1', 'c2']
+  const newId = () => ids.shift()
+  const r = sdk.captureCueWith(show(), 'INTRO', 'lighting', 12_430, { kind: 'lighting.look', payload: { look: '3/9' } }, newId)
+  assert.ok(r)
+  const lane = r.chart.states.find((s) => s.id === 'INTRO').timeline.lanes.find((l) => l.dept === 'lighting')
+  assert.deepEqual(lane.cues.map((c) => [c.id, c.at_ms, c.action.kind, c.action.payload.look]), [['c1', 12450, 'lighting.look', '3/9']], 'kept to 50 ms')
+  assert.equal(r.laneAdded, true)
+  // a second one goes into the same lane
+  const r2 = sdk.captureCueWith(r.chart, 'INTRO', 'lighting', 20_000, { kind: 'lighting.look', payload: { look: '3/10' } }, newId)
+  assert.equal(r2.laneAdded, false)
+  assert.equal(r2.chart.states.find((s) => s.id === 'INTRO').timeline.lanes.find((l) => l.dept === 'lighting').cues.length, 2)
+  assert.equal(sdk.captureCueWith(show(), 'NOPE', 'lighting', 0, { kind: 'lighting.look', payload: {} }, newId), null, 'a scene this show does not have')
+})

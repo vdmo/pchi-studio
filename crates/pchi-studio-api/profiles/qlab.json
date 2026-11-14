@@ -1,0 +1,11 @@
+{
+  "id": "qlab",
+  "name": "QLab",
+  "dept": "audio",
+  "kinds": ["audio.*", "scene.activate", "renderer.activate"],
+  "hint": "a QLab cue number (12, 12.5, A1) or stop, panic, pause, resume",
+  "rules": [
+    {"match": "(?i)(stop|panic|pause|resume)", "send": "/{1|lower}", "basis": "vendor", "source": "QLab's OSC dictionary lists these workspace commands"},
+    {"match": "[A-Za-z0-9._-]{1,32}", "send": "/cue/{0}/start", "basis": "memory", "source": "QLab's dictionary confirms cue addressing by number (/cue/{cue_number}/...); the start entry itself could not be read: long-standing knowledge to re-check"}
+  ]
+}

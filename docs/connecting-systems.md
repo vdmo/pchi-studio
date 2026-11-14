@@ -74,7 +74,7 @@ messages. Set the device's **host and port to match the tool's own OSC settings*
 
 A value the tool cannot use is reported as a failed delivery with the reason; it is never guessed.
 Try each profile against the real tool (or its software/offline version) before a show relies on it.
-The five dialects live in `crates/pchi-studio-api/src/profiles.rs`, each with tests that decode the exact bytes.
+The seven dialects are data files in `crates/pchi-studio-api/profiles/` (see `profiles.md`: add your own tool, or correct one, without touching the code), each with tests that decode the exact bytes.
 
 ### Feedback from the tools (link status)
 

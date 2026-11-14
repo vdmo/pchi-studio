@@ -48,7 +48,12 @@ interface Props {
   rig?: PchiNode[]
   /** The show as Studio has it now (showchart + rig), to send to the runtime. */
   getFile?: () => unknown
+  /** Add a cue a tool was heard firing to the show being edited. Returns what happened, in words. */
+  onAddCapture?: (c: Capture) => string
 }
+
+/** A cue a tool fired by itself (the runtime heard it), and where in the show that was. */
+export type Capture = { id: number; ts: number; device: string; label: string; dept: string; kind: string; value: string; address: string; scene: string; at_ms: number; basis: string }
 
 /** A rig device as the running show knows it. */
 type Link = { state: 'linked' | 'lost' | 'heard' | 'silent' | 'none'; heard_ms_ago?: number | null; /** when this browser last knew the device spoke (local clock) */ at?: number; /** the runtime asks this tool to answer, so silence means something */ probed?: boolean }
@@ -70,7 +75,7 @@ const linkText = (l: Link | undefined, now: number) => {
  * engine itself, apart from asking "which events could fire from here" to
  * enable the right buttons.
  */
-export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props) {
+export default function LivePanel({ onFeed, onStatus, rig = [], getFile, onAddCapture }: Props) {
   const [status, setStatus] = useState<Status>('connecting')
   const [def, setDef] = useState<Showchart | null>(null)
   const [state, setState] = useState('')
@@ -108,6 +113,9 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
   const [undoDepth, setUndoDepth] = useState(0) // sends that can still be undone
   const [proposals, setProposals] = useState<{ id: number; actor: string; status: string; changes: string[]; notes: string[]; said?: string; rehearsal?: { different: boolean; verdict: string; lines: string[] } | null }[]>([]) // edits an agent proposed
   const [governed, setGoverned] = useState(false) // the runtime writes signed receipts
+  const [captures, setCaptures] = useState<Capture[]>([]) // cues the tools fired themselves
+  const [gone, setGone] = useState<Set<number>>(new Set()) // captures added or dismissed
+  const [capNote, setCapNote] = useState('')
   const [tc, setTc] = useState<{ state: string; position: string | null; fps: string | null; source: string } | null>(null) // timecode being heard
   const [oscIn, setOscIn] = useState<OscInput[]>([]) // OSC inputs listening for button presses
   const [me, setMe] = useState<WhoAmI | null>(null) // who the runtime takes this tab to be
@@ -157,6 +165,7 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
             setGoverned(!!msg.governed)
             setOscIn(Array.isArray(msg.inputs) ? (msg.inputs as OscInput[]) : [])
             setTc((msg.timecode as typeof tc) ?? null)
+            setCaptures(Array.isArray(msg.captures) ? (msg.captures as Capture[]) : [])
             setProposals(Array.isArray(msg.proposals) ? (msg.proposals as typeof proposals) : [])
             setDef(msg.definition as Showchart)
             setState(String(msg.state))
@@ -208,6 +217,9 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
             if (p) setProposals((ps) => [...ps.filter((x) => x.id !== p.id), p].sort((a, b) => a.id - b.id))
             break
           }
+          case 'capture':
+            setCaptures((cs) => [...cs.filter((c) => c.id !== Number(msg.id)), msg as unknown as Capture].slice(-30))
+            break
           case 'timecode':
             setTc({ state: String(msg.state), position: (msg.position as string) ?? null, fps: (msg.fps as string) ?? null, source: String(msg.source ?? '') })
             break
@@ -605,6 +617,33 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
             )}
             {signErr && <span role="alert"> {signErr}</span>}
           </p>
+        )}
+        {onAddCapture && captures.filter((c) => !gone.has(c.id)).length > 0 && (
+          <section className="captures" aria-label="Cues the tools fired">
+            <h4>Fired on the tools</h4>
+            {captures
+              .filter((c) => !gone.has(c.id))
+              .slice(-5)
+              .reverse()
+              .map((c) => (
+                <div key={c.id} className="capture">
+                  <span>
+                    <b>{c.label}</b> fired {c.kind.split('.')[0]} <b>{c.value}</b> · {c.scene} at {fmt(c.at_ms)}
+                    {c.basis !== 'vendor' && <span className="muted" title="The rule that read this message rests on a community source, not the vendor's documentation"> · {c.basis} source</span>}
+                  </span>
+                  <button
+                    onClick={() => {
+                      setCapNote(onAddCapture(c))
+                      setGone((g) => new Set(g).add(c.id))
+                    }}
+                  >
+                    Add to show
+                  </button>
+                  <button className="ghost" aria-label="Dismiss" onClick={() => setGone((g) => new Set(g).add(c.id))}>×</button>
+                </div>
+              ))}
+            {capNote && <p className="muted" role="status">{capNote}</p>}
+          </section>
         )}
         {(() => {
           const lockedTc = def?.states.find((x) => x.id === state)?.timeline?.tc_start

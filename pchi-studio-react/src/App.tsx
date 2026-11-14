@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { clearDevice, ensureCueNumbers, rigCheck, newShow, newShowchart, type PchiEvent, type PchiShowFile, type Showchart } from '@pchi/sdk'
+import { captureCueWith, clearDevice, deptOf, ensureCueNumbers, rigCheck, newShow, newShowchart, type PchiEvent, type PchiShowFile, type Showchart } from '@pchi/sdk'
 import ShowchartPanel from './components/ShowchartPanel'
 import TimelinePanel from './components/TimelinePanel'
 import CueSheet from './components/CueSheet'
@@ -207,7 +207,14 @@ export default function App() {
         const c = clearDevice(showchart, id)
         if (c !== showchart) history.commit(c)
       }} />}
-      {mode === 'live' && <LivePanel onFeed={onFeed} onStatus={setLiveStatus} rig={rig.nodes} getFile={buildFile} />}
+      {mode === 'live' && <LivePanel onFeed={onFeed} onStatus={setLiveStatus} rig={rig.nodes} getFile={buildFile} onAddCapture={(c) => {
+        // a cue a tool was heard firing, added to this show at the moment it was heard
+        const field = deptOf(c.dept).field
+        const r = captureCueWith(showchart, c.scene, c.dept, c.at_ms, { kind: c.kind, payload: { [field]: c.value } }, () => `c${Date.now().toString(36)}${Math.floor(Math.random() * 36).toString(36)}`)
+        if (!r) return `${c.scene} is not in this show: open the show the runtime is running`
+        history.commit(r.chart)
+        return `Added ${c.value} at ${(Math.round(c.at_ms / 50) * 0.05).toFixed(2)} s in ${c.scene}. Ctrl+Z undoes it.`
+      }} />}
 
       <footer className="slimfoot">
         <EventConsole log={log} onClear={() => setLog([])} collapsible />

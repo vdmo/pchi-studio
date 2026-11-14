@@ -39,6 +39,8 @@ pub struct Output {
     /// How often a device that can be probed is asked to answer, and how long silence counts as lost.
     pub probe_every: Duration,
     pub link_timeout: Duration,
+    /// Art-Net and sACN devices: their universes and the tasks that keep sending them. Shared across live edits.
+    dmx: Arc<crate::dmx::Dmx>,
 }
 
 /// What routing decided for one action.
@@ -53,7 +55,7 @@ pub enum Plan {
 
 impl Output {
     pub fn new(devices: Vec<Device>, send: bool) -> Self {
-        Self { devices, send, armed: Mutex::new(BTreeSet::new()), links: Arc::new(Links::default()), probe_every: Duration::from_secs(5), link_timeout: Duration::from_secs(15) }
+        Self { devices, send, armed: Mutex::new(BTreeSet::new()), links: Arc::new(Links::default()), probe_every: Duration::from_secs(5), link_timeout: Duration::from_secs(15), dmx: Arc::new(crate::dmx::Dmx::default()) }
     }
 
     /// Change how often devices are probed and when silence counts as lost (the defaults are 5 s and 15 s).
@@ -69,7 +71,7 @@ impl Output {
 
     /// Whether this device is expected to answer: it can be probed, or has a listen port.
     pub fn expects_feedback(dev: &Device) -> bool {
-        profiles::probe(&dev.kind).is_some() || dev.listen_port.is_some()
+        profiles::probe(dev.profile_key()).is_some() || dev.listen_port.is_some()
     }
 
     /// The device's link: "linked" (answered a probe recently), "lost" (answered before, now silent),
@@ -82,7 +84,7 @@ impl Output {
         let heard = self.links.last_heard(&dev.id);
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
         let age = (heard > 0).then(|| (now - heard).max(0));
-        let probed = profiles::probe(&dev.kind).is_some();
+        let probed = profiles::probe(dev.profile_key()).is_some();
         let state = match (probed, dev.listen_port.is_some(), age) {
             (true, _, Some(a)) if a <= self.link_timeout.as_millis() as i64 => "linked",
             (true, _, Some(_)) => "lost",
@@ -96,7 +98,7 @@ impl Output {
     /// The same output with a new device list (after a live edit), keeping the armed state of lasers that are still there.
     pub fn with_devices(&self, devices: Vec<Device>) -> Self {
         let keep: BTreeSet<String> = self.armed.lock().unwrap().iter().filter(|id| devices.iter().any(|d| &d.id == *id && d.dept == "laser")).cloned().collect();
-        Self { devices, send: self.send, armed: Mutex::new(keep), links: Arc::clone(&self.links), probe_every: self.probe_every, link_timeout: self.link_timeout }
+        Self { devices, send: self.send, armed: Mutex::new(keep), links: Arc::clone(&self.links), probe_every: self.probe_every, link_timeout: self.link_timeout, dmx: Arc::clone(&self.dmx) }
     }
 
     pub fn is_armed(&self, id: &str) -> bool {
@@ -170,11 +172,17 @@ pub async fn deliver(dev: &Device, action: &Action) -> Result<String, String> {
 impl Output {
     /// Send an action to a device through its kept socket, so the device can answer on it.
     pub async fn deliver(&self, dev: &Device, action: &Action) -> Result<String, String> {
+        if dev.is_dmx() {
+            return self.dmx.apply(dev, action).await;
+        }
         self.send_packets(dev, packets_for(dev, action)?).await
     }
 
     /// Send ready-made OSC packets to a device through its kept socket.
     pub async fn send_packets(&self, dev: &Device, packets: Vec<Vec<u8>>) -> Result<String, String> {
+        if dev.is_dmx() {
+            return Err(format!("{} is a DMX output: it is sent levels, not OSC", dev.label));
+        }
         let addr = dev.address().ok_or_else(|| format!("{} has no host and port in the rig", dev.label))?;
         let go = async {
             let link = self.links.get(dev).await?;
@@ -187,8 +195,22 @@ impl Output {
     }
 }
 
+/// What sending `action` to `dev` puts on the wire, as (address, arguments) lines for a person to read: the OSC messages, or for
+/// a DMX device which universe gets which channels. Errors say what to fix.
+pub fn wire_lines(dev: &Device, action: &Action) -> Result<Vec<(String, Vec<Value>)>, String> {
+    if dev.is_dmx() {
+        let summary = crate::dmx::describe(action)?;
+        let proto = crate::dmx::proto_of(&dev.kind).ok_or("not a DMX device")?;
+        return Ok(vec![(format!("{} universe {}", proto.name(), dev.universe.unwrap_or(proto.default_universe())), vec![Value::String(crate::dmx::value_of(action)), Value::String(summary)])]);
+    }
+    Ok(packets_for(dev, action)?.iter().flat_map(|p| crate::links::flatten(p)).collect())
+}
+
 pub fn packets_for(dev: &Device, action: &Action) -> Result<Vec<Vec<u8>>, String> {
-    Ok(match (action.kind.as_str(), profiles::encode(&dev.kind, action)) {
+    if dev.is_dmx() {
+        return Err(format!("{} is a DMX output: it is sent levels, not OSC", dev.label));
+    }
+    Ok(match (action.kind.as_str(), profiles::encode(dev.profile_key(), action)) {
         ("test", _) | (_, None) => vec![encode(action)?],
         (_, Some(r)) => r?,
     })
@@ -216,7 +238,7 @@ mod tests {
     use serde_json::json;
 
     fn dev(id: &str, kind: &str, port: u16) -> Device {
-        Device { id: id.into(), label: id.into(), kind: kind.into(), dept: dept_of_type(kind).unwrap().into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None }
+        Device { id: id.into(), label: id.into(), kind: kind.into(), dept: dept_of_type(kind).unwrap().into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None, profile: None, universe: None }
     }
 
     #[test]

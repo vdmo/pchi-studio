@@ -8,7 +8,7 @@
 //!
 //! What it cannot do: it cannot see or hear the tool. "The tool reacted" is the operator's word, and the report says so.
 
-use crate::{links, output, output::Output, profiles, rig::Device};
+use crate::{output, output::Output, profiles, rig::Device};
 use pchi_showchart::Action;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -72,7 +72,7 @@ pub struct DeviceResult {
 
 impl DeviceResult {
     fn new(dev: &Device) -> Self {
-        DeviceResult { id: dev.id.clone(), label: dev.label.clone(), tool: dev.kind.clone(), address: dev.address(), ..Default::default() }
+        DeviceResult { id: dev.id.clone(), label: dev.label.clone(), tool: dev.profile_key().to_string(), address: dev.address(), ..Default::default() }
     }
     fn skip(mut self, why: &str) -> Self {
         self.verdict = "skipped".into();
@@ -100,10 +100,6 @@ fn what_for(dev: &Device) -> (&'static str, &'static str, &'static str) {
     }
 }
 
-fn pretty(bytes: &[Vec<u8>]) -> Vec<String> {
-    bytes.iter().flat_map(|p| links::flatten(p)).map(|(a, args)| if args.is_empty() { a } else { format!("{a} {}", args.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(" ")) }).collect()
-}
-
 fn link_state(out: &Output, dev: &Device) -> String {
     out.link_state(dev).and_then(|l| l["state"].as_str().map(String::from)).unwrap_or_else(|| "none".into())
 }
@@ -126,7 +122,7 @@ async fn check_device(c: &mut dyn Console, out: &Output, dev: &Device, o: &Optio
     if dev.address().is_none() {
         return r.skip("no host and port in the rig");
     }
-    if !profiles::PROFILES.contains(&dev.kind.as_str()) {
+    if !profiles::exists(dev.profile_key()) && !dev.is_dmx() {
         return r.skip("this type has no profile: it gets generic OSC, which only the tool's own manual can confirm");
     }
     // safety first
@@ -150,21 +146,23 @@ async fn check_device(c: &mut dyn Console, out: &Output, dev: &Device, o: &Optio
         }
     }
     let (kind, field, hint) = what_for(dev);
+    let hint = if dev.is_dmx() { "levels (for example 1=255 or 1-3=50%)" } else { hint };
     let value = c.ask(&format!("Which {hint} should it try? Pick a harmless one (Enter to skip):")).trim().to_string();
     if value.is_empty() {
         return r.skip("no value given");
     }
     r.value = Some(value.clone());
     let action = Action::new(kind, json!({ field: value }));
-    let packets = match output::packets_for(dev, &action) {
-        Ok(p) => p,
+    let lines = match output::wire_lines(dev, &action) {
+        Ok(l) => l,
         Err(e) => {
             c.say(&format!("PCHI cannot build a message for that: {e}"));
             r.send_error = Some(e);
             return r.finish();
         }
     };
-    r.sent = pretty(&packets);
+    let packets = if dev.is_dmx() { Vec::new() } else { output::packets_for(dev, &action).unwrap_or_default() };
+    r.sent = lines.iter().map(|(a, args)| if args.is_empty() { a.clone() } else { format!("{a} {}", args.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(" ")) }).collect();
     c.say("It will send exactly this:");
     for l in &r.sent {
         c.say(&format!("    {l}"));
@@ -175,7 +173,7 @@ async fn check_device(c: &mut dyn Console, out: &Output, dev: &Device, o: &Optio
     if dev.dept == "laser" {
         out.set_armed(&dev.id, true); // only inside this check: the real runtime always starts disarmed
     }
-    match out.send_packets(dev, packets).await {
+    match if dev.is_dmx() { out.deliver(dev, &action).await } else { out.send_packets(dev, packets).await } {
         Ok(_) => c.say("Sent."),
         Err(e) => {
             c.say(&format!("Could not send: {e}"));
@@ -206,7 +204,7 @@ async fn check_device(c: &mut dyn Console, out: &Output, dev: &Device, o: &Optio
         c.say("This profile gets no feedback from the tool (set a listen port in the Rig tab to try).");
     }
     // the cable test needs a tool that answers a probe: only then can the link notice a loss
-    if r.send_error.is_none() && profiles::probe(&dev.kind).is_some() && r.feedback.as_ref().is_some_and(|f| f.heard) {
+    if r.send_error.is_none() && profiles::probe(dev.profile_key()).is_some() && r.feedback.as_ref().is_some_and(|f| f.heard) {
         r.cable = cable_test(c, out, dev, o).await;
     }
     r.finish()
@@ -231,7 +229,7 @@ async fn listen_for_feedback(c: &mut dyn Console, out: &Output, dev: &Device, o:
         c.say(&format!("Cannot listen for feedback: {e}"));
         return fb;
     }
-    let probe = profiles::probe(&dev.kind);
+    let probe = profiles::probe(dev.profile_key());
     if probe.is_none() {
         c.say("Now make the tool send something by itself (fire a cue or move a fader in the tool). Listening…");
     } else {
@@ -271,7 +269,7 @@ async fn cable_test(c: &mut dyn Console, out: &Output, dev: &Device, o: &Options
     if c.ask("Cable test: unplug the tool's network cable now, then press Enter (s to skip):").trim().eq_ignore_ascii_case("s") {
         return None;
     }
-    let probe = profiles::probe(&dev.kind)?;
+    let probe = profiles::probe(dev.profile_key())?;
     let mut cable = Cable::default();
     let start = Instant::now();
     let mut last_probe: Option<Instant> = None;
@@ -343,6 +341,8 @@ pub fn doc_label(tool: &str) -> Option<&'static str> {
         "qlab" => "QLab",
         "magicq" => "ChamSys MagicQ",
         "beyond" => "BEYOND",
+        "artnet" => "Art-Net node / fixture",
+        "sacn" => "sACN node / fixture",
         _ => return None,
     })
 }
@@ -419,6 +419,7 @@ pub fn report_markdown(results: &[DeviceResult], date: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::links;
     use crate::rig::dept_of_type;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -452,7 +453,7 @@ mod tests {
     }
 
     fn dev(id: &str, kind: &str, port: u16) -> Device {
-        Device { id: id.into(), label: id.into(), kind: kind.into(), dept: dept_of_type(kind).unwrap().into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None }
+        Device { id: id.into(), label: id.into(), kind: kind.into(), dept: dept_of_type(kind).unwrap().into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None, profile: None, universe: None }
     }
 
     /// A pretend X32: answers /info to whoever asked, while `up` is true; records what it received.
@@ -557,5 +558,26 @@ mod tests {
         let r = DeviceResult { id: "d".into(), label: "Desk".into(), tool: "x32".into(), verdict: "not ticked".into(), why: "x".into(), reacted: "no".into(), ..Default::default() };
         let md = report_markdown(&[r], "2026-11-14");
         assert!(md.contains("# Gear check 2026-11-14") && md.contains("## Desk (x32): NOT TICKED") && md.contains("cannot see the tool"));
+    }
+
+    #[tokio::test]
+    async fn a_dmx_output_is_checked_with_levels_and_ticked_when_the_fixture_reacts() {
+        let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = sock.local_addr().unwrap().port();
+        let d = Device { id: "rack".into(), label: "Rack".into(), kind: "artnet".into(), dept: "lighting".into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None, profile: None, universe: Some(1) };
+        let out = Output::new(vec![d], true);
+        let mut c = Script::new(&["", "1-3=100%", "y", "y"]);
+        let r = run(&mut c, &out, &[], &fast()).await.remove(0);
+        assert_eq!(r.verdict, "ticked", "{r:?}\n{:?}", c.said);
+        assert_eq!(r.tool, "artnet");
+        assert!(r.sent[0].starts_with("Art-Net universe 1"), "{:?}", r.sent);
+        let mut buf = vec![0u8; 2048];
+        let (n, _) = tokio::time::timeout(Duration::from_secs(2), sock.recv_from(&mut buf)).await.expect("a frame").unwrap();
+        assert_eq!((n, buf[14], buf[18], buf[20]), (530, 1, 255, 255));
+        // levels that are not channels are caught before anything is sent
+        let mut c = Script::new(&["", "warm"]);
+        let r = run(&mut c, &out, &[], &fast()).await.remove(0);
+        assert!(r.send_error.as_deref().unwrap_or("").contains("use channels like"), "{r:?}");
+        assert_eq!(doc_label("artnet"), Some("Art-Net node / fixture"));
     }
 }

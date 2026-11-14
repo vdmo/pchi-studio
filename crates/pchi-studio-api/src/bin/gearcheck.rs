@@ -21,6 +21,9 @@ struct Cli {
     /// Write the report here (markdown). Default: gear-report-<date>.md next to where you run it.
     #[arg(long)]
     report: Option<String>,
+    /// A folder of tool profile files to add to the built-in ones (the same folder you give the runtime).
+    #[arg(long, value_name = "DIR")]
+    profiles: Option<String>,
     /// Tick the Status column of this checklist (docs/foh-proof.md) for what was actually tried. Skipped devices change nothing.
     #[arg(long, value_name = "FILE")]
     update_doc: Option<String>,
@@ -46,6 +49,11 @@ impl Console for Terminal {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    if let Some(dir) = &cli.profiles {
+        for l in pchi_studio_api::profiles::load_dir(std::path::Path::new(dir)).map_err(anyhow::Error::msg).with_context(|| format!("profiles {dir}"))? {
+            println!("profile: {l}");
+        }
+    }
     let (_, devices) = rig::load(&std::fs::read_to_string(&cli.file).with_context(|| format!("reading {}", cli.file))?).map_err(anyhow::Error::msg).with_context(|| format!("parsing {}", cli.file))?;
     let devices = devices.filter(|d| !d.is_empty()).ok_or_else(|| anyhow::anyhow!("{} has no rig: add devices in Studio's Rig tab and Save as .pchi", cli.file))?;
     println!("Gear check: {} device(s). This sends real messages, one device at a time, only after you confirm.\n", devices.len());

@@ -1,0 +1,13 @@
+{
+  "id": "magicq",
+  "name": "ChamSys MagicQ",
+  "dept": "lighting",
+  "kinds": ["lighting.look"],
+  "hint": "a playback number (3 = go), playback/cue (3/5 = jump to cue 5), or \"release 3\"",
+  "rules": [
+    {"match": "\\d+", "send": "/pb/{0}/go", "basis": "community", "source": "ChamSys's OSC page as reported by search results; the page itself could not be fetched"},
+    {"match": "(\\d+)/(\\d+)", "send": "/pb/{1}/{2}", "basis": "community", "source": "as above"},
+    {"match": "(?i)release\\s+(\\d+)", "send": "/pb/{1}/release", "basis": "community", "source": "as above"}
+  ],
+  "notes": "MagicQ PC only controls the first 10 playbacks."
+}

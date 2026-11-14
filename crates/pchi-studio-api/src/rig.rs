@@ -17,10 +17,28 @@ pub struct Device {
     pub port: Option<u16>,
     /// Port to listen on for what the device sends back (set to match the tool's OSC output port).
     pub listen_port: Option<u16>,
+    /// The id of the profile that says what messages this tool understands (see `profiles`). Without one, the device type is used.
+    pub profile: Option<String>,
+    /// For a DMX device (Art-Net, sACN): the universe it sends. Art-Net starts at 0, sACN at 1.
+    pub universe: Option<u32>,
 }
 
 impl Device {
+    /// What to look up in the profile registry: the device's own `profile`, else its type.
+    pub fn profile_key(&self) -> &str {
+        self.profile.as_deref().unwrap_or(&self.kind)
+    }
+
+    pub fn is_dmx(&self) -> bool {
+        crate::dmx::proto_of(&self.kind).is_some()
+    }
+
     pub fn address(&self) -> Option<String> {
+        // an sACN device with no host sends to its universe's multicast address
+        if let (Some(crate::dmx::Proto::Sacn), true) = (crate::dmx::proto_of(&self.kind), self.host.as_deref().map_or(true, |h| h.trim().is_empty())) {
+            let u = self.universe.unwrap_or(1) as u16;
+            return Some(format!("{}:{}", crate::dmx::sacn_multicast(u), self.port.unwrap_or(5568)));
+        }
         match (&self.host, self.port) {
             (Some(h), Some(p)) if !h.trim().is_empty() => Some(format!("{}:{}", h.trim(), p)),
             _ => None,
@@ -32,7 +50,7 @@ impl Device {
 pub fn dept_of_type(t: &str) -> Option<&'static str> {
     Some(match t {
         "vork" | "unreal" | "touchdesigner" | "notch" | "projector" | "led-wall" | "resolume" => "visual",
-        "lighting" | "lighting-desk" | "grandma3" | "eos" | "magicq" => "lighting",
+        "lighting" | "lighting-desk" | "grandma3" | "eos" | "magicq" | "artnet" | "sacn" => "lighting",
         "laser" | "beyond" => "laser",
         "audio-zone" | "audio-console" | "audio-agent" | "x32" | "qlab" => "audio",
         _ => return None,
@@ -73,17 +91,24 @@ pub fn load(text: &str) -> Result<(Showchart, Option<Vec<Device>>), String> {
 
 fn device_of(n: &Value) -> Option<Device> {
     let kind = n.get("type")?.as_str()?.to_string();
+    let params = n.get("params");
+    // a profile named in the node's params (a tool the crew added a profile file for), if there is one
+    let profile = params.and_then(|p| p.get("profile")).and_then(Value::as_str).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     let dept = n
         .get("dept")
         .and_then(Value::as_str)
         .map(str::to_string)
-        .or_else(|| dept_of_type(&kind).map(str::to_string))?;
-    let params = n.get("params");
+        .or_else(|| dept_of_type(&kind).map(str::to_string))
+        .or_else(|| profile.as_deref().and_then(crate::profiles::dept_of))?;
     let host = params.and_then(|p| p.get("host")).and_then(Value::as_str).map(str::to_string);
     let port = params.and_then(|p| p.get("port")).and_then(|p| p.as_u64().or_else(|| p.as_str().and_then(|s| s.trim().parse().ok()))).and_then(|p| u16::try_from(p).ok());
     let listen_port = params.and_then(|p| p.get("listen_port")).and_then(|p| p.as_u64().or_else(|| p.as_str().and_then(|s| s.trim().parse().ok()))).and_then(|p| u16::try_from(p).ok()).filter(|p| *p > 0);
     let id = n.get("id")?.as_str()?.to_string();
-    Some(Device { label: n.get("label").and_then(Value::as_str).unwrap_or(&id).to_string(), id, kind, dept, host, port, listen_port })
+    // DMX devices have standard ports and universes
+    let proto = crate::dmx::proto_of(&kind);
+    let port = port.or(proto.map(|p| p.default_port()));
+    let universe = params.and_then(|p| p.get("universe")).and_then(|p| p.as_u64().or_else(|| p.as_str().and_then(|s| s.trim().parse().ok()))).and_then(|u| u32::try_from(u).ok()).or(proto.map(|p| p.default_universe()));
+    Some(Device { label: n.get("label").and_then(Value::as_str).unwrap_or(&id).to_string(), id, kind, dept, host, port, listen_port, profile, universe })
 }
 
 /// The device that handles a cue: the lane's chosen one, else the only device of
@@ -105,7 +130,7 @@ mod tests {
     use super::*;
 
     fn dev(id: &str, kind: &str) -> Device {
-        Device { id: id.into(), label: id.into(), kind: kind.into(), dept: dept_of_type(kind).unwrap().into(), host: Some("127.0.0.1".into()), port: Some(9000), listen_port: None }
+        Device { id: id.into(), label: id.into(), kind: kind.into(), dept: dept_of_type(kind).unwrap().into(), host: Some("127.0.0.1".into()), port: Some(9000), listen_port: None, profile: None, universe: None }
     }
 
     #[test]
@@ -121,6 +146,8 @@ mod tests {
         assert_eq!(dept_of_type("beyond"), Some("laser"));
         assert_eq!(dept_of_type("magicq"), Some("lighting"));
         assert_eq!(dept_of_type("qlab"), Some("audio"));
+        assert_eq!(dept_of_type("artnet"), Some("lighting"));
+        assert_eq!(dept_of_type("sacn"), Some("lighting"));
         assert_eq!(dept_of_type("ndi"), None);
         assert_eq!(dept_of_type("cue"), None);
         assert_eq!(dept_of_kind("lighting.look"), "lighting");

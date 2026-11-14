@@ -1,0 +1,12 @@
+{
+  "id": "x32",
+  "name": "Behringer X32 / M32",
+  "dept": "audio",
+  "kinds": ["audio.snapshot", "audio.scene"],
+  "hint": "the scene number on the desk (0 to 99)",
+  "rules": [
+    {"match": "\\d{1,2}", "send": "/-action/goscene", "args": [{"int": "{0}"}], "basis": "memory", "source": "from memory and NOT confirmed against a desk: try it with the gear check, PA muted"}
+  ],
+  "probe": {"address": "/info"},
+  "notes": "The X32 answers /info, which is how the link is watched."
+}

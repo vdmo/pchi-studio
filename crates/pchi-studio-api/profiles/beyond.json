@@ -1,0 +1,14 @@
+{
+  "id": "beyond",
+  "name": "Pangolin BEYOND",
+  "dept": "laser",
+  "kinds": ["laser.cue", "laser.stop", "laser.blackout"],
+  "hint": "a cue name (up to 64 characters)",
+  "rules": [
+    {"kinds": ["laser.cue"], "match": "[^\\x00-\\x1F\\x7F]{1,64}", "send": "/beyond/general/StartCue", "args": [{"string": "{0}"}], "basis": "vendor", "source": "Pangolin wiki, OSC commands"},
+    {"kinds": ["laser.stop"], "match": "[^\\x00-\\x1F\\x7F]{1,64}", "send": "/beyond/general/StopCue", "args": [{"string": "{0}"}], "basis": "vendor", "source": "Pangolin wiki, OSC commands"},
+    {"kinds": ["laser.blackout"], "ignore_value": true, "send": "/beyond/general/BlackOut", "basis": "vendor", "source": "Pangolin wiki, OSC commands"}
+  ],
+  "stop": [{"address": "/beyond/general/BlackOut"}, {"address": "/beyond/general/DisableLaserOutput"}],
+  "notes": "STOP LASERS sends BlackOut and DisableLaserOutput. The default OSC port is not confirmed: set the port BEYOND shows."
+}

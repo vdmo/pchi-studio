@@ -72,6 +72,8 @@ Per tool, what to look at:
 | QLab | a cue number | `/cue/<n>/start` (re-check) | not yet tried |
 | ChamSys MagicQ | `3` | `/pb/3/go` | not yet tried |
 | BEYOND | a cue name (**laser safe, arm first**) | `/beyond/general/StartCue`, and STOP LASERS: `BlackOut`, `DisableLaserOutput` | not yet tried |
+| Art-Net node / fixture | `1=255` (channel 1 at full) | Art-Net universe frames arriving at the node (`artnet-sacn.md`) | not yet tried |
+| sACN node / fixture | `1=255` (channel 1 at full) | sACN universe frames arriving at the receiver (`artnet-sacn.md`) | not yet tried |
 
 ## 5. The honest summary
 

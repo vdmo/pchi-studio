@@ -2,7 +2,7 @@
 // tidy their timing onto a grid. Pure functions over the showchart, so the
 // Studio panel only decides WHEN, and the result is the same cue a typed
 // command or a drag would have made.
-import { deptOf, type ShowCue, type ShowLane, type Showchart } from './index'
+import { deptOf, type ShowAction, type ShowCue, type ShowLane, type Showchart } from './index'
 
 /** Captured times are kept to 50 ms: fine enough to feel exact, coarse enough to read. */
 export const CAPTURE_STEP_MS = 50
@@ -48,6 +48,21 @@ export function captureCue(chart: Showchart, scene: string, dept: string, at_ms:
     cueId: cue.id,
     laneAdded,
   }
+}
+
+/**
+ * Like `captureCue`, but the cue carries a real action: what a tool was heard firing, so the show can do the same thing at the
+ * same moment. The time is kept to 50 ms, as for a blank capture.
+ */
+export function captureCueWith(chart: Showchart, scene: string, dept: string, at_ms: number, action: ShowAction, newId: () => string): Captured | null {
+  const r = captureCue(chart, scene, dept, at_ms, newId)
+  if (!r) return null
+  const states = r.chart.states.map((s) =>
+    s.id !== scene || !s.timeline
+      ? s
+      : { ...s, timeline: { ...s.timeline, lanes: s.timeline.lanes.map((l) => (l.id !== r.laneId ? l : { ...l, cues: l.cues.map((c) => (c.id === r.cueId ? { ...c, action } : c)) })) } },
+  )
+  return { ...r, chart: { ...r.chart, states } }
 }
 
 /** Milliseconds per beat at `bpm` (divided into `per` parts: 2 = half a beat). */

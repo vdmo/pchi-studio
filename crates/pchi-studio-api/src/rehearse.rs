@@ -8,7 +8,7 @@
 //! What it cannot know: how the people would have reacted to a different show (their presses are replayed as
 //! they were), and anything about the tools themselves. A cue due at the very moment its scene ends counts as cut off.
 
-use crate::{links, output, rig};
+use crate::{output, rig};
 use pchi_eventstore::{recorder, EventRecord};
 use pchi_showchart::{timer_event, Action, ShowEngine, Showchart};
 use serde_json::{json, Value};
@@ -59,8 +59,7 @@ fn wire(devices: &[rig::Device], dept: Option<&str>, device: Option<&str>, actio
         return Ok(None);
     }
     let dev = rig::resolve(devices, &dept, device)?;
-    let packets = output::packets_for(dev, action)?;
-    Ok(Some(packets.iter().flat_map(|p| links::flatten(p)).map(|(a, args)| json!({"device": dev.label, "address": a, "args": args})).collect()))
+    Ok(Some(output::wire_lines(dev, action)?.into_iter().map(|(a, args)| json!({"device": dev.label, "address": a, "args": args})).collect()))
 }
 
 /// Play `chart` against the recorded run. `until` is where the run ends (now, for a live run).
@@ -390,7 +389,7 @@ mod tests {
 
     #[test]
     fn cues_are_checked_against_the_rig_and_show_what_would_be_sent() {
-        let dev = |id: &str, kind: &str| rig::Device { id: id.into(), label: id.into(), kind: kind.into(), dept: rig::dept_of_type(kind).unwrap().into(), host: Some("127.0.0.1".into()), port: Some(9), listen_port: None };
+        let dev = |id: &str, kind: &str| rig::Device { id: id.into(), label: id.into(), kind: kind.into(), dept: rig::dept_of_type(kind).unwrap().into(), host: Some("127.0.0.1".into()), port: Some(9), listen_port: None, profile: None, universe: None };
         // a Resolume for visuals only: the lighting cue has nowhere to go
         let r = run(&real_run(), &chart(), &[dev("r1", "resolume")], T0 + 6000).unwrap();
         assert!(r["summary"]["different"] == true);
@@ -415,6 +414,20 @@ mod tests {
         // a minimum the real run already met changes nothing
         c.states.iter_mut().find(|s| s.id == "INTRO").unwrap().min_ms = Some(2_000);
         assert_eq!(run(&real_run(), &c, &[], T0 + 6000).unwrap()["summary"]["different"], false);
+    }
+
+    #[test]
+    fn a_dmx_cue_is_read_as_channels_and_a_console_cue_sent_to_it_is_a_problem() {
+        let dev = |kind: &str| rig::Device { id: "d".into(), label: "Rack".into(), kind: kind.into(), dept: "lighting".into(), host: Some("127.0.0.1".into()), port: Some(6454), listen_port: None, profile: None, universe: Some(2) };
+        let mut c = chart();
+        c.states.iter_mut().find(|s| s.id == "INTRO").unwrap().timeline.as_mut().unwrap().lanes.iter_mut().find(|l| l.id == "lighting").unwrap().cues[0].action.payload = json!({"look": "1-4=50% over 2"});
+        let r = run(&real_run(), &c, &[dev("artnet")], T0 + 6000).unwrap();
+        let fire = r["visits"][1]["fires"].as_array().unwrap().iter().find(|f| f["cue"] == "l1").unwrap();
+        assert_eq!(fire["sent_as"][0]["address"], "Art-Net universe 2");
+        assert!(fire["sent_as"][0]["args"][1].as_str().unwrap().starts_with("4 channel(s) over 2"), "{fire}");
+        // the demo's own value for that cue is a console look ("blue"): not channels
+        let r = run(&real_run(), &chart(), &[dev("artnet")], T0 + 6000).unwrap();
+        assert!(r["problems"].as_array().unwrap().iter().any(|p| p.as_str().unwrap().contains("use channels like")), "{}", r["problems"]);
     }
 
     #[test]

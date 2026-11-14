@@ -1,0 +1,15 @@
+{
+  "id": "eos",
+  "name": "ETC Eos",
+  "dept": "lighting",
+  "kinds": ["lighting.look"],
+  "hint": "a cue number (2 or 2.5), or cuelist/cue (3/9)",
+  "rules": [
+    {"match": "\\d+(?:\\.\\d+)?", "send": "/eos/cue/{0}/fire", "basis": "vendor", "source": "ETC support article"},
+    {"match": "(\\d+)/(\\d+(?:\\.\\d+)?)", "send": "/eos/cue/{1}/{2}/fire", "basis": "vendor", "source": "ETC support article"}
+  ],
+  "capture": [
+    {"listen": "/eos/out/event/cue/(\\d+)/(\\d+(?:\\.\\d+)?)/fire", "kind": "lighting.look", "value": "{1}/{2}", "basis": "community", "source": "an ETC community post and a TroikaTronix forum post: Eos sends /eos/out/event/cue/<list>/<cue>/fire, with no data, when a cue is taken. Not an ETC documentation page"}
+  ],
+  "notes": "Set Eos's OSC output (UDP TX) to this machine and the Listen port in the Rig tab to the same port to capture the cues you fire on the console."
+}

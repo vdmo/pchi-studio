@@ -92,6 +92,8 @@ test('the tool profiles serve the departments they are for', () => {
   assert.equal(rigDept(node('q', 'qlab')), 'audio')
   assert.equal(rigDept(node('q2', 'qlab', { dept: 'visual' })), 'visual', 'QLab can be set to serve visuals')
   assert.equal(rigDept(node('c', 'magicq')), 'lighting')
+  assert.equal(rigDept(node('c', 'artnet')), 'lighting')
+  assert.equal(rigDept(node('c', 'sacn')), 'lighting')
   assert.equal(specOf('qlab').defaults.port, 53000)
   assert.equal(specOf('beyond').label, 'Pangolin BEYOND')
   assert.equal(specOf('resolume').defaults.port, 7000)

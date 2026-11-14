@@ -69,6 +69,16 @@ pub fn run(chart: &Showchart, output: Option<&Output>, readiness: &BTreeMap<Stri
                 _ => dev("warn", "device", format!("{} gives no feedback: only its own READY or a test can show it is there.", d.label)),
             }
         }
+        // what the tool's messages rest on: only the vendor's own documentation is a firm basis
+        if let Some(p) = profiles::get(d.profile_key()) {
+            let weak: Vec<&profiles::Rule> = p.rules.iter().filter(|r| r.basis != profiles::Basis::Vendor).collect();
+            if !weak.is_empty() {
+                let mut words: Vec<&str> = weak.iter().map(|r| r.basis.word()).collect();
+                words.sort();
+                words.dedup();
+                dev("warn", "device", format!("{}: {} of {} message rule(s) in the {} profile rest on {} rather than the vendor's documentation: prove them with pchi-gearcheck before relying on them.", d.label, weak.len(), p.rules.len(), p.name, words.join(" and ")));
+            }
+        }
         if d.dept == "laser" {
             if o.is_armed(&d.id) {
                 dev("warn", "laser", format!("{} is ARMED: cues will reach it.", d.label));
@@ -111,7 +121,16 @@ pub fn run(chart: &Showchart, output: Option<&Output>, readiness: &BTreeMap<Stri
                 *bad += 1;
                 return Some(("fail", format!("{what}: the value is blank (set it in the Cue sheet)."), Some(dev.id.clone())));
             }
-            match profiles::encode(&dev.kind, action) {
+            if dev.is_dmx() {
+                return match crate::dmx::describe(action) {
+                    Err(e) => {
+                        *bad += 1;
+                        Some(("fail", format!("{what} to {}: {e}.", dev.label), Some(dev.id.clone())))
+                    }
+                    Ok(_) => None,
+                };
+            }
+            match profiles::encode(dev.profile_key(), action) {
                 Some(Err(e)) => {
                     *bad += 1;
                     Some(("fail", format!("{what} to {}: {e}.", dev.label), Some(dev.id.clone())))
@@ -163,7 +182,7 @@ mod tests {
     use serde_json::json;
 
     fn dev(id: &str, kind: &str, host: &str, port: u16) -> Device {
-        Device { id: id.into(), label: id.into(), kind: kind.into(), dept: dept_of_type(kind).unwrap().into(), host: Some(host.into()), port: Some(port), listen_port: None }
+        Device { id: id.into(), label: id.into(), kind: kind.into(), dept: dept_of_type(kind).unwrap().into(), host: Some(host.into()), port: Some(port), listen_port: None, profile: None, universe: None }
     }
     fn chart(cue_value: &str) -> Showchart {
         Showchart::from_json(&format!(

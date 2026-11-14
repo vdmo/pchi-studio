@@ -48,7 +48,7 @@ export type NodeType =
   // venue
   | 'ghost-arcade' | 'projector' | 'led-wall' | 'audio-zone' | 'laser' | 'lighting-desk' | 'audio-console'
   // tool profiles (the exact OSC dialect of a popular tool)
-  | 'resolume' | 'grandma3' | 'eos' | 'x32' | 'beyond' | 'qlab' | 'magicq'
+  | 'resolume' | 'grandma3' | 'eos' | 'x32' | 'beyond' | 'qlab' | 'magicq' | 'artnet' | 'sacn'
   // intelligence
   | 'director-agent' | 'vision-agent' | 'audio-agent'
 
@@ -110,6 +110,10 @@ export const NODE_CATALOG: NodeSpec[] = [
   spec('venue', 'beyond', 'Pangolin BEYOND', { host: '127.0.0.1', port: 12000 }),
   spec('venue', 'qlab', 'QLab', { host: '127.0.0.1', port: 53000, listen_port: 53001 }),
   spec('venue', 'magicq', 'ChamSys MagicQ', { host: '127.0.0.1', port: 8000 }),
+  // DMX over the network: the node's address (or a broadcast address) and the universe. Art-Net universes start at 0, sACN at 1;
+  // an sACN device with no host sends to its universe's multicast address.
+  spec('venue', 'artnet', 'Art-Net node', { host: '2.0.0.1', port: 6454, universe: 0 }),
+  spec('venue', 'sacn', 'sACN (E1.31) output', { host: '', port: 5568, universe: 1 }),
   spec('intelligence', 'director-agent', 'Director Agent', {}),
   spec('intelligence', 'vision-agent', 'Vision Agent', {}),
   spec('intelligence', 'audio-agent', 'Audio Agent', {}),

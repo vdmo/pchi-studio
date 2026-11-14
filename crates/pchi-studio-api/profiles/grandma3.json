@@ -1,0 +1,12 @@
+{
+  "id": "grandma3",
+  "name": "grandMA3",
+  "dept": "lighting",
+  "kinds": ["lighting.look"],
+  "error": "\"{value}\": only playback commands may be sent to grandMA3 (go+, go-, go, goback, goto, pause, off, on, flash), one at a time",
+  "rules": [
+    {"match": "\\d+", "send": "/cmd", "args": [{"string": "Go+ Exec {0}"}], "basis": "vendor", "source": "MA3 manual, Remote Inputs OSC: address /cmd, type s; the manual's own example is Go+ Exec 402"},
+    {"match": "(?i)(?:go\\+|go-|go|goback|goto|pause|off|on|flash)(?:\\s[^;\\r\\n]{0,190})?", "send": "/cmd", "args": [{"string": "{0}"}], "basis": "vendor", "source": "MA3 manual; only playback command words are allowed so a show file can never delete, store or overwrite anything on a console"}
+  ],
+  "notes": "Turn on Receive Command in the console's OSC settings."
+}
