@@ -97,6 +97,10 @@ pub struct Proposal {
     pub changes: Vec<String>,
     pub notes: Vec<String>,
     pub receipt: Option<String>,
+    /// What the proposer said they wanted, in their own words (a narrated or typed line, or an agent's reason).
+    pub said: String,
+    /// How the edit would have played against the run so far, when it was proposed: {different, verdict, lines}.
+    pub rehearsal: Value,
     /// Hash of the show (and rig) this was proposed against: if the live show moves on, the proposal is superseded.
     pub base: String,
     pub chart: Showchart,
@@ -105,7 +109,7 @@ pub struct Proposal {
 
 impl Proposal {
     pub fn json(&self) -> Value {
-        json!({"id": self.id, "actor": self.actor, "ts": self.ts, "status": self.status, "changes": self.changes, "notes": self.notes, "receipt": self.receipt})
+        json!({"id": self.id, "actor": self.actor, "ts": self.ts, "status": self.status, "changes": self.changes, "notes": self.notes, "receipt": self.receipt, "said": self.said, "rehearsal": self.rehearsal})
     }
 }
 
@@ -113,6 +117,16 @@ impl Proposal {
 pub struct Gov {
     pub log: OnceLock<GovernanceLog>,
     pub proposals: Mutex<Vec<Proposal>>,
+}
+
+/// A line someone said or typed, made safe to keep in a record: no control characters, at most 300 characters.
+pub fn clean_said(s: Option<&str>) -> String {
+    s.unwrap_or("").chars().filter(|c| !c.is_control()).take(300).collect::<String>().trim().to_string()
+}
+
+/// ` — said: "..."` for a message, or nothing when nothing was said.
+pub fn said_suffix(said: &str) -> String {
+    if said.is_empty() { String::new() } else { format!(" — said: \"{said}\"") }
 }
 
 /// How many proposals are kept (pending first-come; the oldest settled ones drop off).

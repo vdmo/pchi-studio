@@ -52,7 +52,7 @@ pub mod rehearse;
 pub mod rig;
 
 use futures_util::{SinkExt, StreamExt};
-use governance::{Actor, Perm, Proposal};
+use governance::{said_suffix, Actor, Perm, Proposal};
 use output::{Output, Plan};
 use pchi_eventstore::{recorder, EventStore};
 use pchi_showchart::{timer_event, Action, ScheduledCue, ShowEngine, Showchart};
@@ -810,7 +810,7 @@ impl Show {
     }
 
     /// An agent's edit: checked like any send, but only stored. A person approves or rejects it.
-    pub fn propose(self: &Arc<Self>, actor: &Actor, chart: Showchart, devices: Option<Vec<rig::Device>>) -> Result<Value, (u16, Value)> {
+    pub fn propose(self: &Arc<Self>, actor: &Actor, chart: Showchart, devices: Option<Vec<rig::Device>>, said: &str) -> Result<Value, (u16, Value)> {
         let preview = self.replace(chart.clone(), devices.clone(), false)?;
         let strings = |k: &str| preview["diff"][k].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect::<Vec<_>>()).unwrap_or_default();
         let (changes, notes) = (strings("changes"), strings("notes"));
@@ -819,11 +819,13 @@ impl Show {
         }
         let base = self.base_hash();
         let ts = now_ms();
+        // how it would have gone against the run so far, so the person deciding sees the effect, not just the edit
+        let rehearsal = self.rehearse(chart.clone(), devices.clone()).map(|r| json!({"different": r["summary"]["different"], "verdict": r["summary"]["verdict"], "lines": r["summary"]["lines"]})).unwrap_or(Value::Null);
         let (id, view) = {
             let mut ps = self.gov.proposals.lock().unwrap();
             let id = ps.iter().map(|p| p.id).max().unwrap_or(0) + 1;
-            let receipt = self.receipt("show.propose", "ESCALATE", actor, &format!("proposed edit #{id} ({} change(s)); waiting for a person", changes.len()));
-            ps.push(Proposal { id, actor: actor.name(), ts, status: "pending".into(), changes, notes, receipt, base, chart, devices });
+            let receipt = self.receipt("show.propose", "ESCALATE", actor, &format!("proposed edit #{id} ({} change(s)){}; waiting for a person", changes.len(), said_suffix(said)));
+            ps.push(Proposal { id, actor: actor.name(), ts, status: "pending".into(), changes, notes, receipt, said: said.to_string(), rehearsal, base, chart, devices });
             while ps.len() > governance::MAX_PROPOSALS {
                 match ps.iter().position(|p| p.status != "pending") {
                     Some(i) => {
@@ -840,14 +842,14 @@ impl Show {
 
     /// A person approves a proposal: it is applied now, exactly as a send. Refused if it is no longer pending.
     pub fn approve(self: &Arc<Self>, id: u32, actor: &Actor) -> Result<Value, (u16, Value)> {
-        let (chart, devices, by, changes) = {
+        let (chart, devices, by, changes, said) = {
             let mut ps = self.gov.proposals.lock().unwrap();
             let p = ps.iter_mut().find(|p| p.id == id).ok_or((404u16, json!({"error": format!("no proposal #{id}")})))?;
             if p.status != "pending" {
                 return Err((409, json!({"error": format!("proposal #{id} is {}, not pending", p.status), "status": p.status})));
             }
             p.status = "approving".into();
-            (p.chart.clone(), p.devices.clone(), p.actor.clone(), p.changes.len())
+            (p.chart.clone(), p.devices.clone(), p.actor.clone(), p.changes.len(), p.said.clone())
         };
         let set = |status: &str| {
             if let Some(p) = self.gov.proposals.lock().unwrap().iter_mut().find(|p| p.id == id) {
@@ -858,7 +860,7 @@ impl Show {
             Ok(mut v) => {
                 set("approved");
                 v["approved"] = json!(id);
-                v["receipt"] = json!(self.receipt("show.edit", "ALLOW", actor, &format!("approved proposal #{id} from {by} and applied it ({changes} change(s))")));
+                v["receipt"] = json!(self.receipt("show.edit", "ALLOW", actor, &format!("approved proposal #{id} from {by} and applied it ({changes} change(s)){}", said_suffix(&said))));
                 let view = self.gov.proposals.lock().unwrap().iter().find(|p| p.id == id).map(Proposal::json);
                 self.publish(json!({"type": "proposal", "ts": now_ms(), "proposal": view}));
                 Ok(v)
@@ -1136,14 +1138,18 @@ async fn post_show(State(a): State<App>, q: Query<HashMap<String, String>>, h: H
         Ok(x) => x,
         Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))),
     };
+    // what the sender said they wanted (a typed or narrated line, or an agent's reason): kept with the proposal and in the record
+    let said = governance::clean_said(q.get("said").map(String::as_str));
+    // anyone who may edit can also ask for a second pair of eyes: `?propose=1` stores the edit instead of applying it
+    let propose = q.get("propose").is_some_and(|v| v == "1" || v == "true");
     let result = if dry {
         a.show.replace(chart, devices, false)
-    } else if actor.is_agent() {
-        a.show.propose(&actor, chart, devices)
+    } else if actor.is_agent() || propose {
+        a.show.propose(&actor, chart, devices, &said)
     } else {
         a.show.replace(chart, devices, true).inspect(|v| {
             let n = v["diff"]["changes"].as_array().map_or(0, |c| c.len());
-            a.show.receipt("show.edit", "ALLOW", &actor, &format!("sent an edited show ({n} change(s))"));
+            a.show.receipt("show.edit", "ALLOW", &actor, &format!("sent an edited show ({n} change(s)){}", said_suffix(&said)));
         })
     };
     match result {
@@ -2681,5 +2687,48 @@ mod tests {
         assert_eq!(line("show.go", "ALLOW").as_deref(), Some("Alex (operator)"));
         assert_eq!(line("laser.arm", "ALLOW").as_deref(), Some("Sam (lso)"));
         assert_eq!(line("laser.arm", "DENY").as_deref(), Some("Gus (guest)"));
+    }
+
+    #[tokio::test]
+    async fn a_narrated_line_travels_with_its_proposal_with_the_rehearsal_and_into_the_record() {
+        let (show, addr) = rostered("said").await;
+        assert_eq!(http(addr, "POST", "/input", r#"{"event":"START"}"#, &k("alex-key-123")).await.0, 200);
+        tokio::time::sleep(Duration::from_millis(700)).await; // the 0.4 s lighting cue has fired in the real run
+        let mut edited = quick();
+        move_cue(&mut edited, "INTRO", "lighting", 60_000);
+        let body = serde_json::to_string(&edited).unwrap();
+
+        // an editor asks for a second pair of eyes instead of applying; the line they said goes along
+        let (st, v) = http(addr, "POST", "/show?propose=1&said=bring%20the%20lights%20in%20much%20later", &body, &k("eddie-key-123")).await;
+        assert_eq!((st, v["proposal"]["actor"].clone(), v["proposal"]["said"].clone()), (202, json!("Eddie (editor)"), json!("bring the lights in much later")), "{v}");
+        assert_eq!(show.snapshot()["definition"], serde_json::to_value(quick()).unwrap(), "proposed, not applied");
+        // the person deciding sees how it would have played against the run so far
+        let rehearsal = &v["proposal"]["rehearsal"];
+        assert_eq!(rehearsal["different"], true, "{v}");
+        assert!(rehearsal["lines"].as_array().unwrap().iter().any(|l| l.as_str().unwrap().contains("would NOT fire")), "{rehearsal}");
+        // someone with no right to edit cannot even propose
+        assert_eq!(http(addr, "POST", "/show?propose=1", &body, &k("gus-key-1234")).await.0, 403);
+
+        // an operator approves; the record carries the words
+        assert_eq!(http(addr, "POST", "/proposals/1/approve", "", &k("alex-key-123")).await.0, 200);
+        let r = receipts(&show);
+        assert!(r.iter().any(|(ru, g, m)| ru == "show.propose" && g == "ESCALATE" && m.contains("— said: \"bring the lights in much later\"")), "{r:?}");
+        assert!(r.iter().any(|(ru, g, m)| ru == "show.edit" && g == "ALLOW" && m.starts_with("Alex (operator): approved proposal #1 from Eddie (editor)") && m.contains("bring the lights in much later")), "{r:?}");
+
+        // a direct send by someone allowed to carries the line too, and an agent's reason is kept the same way
+        let (st, _) = http(addr, "POST", "/show?said=put%20it%20back", &serde_json::to_string(&quick()).unwrap(), &k("alex-key-123")).await;
+        assert_eq!(st, 200);
+        let r = receipts(&show);
+        assert!(r.iter().any(|(ru, g, m)| ru == "show.edit" && g == "ALLOW" && m.contains("sent an edited show") && m.contains("— said: \"put it back\"")), "{r:?}");
+        let (st, v) = http(addr, "POST", "/show?said=the%20drop%20needs%20more%20air", &body, &k("nova-key-123")).await;
+        assert_eq!((st, v["proposal"]["said"].clone()), (202, json!("the drop needs more air")));
+    }
+
+    #[test]
+    fn a_said_line_is_made_safe_to_keep() {
+        assert_eq!(governance::clean_said(Some("  hello\nthere\t! ")), "hellothere!");
+        assert_eq!(governance::clean_said(None), "");
+        assert_eq!(governance::clean_said(Some(&"x".repeat(500))).len(), 300);
+        assert_eq!(governance::said_suffix(""), "");
     }
 }

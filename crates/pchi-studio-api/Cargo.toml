@@ -2,6 +2,7 @@
 name = "pchi-studio-api"
 version = "0.1.0"
 edition = "2021"
+default-run = "pchi-studio-api"
 description = "Runs a showchart and serves its live state to Studio over HTTP + WebSocket."
 
 [[bin]]

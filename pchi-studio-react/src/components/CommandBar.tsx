@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { addSaid } from './said'
 import { COMMAND_EXAMPLES, QUICK_SYSTEMS, runStudioCommand, type LiveAction, type LiveResult, type RigState, type Showchart } from '@pchi/sdk'
 
 /** What a confirmed command will do: shown in the voice preview, then applied. */
@@ -133,6 +134,7 @@ export default function CommandBar({ chart, onApply, live, onUndo, onRedo, canUn
     }
     // a sentence may change the show, the rig, or both: only hand over what actually changed
     const apply = () => {
+      addSaid(input) // the words travel with the change if it is later sent to the running show
       if (r.chart !== chartRef.current) onApply?.(r.chart)
       if (r.rigChanged) onRig?.(r.rig)
     }

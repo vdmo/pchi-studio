@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { feedToken } from './liveFeed'
+import { clearSaid, peekSaid } from './said'
 
 const KEY = 'pchi.editkey'
 /** The operator key lives in this tab's session only: closing the tab forgets it. */
@@ -65,7 +66,8 @@ const sec = (ms: number) => `${(ms / 1000).toFixed(2)}s`
  */
 export default function RuntimeTools({ getFile, locked = false, undoDepth = 0 }: { getFile: () => unknown; locked?: boolean; undoDepth?: number }) {
   // mode: sending the edited show, or undoing the last send
-  const [send, setSend] = useState<{ mode: 'send' | 'undo'; diff?: Diff; error?: string; done?: boolean; busy?: boolean; needKey?: boolean; keyWrong?: boolean } | null>(null)
+  const [send, setSend] = useState<{ mode: 'send' | 'undo'; diff?: Diff; error?: string; done?: boolean; proposed?: boolean; busy?: boolean; needKey?: boolean; keyWrong?: boolean } | null>(null)
+  const [sendSaid, setSendSaid] = useState('') // what you asked for, kept with the change in the record
   const [report, setReport] = useState<Record<string, any> | { error: string } | null>(null)
   const [keyText, setKeyText] = useState('')
   const [doors, setDoors] = useState<{ summary?: { go: boolean; fail: number; warn: number; ok: number }; checks?: DoorCheck[]; error?: string; busy?: boolean } | null>(null)
@@ -85,13 +87,22 @@ export default function RuntimeTools({ getFile, locked = false, undoDepth = 0 }:
     setDoors({ summary: r.body?.summary, checks: r.body?.checks })
   }
 
-  const post = (mode: 'send' | 'undo', dry: boolean) =>
-    api(mode === 'send' ? `/show${dry ? '?dry=1' : ''}` : `/show/undo${dry ? '?dry=1' : ''}`, {
+  const post = (mode: 'send' | 'undo', dry: boolean, propose = false) => {
+    const qs = new URLSearchParams()
+    if (dry) qs.set('dry', '1')
+    if (mode === 'send' && !dry) {
+      if (sendSaid.trim()) qs.set('said', sendSaid.trim())
+      if (propose) qs.set('propose', '1')
+    }
+    const q = qs.toString() ? `?${qs}` : ''
+    return api(mode === 'send' ? `/show${q}` : `/show/undo${q}`, {
       method: 'POST',
       ...(mode === 'send' ? { body: JSON.stringify(getFile()), headers: { 'Content-Type': 'application/json' } } : {}),
     }).catch(() => null)
+  }
 
   const open = async (mode: 'send' | 'undo') => {
+    if (mode === 'send') setSendSaid(peekSaid())
     if (locked && !editKey()) return setSend({ mode, needKey: true })
     setSend({ mode, busy: true })
     const r = await post(mode, true)
@@ -105,18 +116,19 @@ export default function RuntimeTools({ getFile, locked = false, undoDepth = 0 }:
     if (!r.ok) return setSend({ mode, error: String(r.body?.error ?? `The runtime refused it (${r.status}).`) })
     setSend({ mode, diff: r.body?.diff })
   }
-  const apply = async () => {
+  const apply = async (propose = false) => {
     if (!send) return
     const mode = send.mode
     setSend((s) => s && { ...s, busy: true })
-    const r = await post(mode, false)
+    const r = await post(mode, false, propose)
     if (r?.status === 403 && !r.body?.locked) return setSend((x) => x && { ...x, busy: false, error: String(r.body?.error ?? 'You may not do that.') })
     if (r?.status === 403) {
       setEditKey('')
       return setSend({ mode, needKey: true, keyWrong: true })
     }
     if (!r?.ok) return setSend((s) => s && { ...s, busy: false, error: String(r?.body?.error ?? 'The runtime did not take it.') })
-    setSend({ mode, diff: r.body?.diff, done: true })
+    if (mode === 'send') clearSaid()
+    setSend({ mode, diff: r.body?.diff, done: true, proposed: !!r.body?.proposed })
   }
   const openReport = async () => {
     setReport({ error: 'Loading…' })
@@ -157,7 +169,14 @@ export default function RuntimeTools({ getFile, locked = false, undoDepth = 0 }:
           {send.mode === 'undo' && !send.done && !send.needKey && <p className="muted">This puts the <b>running</b> show back as it was before your last send. Your Studio file is not changed.</p>}
           {send.busy && <p className="muted">Working…</p>}
           {send.error && <p className="rt-err" role="alert">{send.error}</p>}
-          {send.done && <p className="rt-ok" role="status">{send.mode === 'send' ? 'Sent. The running show now uses your edited version.' : 'Undone. The running show is back as it was.'} The scene, its clock and the context were kept.</p>}
+          {send.done && send.proposed && <p className="rt-ok" role="status">Proposed. Nothing has changed yet: someone who may approve it will see it under "Waiting for you" on the Live tab.</p>}
+          {send.done && !send.proposed && <p className="rt-ok" role="status">{send.mode === 'send' ? 'Sent. The running show now uses your edited version.' : 'Undone. The running show is back as it was.'} The scene, its clock and the context were kept.</p>}
+          {send.mode === 'send' && !send.done && !send.needKey && (
+            <label className="rt-said">
+              What you asked for <span className="muted">(kept with the change in the record)</span>
+              <input value={sendSaid} maxLength={300} onChange={(e) => setSendSaid(e.target.value)} placeholder="e.g. bring the lasers in later in the drop" />
+            </label>
+          )}
           {d && (
             <>
               {nothing && <p className="muted">{send.mode === 'send' ? 'The runtime already has this show. Nothing to send.' : 'Nothing would change.'}</p>}
@@ -185,13 +204,14 @@ export default function RuntimeTools({ getFile, locked = false, undoDepth = 0 }:
           )}
           {!send.done && (
             <div className="rt-actions">
-              <button className="primary" disabled={send.busy || send.needKey || !d || !!d.blockers.length || !!nothing} onClick={apply}>{send.mode === 'send' ? 'Send now' : 'Undo now'}</button>
+              <button className="primary" disabled={send.busy || send.needKey || !d || !!d.blockers.length || !!nothing} onClick={() => apply(false)}>{send.mode === 'send' ? 'Send now' : 'Undo now'}</button>
+              {send.mode === 'send' && <button disabled={send.busy || send.needKey || !d || !!d.blockers.length || !!nothing} onClick={() => apply(true)} title="Store it for someone else to approve instead of changing the running show">Propose for approval</button>}
               <button onClick={() => setSend(null)}>Cancel</button>
             </div>
           )}
           {send.done && (
             <div className="rt-actions">
-              {send.mode === 'send' && <button onClick={() => open('undo')}>Undo this send</button>}
+              {send.mode === 'send' && !send.proposed && <button onClick={() => open('undo')}>Undo this send</button>}
               <button onClick={() => setSend(null)}>Close</button>
             </div>
           )}

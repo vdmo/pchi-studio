@@ -106,7 +106,7 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
   const [tryOut, setTryOut] = useState('')
   const [locked, setLocked] = useState(false) // the runtime wants an operator key for edits
   const [undoDepth, setUndoDepth] = useState(0) // sends that can still be undone
-  const [proposals, setProposals] = useState<{ id: number; actor: string; status: string; changes: string[]; notes: string[] }[]>([]) // edits an agent proposed
+  const [proposals, setProposals] = useState<{ id: number; actor: string; status: string; changes: string[]; notes: string[]; said?: string; rehearsal?: { different: boolean; verdict: string; lines: string[] } | null }[]>([]) // edits an agent proposed
   const [governed, setGoverned] = useState(false) // the runtime writes signed receipts
   const [me, setMe] = useState<WhoAmI | null>(null) // who the runtime takes this tab to be
   const [authTick, setAuthTick] = useState(0) // bumped on sign in / out: the feed reconnects so the runtime knows who is pressing GO
@@ -596,6 +596,7 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
                   <p>
                     <b>{p.actor}</b> proposes an edit
                   </p>
+                  {p.said && <p className="said">“{p.said}”</p>}
                   <ul>
                     {p.changes.map((c, i) => (
                       <li key={i}>{c}</li>
@@ -604,6 +605,19 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile }: Props
                       <li key={'n' + i} className="muted">{c}</li>
                     ))}
                   </ul>
+                  {p.rehearsal && (
+                    <div className="rehearsal-note">
+                      <b>Against the run so far:</b> {p.rehearsal.verdict}
+                      {p.rehearsal.lines.length > 0 && (
+                        <ul>
+                          {p.rehearsal.lines.map((l, i) => (
+                            <li key={i}>{l}</li>
+                          ))}
+                        </ul>
+                      )}
+                      <span className="muted"> (worked out when it was proposed)</span>
+                    </div>
+                  )}
                   <div className="proposal-actions">
                     <button
                       onClick={async () => {

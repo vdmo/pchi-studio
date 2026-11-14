@@ -562,3 +562,9 @@ button.go:disabled { background: #1b1d25; color: #7a7f92; border-color: #2f323e;
 .proposal ul { margin: 4px 0 8px; padding-left: 18px; }
 .proposal-actions { display: flex; gap: 8px; }
 .gov-badge { font-size: 12px; margin: 6px 0 0; }
+
+.proposal .said { font-style: italic; margin: 2px 0 6px; }
+.rehearsal-note { font-size: 13px; margin: 4px 0 8px; }
+.rehearsal-note ul { margin: 2px 0 0; padding-left: 18px; }
+.rt-said { display: block; margin: 10px 0 0; font-size: 13px; }
+.rt-said input { display: block; width: 100%; margin-top: 4px; }
