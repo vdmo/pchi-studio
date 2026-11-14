@@ -69,9 +69,19 @@ pub fn run(chart: &Showchart, output: Option<&Output>, readiness: &BTreeMap<Stri
                 _ => dev("warn", "device", format!("{} gives no feedback: only its own READY or a test can show it is there.", d.label)),
             }
         }
+        // a DMX device's patch must make sense: fixtures that exist, addresses that fit, no channel used twice
+        if d.is_dmx() {
+            if let Some(text) = d.patch.as_deref().filter(|p| !p.trim().is_empty()) {
+                match crate::fixtures::Patch::parse(text) {
+                    Ok(p) => dev("ok", "device", format!("{}: patch places {} fixture(s): {}.", d.label, p.fixtures.len(), p.names().join(", "))),
+                    Err(e) => dev("fail", "device", format!("{}: the patch is wrong: {e}.", d.label)),
+                }
+            }
+        }
         // what the tool's messages rest on: only the vendor's own documentation is a firm basis
         if let Some(p) = profiles::get(d.profile_key()) {
-            let weak: Vec<&profiles::Rule> = p.rules.iter().filter(|r| r.basis != profiles::Basis::Vendor).collect();
+            // a rule someone has proven on the real tool (its `proven` note) is no longer in doubt, whatever it rests on
+            let weak: Vec<&profiles::Rule> = p.rules.iter().filter(|r| r.basis != profiles::Basis::Vendor && r.proven.is_none()).collect();
             if !weak.is_empty() {
                 let mut words: Vec<&str> = weak.iter().map(|r| r.basis.word()).collect();
                 words.sort();
@@ -122,7 +132,7 @@ pub fn run(chart: &Showchart, output: Option<&Output>, readiness: &BTreeMap<Stri
                 return Some(("fail", format!("{what}: the value is blank (set it in the Cue sheet)."), Some(dev.id.clone())));
             }
             if dev.is_dmx() {
-                return match crate::dmx::describe(action) {
+                return match crate::dmx::describe(dev, action) {
                     Err(e) => {
                         *bad += 1;
                         Some(("fail", format!("{what} to {}: {e}.", dev.label), Some(dev.id.clone())))
@@ -182,7 +192,7 @@ mod tests {
     use serde_json::json;
 
     fn dev(id: &str, kind: &str, host: &str, port: u16) -> Device {
-        Device { id: id.into(), label: id.into(), kind: kind.into(), dept: dept_of_type(kind).unwrap().into(), host: Some(host.into()), port: Some(port), listen_port: None, profile: None, universe: None }
+        Device { id: id.into(), label: id.into(), kind: kind.into(), dept: dept_of_type(kind).unwrap().into(), host: Some(host.into()), port: Some(port), listen_port: None, profile: None, universe: None, patch: None }
     }
     fn chart(cue_value: &str) -> Showchart {
         Showchart::from_json(&format!(

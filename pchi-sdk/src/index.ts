@@ -111,9 +111,10 @@ export const NODE_CATALOG: NodeSpec[] = [
   spec('venue', 'qlab', 'QLab', { host: '127.0.0.1', port: 53000, listen_port: 53001 }),
   spec('venue', 'magicq', 'ChamSys MagicQ', { host: '127.0.0.1', port: 8000 }),
   // DMX over the network: the node's address (or a broadcast address) and the universe. Art-Net universes start at 0, sACN at 1;
-  // an sACN device with no host sends to its universe's multicast address.
-  spec('venue', 'artnet', 'Art-Net node', { host: '2.0.0.1', port: 6454, universe: 0 }),
-  spec('venue', 'sacn', 'sACN (E1.31) output', { host: '', port: 5568, universe: 1 }),
+  // an sACN device with no host sends to its universe's multicast address. "patch" names the fixtures on it, for example
+  // "wash1=rgbw@1, wash2=rgbw@5, walls=wash1+wash2", so a cue can say wash1=blue instead of channel numbers.
+  spec('venue', 'artnet', 'Art-Net node', { host: '2.0.0.1', port: 6454, universe: 0, patch: '' }),
+  spec('venue', 'sacn', 'sACN (E1.31) output', { host: '', port: 5568, universe: 1, patch: '' }),
   spec('intelligence', 'director-agent', 'Director Agent', {}),
   spec('intelligence', 'vision-agent', 'Vision Agent', {}),
   spec('intelligence', 'audio-agent', 'Audio Agent', {}),

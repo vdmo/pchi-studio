@@ -42,7 +42,9 @@ use axum::{
     Json, Router,
 };
 pub mod diff;
+pub mod drill;
 pub mod dmx;
+pub mod fixtures;
 pub mod gearcheck;
 pub mod governance;
 pub mod inputs;
@@ -1284,6 +1286,10 @@ pub fn router_with_token(show: Arc<Show>, token: Option<String>) -> Router {
             (StatusCode::OK, Json(a.show.preflight()))
         }))
         .route("/whoami", get(get_whoami))
+        .route("/fixtures", get(|State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap| async move {
+            if !authorized(&a.token, &q, &h) { return (StatusCode::UNAUTHORIZED, Json(json!({"error": "token required"}))); }
+            (StatusCode::OK, Json(fixtures::summary()))
+        }))
         .route("/captures", get(|State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap| async move {
             if !authorized(&a.token, &q, &h) { return (StatusCode::UNAUTHORIZED, Json(json!({"error": "token required"}))); }
             (StatusCode::OK, Json(a.show.captures_json()))
@@ -1830,7 +1836,7 @@ mod tests {
     }
 
     fn device(id: &str, kind: &str, port: u16) -> rig::Device {
-        rig::Device { id: id.into(), label: id.into(), kind: kind.into(), dept: rig::dept_of_type(kind).unwrap().into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None, profile: None, universe: None }
+        rig::Device { id: id.into(), label: id.into(), kind: kind.into(), dept: rig::dept_of_type(kind).unwrap().into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None, profile: None, universe: None, patch: None }
     }
 
     fn deliveries(rx: &mut broadcast::Receiver<Value>) -> Vec<Value> {
@@ -3480,7 +3486,7 @@ mod tests {
     // ---- DMX over the network: a lighting cue becomes Art-Net or sACN ----
 
     fn dmx_device(kind: &str, port: u16) -> rig::Device {
-        rig::Device { id: "d1".into(), label: "Rack".into(), kind: kind.into(), dept: "lighting".into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None, profile: None, universe: Some(if kind == "sacn" { 1 } else { 0 }) }
+        rig::Device { id: "d1".into(), label: "Rack".into(), kind: kind.into(), dept: "lighting".into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None, profile: None, universe: Some(if kind == "sacn" { 1 } else { 0 }), patch: None }
     }
 
     fn lit(look: &str) -> Showchart {
@@ -3543,5 +3549,82 @@ mod tests {
         assert_eq!(m["sent_as"][0]["address"], "sACN universe 1");
         assert_eq!(m["sent_as"][0]["args"][0], "5=50% over 1");
         assert!(show.try_cue("d1", "nonsense").await.is_err());
+    }
+
+    // ---- fixtures and the patch, from the rig file to the wire ----
+
+    #[tokio::test]
+    async fn a_patched_fixture_cue_reaches_the_universe_as_channels() {
+        let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = sock.local_addr().unwrap().port();
+        let file = format!(r#"{{"showchart": {}, "nodes": [{{"id":"d1","type":"artnet","label":"Rack","params":{{"host":"127.0.0.1","port":{port},"universe":2,"patch":"wash=rgbw@1, spot=rgb-dimmer@10"}}}}]}}"#, serde_json::to_string(&lit("wash=blue spot=50%")).unwrap());
+        let (chart, devs) = rig::load(&file).unwrap();
+        assert_eq!(devs.as_ref().unwrap()[0].patch.as_deref(), Some("wash=rgbw@1, spot=rgb-dimmer@10"));
+        let show = Show::start_with(chart, EventStore::open_in_memory().unwrap(), Some(Output::new(devs.unwrap(), true))).unwrap();
+        show.apply("studio", "START");
+        let mut buf = vec![0u8; 2048];
+        let mut got = None;
+        for _ in 0..40 {
+            let Ok(Ok((n, _))) = tokio::time::timeout(Duration::from_millis(300), sock.recv_from(&mut buf)).await else { continue };
+            if n == 530 && buf[20] == 255 {
+                got = Some(buf[18..530].to_vec());
+                break;
+            }
+        }
+        let d = got.expect("the cue arrived");
+        assert_eq!((d[0], d[1], d[2], d[3]), (0, 0, 255, 0), "wash (rgbw at 1) is blue: red 0, green 0, blue 255, white 0");
+        assert_eq!(d[9], 128, "spot (rgb-dimmer at 10): its dimmer is channel 10, at 50%");
+    }
+
+    #[tokio::test]
+    async fn the_doors_check_reads_the_patch_and_the_fixture_cues() {
+        let dev = |patch: &str| {
+            let mut d = dmx_device("sacn", 9);
+            d.patch = Some(patch.to_string());
+            d
+        };
+        let check = |patch: &str, look: &str| {
+            let show = Show::start_with(lit(look), EventStore::open_in_memory().unwrap(), Some(Output::new(vec![dev(patch)], false))).unwrap();
+            show.preflight()["checks"].as_array().unwrap().iter().filter(|c| c["level"] != "ok" || c["text"].as_str().unwrap().contains("patch places")).map(|c| (c["level"].as_str().unwrap().to_string(), c["text"].as_str().unwrap().to_string())).collect::<Vec<_>>()
+        };
+        let good = check("wash=rgb@1, par=dimmer@10", "wash=red");
+        assert!(good.iter().any(|(l, t)| l == "ok" && t.contains("patch places 2 fixture(s): wash, par")), "{good:?}");
+        assert!(!good.iter().any(|(l, t)| l == "fail" && (t.contains("Rack") || t.contains("Lighting"))), "{good:?}");
+        // an overlap, a cue naming a fixture that is not patched, and a color a dimmer cannot show
+        assert!(check("a=rgb@1, b=rgb@2", "1=1").iter().any(|(l, t)| l == "fail" && t.contains("the patch is wrong") && t.contains("overlaps")));
+        assert!(check("wash=rgb@1", "ghost=red").iter().any(|(l, t)| l == "fail" && t.contains("'ghost' is not a patched fixture")));
+        assert!(check("lamp=dimmer@1", "lamp=blue").iter().any(|(l, t)| l == "fail" && t.contains("cannot show a color")));
+    }
+
+    #[tokio::test]
+    async fn fixtures_are_listed_over_http() {
+        let (_show, addr) = serve(None).await;
+        let (st, v) = http(addr, "GET", "/fixtures", "", "").await;
+        assert_eq!(st, 200);
+        let rgbw = v.as_array().unwrap().iter().find(|f| f["id"] == "rgbw").unwrap();
+        assert_eq!((rgbw["built_in"].clone(), rgbw["modes"][0]["channels"].clone()), (json!(true), json!(4)));
+    }
+
+    #[tokio::test]
+    async fn a_rule_someone_has_proven_on_the_real_tool_stops_the_doors_check_warning_about_it() {
+        let dir = std::env::temp_dir().join(format!("pchi-proven-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mk = |id: &str, proven: &str| format!(r#"{{"id":"{id}","name":"Tool {id}","dept":"lighting","kinds":["lighting.look"],"rules":[{{"match":"\\d+","send":"/go/{{0}}","basis":"memory","source":"from memory"{proven}}}]}}"#);
+        std::fs::write(dir.join("a.json"), mk("unproven-tool", "")).unwrap();
+        std::fs::write(dir.join("b.json"), mk("proven-tool", r#","proven":"2026-11-20, v3.2 offline, Alex""#)).unwrap();
+        profiles::load_dir(&dir).unwrap();
+        let warns = |id: &str| {
+            let mut d = dmx_device("artnet", 9);
+            d.kind = "osc".into();
+            d.profile = Some(id.into());
+            let show = Show::start_with(quick(), EventStore::open_in_memory().unwrap(), Some(Output::new(vec![d], false))).unwrap();
+            show.preflight()["checks"].as_array().unwrap().iter().filter(|c| c["text"].as_str().is_some_and(|t| t.contains("rest on"))).count()
+        };
+        assert_eq!(warns("unproven-tool"), 1);
+        assert_eq!(warns("proven-tool"), 0, "its rule says someone saw the real tool do the right thing");
+        assert_eq!(profiles::get("proven-tool").unwrap().rules[0].proven.as_deref(), Some("2026-11-20, v3.2 offline, Alex"));
+        assert_eq!(profiles::summary().as_array().unwrap().iter().find(|p| p["id"] == "proven-tool").unwrap()["rules"][0]["proven"], "2026-11-20, v3.2 offline, Alex");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

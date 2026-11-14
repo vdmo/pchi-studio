@@ -453,7 +453,7 @@ mod tests {
     }
 
     fn dev(id: &str, kind: &str, port: u16) -> Device {
-        Device { id: id.into(), label: id.into(), kind: kind.into(), dept: dept_of_type(kind).unwrap().into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None, profile: None, universe: None }
+        Device { id: id.into(), label: id.into(), kind: kind.into(), dept: dept_of_type(kind).unwrap().into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None, profile: None, universe: None, patch: None }
     }
 
     /// A pretend X32: answers /info to whoever asked, while `up` is true; records what it received.
@@ -564,7 +564,7 @@ mod tests {
     async fn a_dmx_output_is_checked_with_levels_and_ticked_when_the_fixture_reacts() {
         let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let port = sock.local_addr().unwrap().port();
-        let d = Device { id: "rack".into(), label: "Rack".into(), kind: "artnet".into(), dept: "lighting".into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None, profile: None, universe: Some(1) };
+        let d = Device { id: "rack".into(), label: "Rack".into(), kind: "artnet".into(), dept: "lighting".into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None, profile: None, universe: Some(1), patch: None };
         let out = Output::new(vec![d], true);
         let mut c = Script::new(&["", "1-3=100%", "y", "y"]);
         let r = run(&mut c, &out, &[], &fast()).await.remove(0);

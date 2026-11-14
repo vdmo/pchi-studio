@@ -199,7 +199,7 @@ impl Output {
 /// a DMX device which universe gets which channels. Errors say what to fix.
 pub fn wire_lines(dev: &Device, action: &Action) -> Result<Vec<(String, Vec<Value>)>, String> {
     if dev.is_dmx() {
-        let summary = crate::dmx::describe(action)?;
+        let summary = crate::dmx::describe(dev, action)?;
         let proto = crate::dmx::proto_of(&dev.kind).ok_or("not a DMX device")?;
         return Ok(vec![(format!("{} universe {}", proto.name(), dev.universe.unwrap_or(proto.default_universe())), vec![Value::String(crate::dmx::value_of(action)), Value::String(summary)])]);
     }
@@ -238,7 +238,7 @@ mod tests {
     use serde_json::json;
 
     fn dev(id: &str, kind: &str, port: u16) -> Device {
-        Device { id: id.into(), label: id.into(), kind: kind.into(), dept: dept_of_type(kind).unwrap().into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None, profile: None, universe: None }
+        Device { id: id.into(), label: id.into(), kind: kind.into(), dept: dept_of_type(kind).unwrap().into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None, profile: None, universe: None, patch: None }
     }
 
     #[test]

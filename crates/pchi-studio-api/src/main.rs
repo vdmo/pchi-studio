@@ -42,6 +42,9 @@ struct Cli {
     /// A folder of tool profile files (*.json) to add to the built-in ones: how an action becomes the OSC a tool understands. A file with a built-in's id replaces it. See docs/profiles.md.
     #[arg(long, value_name = "DIR", env = "PCHI_PROFILES")]
     profiles: Option<String>,
+    /// A folder of DMX fixture files (*.json) to add to the built-in ones: what each channel of a fixture means, so a cue can say wash1=blue. See docs/fixtures.md.
+    #[arg(long, value_name = "DIR", env = "PCHI_FIXTURES")]
+    fixtures: Option<String>,
     /// Write a signed, hash-chained receipt for every decision (edits, arming, GO, refusals, proposals) into this folder, in the format scripts/verify_governance_chain.py checks offline. The folder keeps the signing key too: protect it like the show file.
     #[arg(long, env = "PCHI_GOVERNANCE")]
     governance: Option<String>,
@@ -70,6 +73,11 @@ async fn main() -> anyhow::Result<()> {
         let lines = pchi_studio_api::profiles::load_dir(std::path::Path::new(dir)).map_err(anyhow::Error::msg).with_context(|| format!("profiles {dir}"))?;
         for l in lines {
             println!("profile: {l}");
+        }
+    }
+    if let Some(dir) = &cli.fixtures {
+        for l in pchi_studio_api::fixtures::load_dir(std::path::Path::new(dir)).map_err(anyhow::Error::msg).with_context(|| format!("fixtures {dir}"))? {
+            println!("fixture: {l}");
         }
     }
     let (chart, devices) = rig::load(&std::fs::read_to_string(&cli.file).with_context(|| format!("reading {}", cli.file))?)

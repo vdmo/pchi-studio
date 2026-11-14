@@ -52,6 +52,7 @@ A rule:
 - **`args`** are `{"int": ...}`, `{"float": ...}` or `{"string": ...}`, with the same `{n}` placeholders.
 - **`kinds`** (optional) limits a rule to some of the profile's kinds. **`ignore_value`** (instead of `match`) is for a command that
   takes no value, such as a blackout.
+- **`proven`** (optional) is a note you write after you have seen the real tool do the right thing with this rule: when, which version, who. A rule with it stops the Doors check warning about its basis. Leave it out until it is true.
 - **`basis`** says what the rule rests on: `vendor` (the vendor's own documentation), `community` (users or third-party manuals) or
   `memory` (not confirmed). **`source`** says where. Be honest here: it is what the Doors check shows the crew.
 
@@ -68,7 +69,7 @@ The format keeps a bad or careless profile from sending something dangerous:
 
 ## What the Doors check says about it
 
-For every device whose profile has rules that are not `vendor`, the Doors check warns:
+For every device whose profile has rules that are not `vendor` and not `proven`, the Doors check warns:
 *"Behringer X32: 1 of 1 message rule(s) in the Behringer X32 / M32 profile rest on memory rather than the vendor's documentation:
 prove them with pchi-gearcheck before relying on them."* A warning does not stop the show. It tells the operator which tools
 have not yet been proven against the real thing.

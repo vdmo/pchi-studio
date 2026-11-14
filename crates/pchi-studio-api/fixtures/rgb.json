@@ -1,0 +1,8 @@
+{
+  "id": "rgb",
+  "name": "RGB (3 channels)",
+  "notes": "Red, green, blue in that order. A fixture with another channel order needs its own file.",
+  "modes": [
+    {"name": "3ch", "channels": 3, "attributes": {"red": {"channel": 1}, "green": {"channel": 2}, "blue": {"channel": 3}}}
+  ]
+}

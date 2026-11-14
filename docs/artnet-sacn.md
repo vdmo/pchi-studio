@@ -26,7 +26,7 @@ Levels are 0 to 255, a percentage, `full` or `out`. Terms are separated by space
 where they are, so each cue changes only what it names. A fade is linear, up to 600 seconds, and starts from wherever the levels are
 at that moment (a second fade begins from the first one's current level).
 
-The Doors check reads every DMX cue the same way: a value written for a console ("blue", "12") is a failure it reports before the
+Give a device a `patch` and cues can name fixtures instead (`fixtures.md`). The Doors check reads every DMX cue the same way: a value written for a console ("blue", "12") is a failure it reports before the
 show. **Try a cue** and **Rehearse** show which universe gets which channels.
 
 ## Why it keeps sending
@@ -41,7 +41,7 @@ fade. A cue changes the levels and sends at once. If the runtime stops, the ligh
   are checked against that layout and over loopback UDP, nothing more. `pchi-gearcheck` asks for levels and for your word that the
   fixture reacted. Tick a line in `foh-proof.md` only when it has.
 - One sender per universe: no merging with a console or other source, no priority handling beyond a fixed sACN priority of 100.
-- No fixture patching or profiles: you write channels. (Fixture profiles would be the next layer.)
+- Fixtures: you can write channels, or patch fixture types and write `wash1=blue` (see `fixtures.md`). Only generic types are built in.
 - No feedback: nothing is read back from the node (no ArtPoll discovery, no sACN source discovery).
 - A DMX device takes lighting cues only. Visual, laser and audio cues are refused.
 - **Safety:** DMX gives no way to confirm a fixture is safe to light. Strobes and moving heads need the same care they always did.

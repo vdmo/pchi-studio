@@ -1,0 +1,8 @@
+{
+  "id": "rgb-dimmer",
+  "name": "Dimmer + RGB (4 channels)",
+  "notes": "Master dimmer first, then red, green, blue. Common on cheap LED pars.",
+  "modes": [
+    {"name": "4ch", "channels": 4, "attributes": {"dimmer": {"channel": 1}, "red": {"channel": 2}, "green": {"channel": 3}, "blue": {"channel": 4}}}
+  ]
+}

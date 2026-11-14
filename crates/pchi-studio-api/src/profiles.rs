@@ -93,6 +93,9 @@ pub struct Rule {
     args: Vec<ArgSpec>,
     pub basis: Basis,
     pub source: String,
+    /// Set once someone has seen the real tool do the right thing with this rule: when, with what (free text, written by the
+    /// crew after `pchi-gearcheck`). A rule with this stops the Doors check warning about its basis.
+    pub proven: Option<String>,
     /// The pattern as written, for messages.
     pub pattern: String,
 }
@@ -171,6 +174,8 @@ struct RawRule {
     basis: Option<String>,
     #[serde(default)]
     source: String,
+    #[serde(default)]
+    proven: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -317,7 +322,7 @@ impl Profile {
                 Some("memory") | None => Basis::Memory,
                 Some(other) => return Err(at(format!("basis '{other}' is not vendor, community or memory"))),
             };
-            rules.push(Rule { re, kinds: r.kinds.clone(), ignore_value: r.ignore_value, send: r.send.clone(), args, basis, source: r.source.clone(), pattern: r.pattern.clone().unwrap_or_default() });
+            rules.push(Rule { re, kinds: r.kinds.clone(), ignore_value: r.ignore_value, send: r.send.clone(), args, basis, source: r.source.clone(), proven: r.proven.clone().filter(|p| !p.trim().is_empty()), pattern: r.pattern.clone().unwrap_or_default() });
         }
         let probe = raw.probe.as_ref().map(msg_of).transpose().map_err(|e| format!("{id} probe: {e}"))?;
         let stop = raw.stop.iter().map(msg_of).collect::<Result<Vec<_>, _>>().map_err(|e| format!("{id} stop: {e}"))?;
@@ -516,7 +521,7 @@ pub fn summary() -> Value {
                     "id": p.id, "name": p.name, "dept": p.dept, "built_in": p.built_in, "notes": p.notes, "hint": p.hint,
                     "kinds": p.kinds, "probe": p.probe.as_ref().map(|m| m.address.clone()), "stop": p.stop.iter().map(|m| m.address.clone()).collect::<Vec<_>>(),
                     "capture": p.capture.iter().map(|c| serde_json::json!({"listen": c.pattern, "kind": c.kind, "value": c.value, "basis": c.basis.word(), "source": c.source})).collect::<Vec<_>>(),
-                    "rules": p.rules.iter().map(|r| serde_json::json!({"match": r.pattern, "send": r.send, "basis": r.basis.word(), "source": r.source})).collect::<Vec<_>>(),
+                    "rules": p.rules.iter().map(|r| serde_json::json!({"match": r.pattern, "send": r.send, "basis": r.basis.word(), "source": r.source, "proven": r.proven})).collect::<Vec<_>>(),
                 })
             })
             .collect(),

@@ -21,6 +21,8 @@ pub struct Device {
     pub profile: Option<String>,
     /// For a DMX device (Art-Net, sACN): the universe it sends. Art-Net starts at 0, sACN at 1.
     pub universe: Option<u32>,
+    /// For a DMX device: which fixtures sit where (see `fixtures`), as one line of text.
+    pub patch: Option<String>,
 }
 
 impl Device {
@@ -104,11 +106,12 @@ fn device_of(n: &Value) -> Option<Device> {
     let port = params.and_then(|p| p.get("port")).and_then(|p| p.as_u64().or_else(|| p.as_str().and_then(|s| s.trim().parse().ok()))).and_then(|p| u16::try_from(p).ok());
     let listen_port = params.and_then(|p| p.get("listen_port")).and_then(|p| p.as_u64().or_else(|| p.as_str().and_then(|s| s.trim().parse().ok()))).and_then(|p| u16::try_from(p).ok()).filter(|p| *p > 0);
     let id = n.get("id")?.as_str()?.to_string();
+    let patch = params.and_then(|p| p.get("patch")).and_then(Value::as_str).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     // DMX devices have standard ports and universes
     let proto = crate::dmx::proto_of(&kind);
     let port = port.or(proto.map(|p| p.default_port()));
     let universe = params.and_then(|p| p.get("universe")).and_then(|p| p.as_u64().or_else(|| p.as_str().and_then(|s| s.trim().parse().ok()))).and_then(|u| u32::try_from(u).ok()).or(proto.map(|p| p.default_universe()));
-    Some(Device { label: n.get("label").and_then(Value::as_str).unwrap_or(&id).to_string(), id, kind, dept, host, port, listen_port, profile, universe })
+    Some(Device { label: n.get("label").and_then(Value::as_str).unwrap_or(&id).to_string(), id, kind, dept, host, port, listen_port, profile, universe, patch })
 }
 
 /// The device that handles a cue: the lane's chosen one, else the only device of
@@ -130,7 +133,7 @@ mod tests {
     use super::*;
 
     fn dev(id: &str, kind: &str) -> Device {
-        Device { id: id.into(), label: id.into(), kind: kind.into(), dept: dept_of_type(kind).unwrap().into(), host: Some("127.0.0.1".into()), port: Some(9000), listen_port: None, profile: None, universe: None }
+        Device { id: id.into(), label: id.into(), kind: kind.into(), dept: dept_of_type(kind).unwrap().into(), host: Some("127.0.0.1".into()), port: Some(9000), listen_port: None, profile: None, universe: None, patch: None }
     }
 
     #[test]

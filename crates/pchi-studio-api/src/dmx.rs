@@ -107,8 +107,22 @@ fn level(s: &str) -> Result<u8, String> {
     u8::try_from(v).map_err(|_| format!("'{s}': a level goes from 0 to 255"))
 }
 
-/// Read a cue's value (see the module docs).
+/// Read a cue's value for a device: channels, and fixture names if the device has a patch (see the `fixtures` module).
+pub fn look_for(dev: &Device, text: &str) -> Result<Look, String> {
+    let patch = match dev.patch.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        Some(p) => Some(crate::fixtures::Patch::parse(p).map_err(|e| format!("{} patch: {e}", dev.label))?),
+        None => None,
+    };
+    parse_look_with(text, patch.as_ref())
+}
+
+/// Read a cue's value as channels only (see the module docs).
 pub fn parse_look(text: &str) -> Result<Look, String> {
+    parse_look_with(text, None)
+}
+
+/// Read a cue's value. With a patch, `wash1=blue`, `walls=40%` and `spot.strobe=fast` also work.
+pub fn parse_look_with(text: &str, patch: Option<&crate::fixtures::Patch>) -> Result<Look, String> {
     let how = "use channels like 1=255, 1-3=50% or blackout, optionally ending in 'over 2' (seconds)";
     let t = text.trim();
     if t.is_empty() {
@@ -138,6 +152,13 @@ pub fn parse_look(text: &str) -> Result<Look, String> {
             continue;
         }
         let (chans, lv) = term.split_once('=').ok_or_else(|| format!("'{term}': {how}"))?;
+        // a name that starts with a letter is a fixture or group (wash1=blue, spot.strobe=fast), not a channel
+        if chans.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+            let (target, attr) = chans.split_once('.').map_or((chans, None), |(t, a)| (t, Some(a)));
+            let patch = patch.ok_or_else(|| format!("'{term}': this device has no patch, so fixture names mean nothing yet: add a patch parameter such as wash1=rgb@1"))?;
+            set.extend(patch.resolve(target, attr, lv)?);
+            continue;
+        }
         let lv = level(lv)?;
         let (a, b) = match chans.split_once('-') {
             Some((a, b)) => (a, b),
@@ -168,9 +189,9 @@ pub fn value_of(action: &Action) -> String {
 }
 
 /// The same check for an action, for the Doors check and rehearsal: `Ok` with a line saying what it will do.
-pub fn describe(action: &Action) -> Result<String, String> {
+pub fn describe(dev: &Device, action: &Action) -> Result<String, String> {
     let v = value_of(action);
-    let look = parse_look(&v).map_err(|e| format!("\"{v}\": {e}"))?;
+    let look = look_for(dev, &v).map_err(|e| format!("\"{v}\": {e}"))?;
     let mut chans: Vec<usize> = look.set.iter().map(|(c, _)| c + 1).collect();
     chans.sort_unstable();
     chans.dedup();
@@ -320,7 +341,7 @@ impl Dmx {
             None
         } else if action.kind == "lighting.look" {
             let v = value_of(action);
-            Some(parse_look(&v).map_err(|e| format!("\"{v}\": {e}"))?)
+            Some(look_for(dev, &v).map_err(|e| format!("\"{v}\": {e}"))?)
         } else {
             return Err(format!("{} is a DMX output: it takes lighting cues, not \"{}\"", dev.label, action.kind));
         };
@@ -405,7 +426,7 @@ mod tests {
     use serde_json::json;
 
     fn dev(kind: &str, host: Option<&str>, port: Option<u16>, universe: Option<u32>) -> Device {
-        Device { id: "d1".into(), label: "Rack".into(), kind: kind.into(), dept: "lighting".into(), host: host.map(String::from), port, listen_port: None, profile: None, universe }
+        Device { id: "d1".into(), label: "Rack".into(), kind: kind.into(), dept: "lighting".into(), host: host.map(String::from), port, listen_port: None, profile: None, universe, patch: None }
     }
 
     fn look(v: &str) -> Action {
@@ -439,8 +460,8 @@ mod tests {
         assert!(e("hello").contains("use channels like"));
         assert!(e("1=255 over soon").contains("not a number of seconds"));
         assert!(e("1=255 over 9999").contains("fade goes from 0 to 600"));
-        assert!(describe(&look("1-3=10")).unwrap().starts_with("3 channel(s)"));
-        assert!(describe(&look("x")).unwrap_err().contains("\"x\""));
+        assert!(describe(&dev("artnet", None, None, None), &look("1-3=10")).unwrap().starts_with("3 channel(s)"));
+        assert!(describe(&dev("artnet", None, None, None), &look("x")).unwrap_err().contains("\"x\""));
     }
 
     #[test]
@@ -556,5 +577,25 @@ mod tests {
         assert!(dmx.apply(&dev("artnet", None, None, None), &look("1=1")).await.unwrap_err().contains("no host"));
         // an sACN device with no host goes to the universe's multicast address
         assert_eq!(Dmx::target(&dev("sacn", None, None, Some(258)), Proto::Sacn).await.unwrap().to_string(), "239.255.1.2:5568");
+    }
+
+    #[test]
+    fn a_cue_can_name_fixtures_when_the_device_has_a_patch() {
+        let mut dv = dev("artnet", Some("127.0.0.1"), Some(9), Some(0));
+        dv.patch = Some("wash1=rgbw@1, wash2=rgbw@5, lamp=dimmer@20, walls=wash1+wash2".into());
+        let at = |l: &Look, ch: usize| l.set.iter().rev().find(|(c, _)| *c == ch - 1).map(|x| x.1); // the last term for a channel wins
+        let l = look_for(&dv, "wash1=blue lamp=40% walls.white=100% 30=255 over 2").unwrap();
+        assert_eq!((at(&l, 3), at(&l, 1), at(&l, 20), at(&l, 4), at(&l, 8), at(&l, 30), l.fade_s), (Some(255), Some(0), Some(102), Some(255), Some(255), Some(255), 2.0), "colors, a level, a group's attribute, a raw channel and a fade in one cue");
+        // without a patch, fixture names mean nothing, and it says how to fix that
+        let e = look_for(&dev("artnet", None, None, None), "wash1=blue").unwrap_err();
+        assert!(e.contains("no patch") && e.contains("wash1=rgb@1"), "{e}");
+        // a wrong patch is named as the device's, before any cue is sent
+        let mut bad = dev("artnet", None, None, None);
+        bad.label = "Rack".into();
+        bad.patch = Some("a=rgbw@1, b=rgb@3".into());
+        assert!(look_for(&bad, "1=1").unwrap_err().contains("Rack patch:") && look_for(&bad, "1=1").unwrap_err().contains("overlaps"));
+        // blackout still works
+        assert_eq!(look_for(&dv, "blackout").unwrap().set.len(), 512);
+        assert!(describe(&dv, &look("wash2=red")).unwrap().starts_with("4 channel(s)"), "red sets red, green, blue and clears white: four channels");
     }
 }

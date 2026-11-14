@@ -1,0 +1,8 @@
+{
+  "id": "dimmer",
+  "name": "Dimmer channel",
+  "notes": "One channel: a dimmer pack output or a single-channel fixture.",
+  "modes": [
+    {"name": "1ch", "channels": 1, "attributes": {"dimmer": {"channel": 1}}}
+  ]
+}

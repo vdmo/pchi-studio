@@ -10,6 +10,10 @@ name = "pchi-studio-api"
 path = "src/main.rs"
 
 [[bin]]
+name = "pchi-drill"
+path = "src/bin/drill.rs"
+
+[[bin]]
 name = "pchi-gearcheck"
 path = "src/bin/gearcheck.rs"
 

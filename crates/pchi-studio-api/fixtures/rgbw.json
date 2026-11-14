@@ -1,0 +1,8 @@
+{
+  "id": "rgbw",
+  "name": "RGBW (4 channels)",
+  "notes": "Red, green, blue, white in that order.",
+  "modes": [
+    {"name": "4ch", "channels": 4, "attributes": {"red": {"channel": 1}, "green": {"channel": 2}, "blue": {"channel": 3}, "white": {"channel": 4}}}
+  ]
+}

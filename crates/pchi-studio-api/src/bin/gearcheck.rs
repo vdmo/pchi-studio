@@ -24,6 +24,9 @@ struct Cli {
     /// A folder of tool profile files to add to the built-in ones (the same folder you give the runtime).
     #[arg(long, value_name = "DIR")]
     profiles: Option<String>,
+    /// A folder of DMX fixture files to add to the built-in ones (the same folder you give the runtime).
+    #[arg(long, value_name = "DIR")]
+    fixtures: Option<String>,
     /// Tick the Status column of this checklist (docs/foh-proof.md) for what was actually tried. Skipped devices change nothing.
     #[arg(long, value_name = "FILE")]
     update_doc: Option<String>,
@@ -52,6 +55,11 @@ async fn main() -> anyhow::Result<()> {
     if let Some(dir) = &cli.profiles {
         for l in pchi_studio_api::profiles::load_dir(std::path::Path::new(dir)).map_err(anyhow::Error::msg).with_context(|| format!("profiles {dir}"))? {
             println!("profile: {l}");
+        }
+    }
+    if let Some(dir) = &cli.fixtures {
+        for l in pchi_studio_api::fixtures::load_dir(std::path::Path::new(dir)).map_err(anyhow::Error::msg).with_context(|| format!("fixtures {dir}"))? {
+            println!("fixture: {l}");
         }
     }
     let (_, devices) = rig::load(&std::fs::read_to_string(&cli.file).with_context(|| format!("reading {}", cli.file))?).map_err(anyhow::Error::msg).with_context(|| format!("parsing {}", cli.file))?;
