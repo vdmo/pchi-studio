@@ -4,7 +4,7 @@ One page, built from a recording, for the person who was not there: the client, 
 
 ```bash
 pchi-run-report run.jsonl --out run-report.html                       # a --record file or a one-file recording
-pchi-run-report --db show.db --chain governance.json --out report.html  # straight from the database, with the signed receipts checked
+pchi-run-report --db show.db --chain governance.json --memory memory.db --out report.html  # from the database, receipts checked, memory read
 ```
 
 Or, from the running runtime, `GET /run-report` (the same page, with the receipts checked), or Studio's **Hand-over page** button on the Live tab. The page is one HTML file with no scripts and no network use: mail it, print it, keep it with the invoice.
@@ -13,6 +13,7 @@ Or, from the running runtime, `GET /run-report` (the same page, with the receipt
 
 - **A verdict**, in a box at the top: either "Nothing to report" or the list of what needs a look (cues that did not reach a device, a cue more than a quarter of a second off, a pause, a takeover or a restart, a recording that does not replay, a signed record that does not verify).
 - **Where the show went**: a bar of the scenes by how long each ran, and a table of each scene, when it began, how long it ran, and what left it. Inputs that did nothing, and presses held because a scene had not run its minimum, are counted.
+- **Memory from this run**: how many drafts the run left waiting for a person to verify, how many are verified, how many more could be derived, and the drafts themselves (with any that are in conflict). Only if the runtime has `--memory` or the command is given `--memory FILE`; it is only read.
 - **Cue timing**: how many cues fired, the median and 95th-percentile lateness, the worst, and the eight furthest from plan. Lateness is how long after its planned time the runtime fired the cue, not how long the tool took.
 - **Did the cues reach the devices?** Counts by outcome, and every failed or unrouted one with the reason. A run that was not started with `--send` says its cues were *dry-run*.
 - **Interruptions**: restarts, a takeover, a pause because the witness's lease was lost (see `docs/failover.md`), each with the time.

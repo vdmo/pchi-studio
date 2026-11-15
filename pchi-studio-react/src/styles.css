@@ -627,3 +627,23 @@ button.go:disabled { background: #1b1d25; color: #7a7f92; border-color: #2f323e;
 .backup summary { cursor: pointer; color: #8b93a7; }
 .backup form { display: flex; gap: 6px; margin: 6px 0; }
 .backup input { flex: 1; min-width: 0; }
+
+/* memory */
+.mem h4 { margin: 18px 0 4px; }
+.mem-ask { display: flex; gap: 8px; margin-bottom: 10px; }
+.mem-ask input { flex: 1; padding: 6px 10px; }
+.mem-answer { margin: 8px 0; }
+.mem-card { border: 1px solid #3a3f4e; border-left-width: 4px; border-radius: 6px; padding: 8px 12px; margin: 6px 0; }
+.mem-card p { margin: 4px 0 0; }
+.mem-card.verified { border-left-color: #34d399; }
+.mem-card.draft { border-left-color: #fbbf24; }
+.mem-card.idk { border-left-color: #94a3b8; }
+.mem-badge { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid #4b5163; }
+.mem-badge.verified { color: #a7f3d0; border-color: #34d399; }
+.mem-badge.draft { color: #fde68a; border-color: #fbbf24; }
+.mem-list { list-style: none; margin: 6px 0; padding: 0; }
+.mem-list li { border-bottom: 1px solid #2b2f3b; padding: 8px 2px; }
+.mem-list li p { margin: 2px 0 6px; }
+.mem-list.compact li { padding: 4px 2px; font-size: 13px; }
+.mem-conflict { color: #fbbf24; font-size: 12px; }
+.rt-notes-plain { font-size: 13px; }

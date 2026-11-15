@@ -2092,6 +2092,7 @@ pub fn router_with_token(show: Arc<Show>, token: Option<String>) -> Router {
         .route("/memory/:id/verify", post(memory_api::post_memory_verify))
         .route("/memory/:id/supersede", post(memory_api::post_memory_supersede))
         .route("/memory/:id/settle", post(memory_api::post_memory_settle))
+        .route("/memory/:id/archive", post(memory_api::post_memory_archive))
         .route("/replay", get(get_replay).post(post_replay).layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024)))
         .route("/role", get(get_role))
         .route("/primary", get(get_primary))
@@ -2495,7 +2496,9 @@ async fn get_run_report(State(a): State<App>, q: Query<HashMap<String, String>>,
     }
     let export = a.show.governance_export();
     let chain = if export["count"].as_u64().unwrap_or(0) > 0 { Some(report::check_chain(&export)) } else { None };
-    match report::html(&a.show.records(), chain.as_ref()) {
+    let records = a.show.records();
+    let view = a.show.memory().and_then(|m| report::memory_view(&m, &records).ok());
+    match report::html(&records, chain.as_ref(), view.as_ref()) {
         Ok(page) => axum::response::Html(page).into_response(),
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e}))).into_response(),
     }

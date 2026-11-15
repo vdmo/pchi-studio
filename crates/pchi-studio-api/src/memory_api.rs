@@ -185,3 +185,22 @@ pub(crate) async fn post_memory_settle(State(a): State<App>, Path(id): Path<Stri
         Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"error": e.0}))),
     }
 }
+
+/// `POST /memory/<id>/archive`: a person says this is not worth remembering. It leaves the answers and stays in the audit trail. Leaves a receipt.
+pub(crate) async fn post_memory_archive(State(a): State<App>, Path(id): Path<String>, q: Query<HashMap<String, String>>, h: HeaderMap) -> impl IntoResponse {
+    if !authorized(&a.token, &q, &h) {
+        return unauthorized();
+    }
+    let Some(mem) = a.show.memory() else { return off() };
+    let actor = who(&a, &q, &h);
+    let Some(w) = memory_who(&actor).filter(|w| w.person) else {
+        return (StatusCode::FORBIDDEN, Json(json!({"error": "only a person in the operator or editor role may archive a memory"})));
+    };
+    match mem.archive(&w, &id, now_ms()) {
+        Ok(()) => {
+            a.show.receipt("memory.archive", "ALLOW", &actor, &format!("archived memory {id}"));
+            (StatusCode::OK, Json(json!({"archived": id})))
+        }
+        Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.0}))),
+    }
+}

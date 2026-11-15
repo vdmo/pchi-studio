@@ -107,6 +107,22 @@ async fn memory_is_written_by_agents_as_drafts_verified_by_people_and_says_when_
     let (_, drafts) = call(&a, "GET", "/memory/list?status=draft", None, None).await;
     assert!(drafts["memories"].as_array().unwrap().iter().any(|m| m["source_type"] == "run"), "{drafts}");
 
+    // the hand-over page says what the run left for a person to verify
+    let mut s = tokio::net::TcpStream::connect(&a).await.unwrap();
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    s.write_all(format!("GET /run-report HTTP/1.1
+Host: {a}
+Connection: close
+
+").as_bytes()).await.unwrap();
+    let mut page = String::new();
+    s.read_to_string(&mut page).await.unwrap();
+    assert!(page.contains("Memory from this run") && page.contains("draft(s) from this run wait for a person to verify"), "{page}");
+    // a person can archive a draft; an agent cannot
+    let victim = drafts["memories"].as_array().unwrap().iter().find(|m| m["source_type"] == "run").unwrap()["id"].as_str().unwrap().to_string();
+    assert_eq!(call(&a, "POST", &format!("/memory/{victim}/archive"), Some("agent:nova"), None).await.0, 403);
+    assert_eq!(call(&a, "POST", &format!("/memory/{victim}/archive"), None, None).await.0, 200);
+
     // the MCP tools exist and say what they are for
     let tools = pchi_studio_api::mcp::tools().to_string();
     assert!(tools.contains("pchi_memory_recall") && tools.contains("pchi_memory_remember") && tools.contains("DRAFT"));

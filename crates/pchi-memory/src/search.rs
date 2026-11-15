@@ -126,7 +126,7 @@ pub fn coverage(doc: &[String], q: &[String]) -> f64 {
 }
 
 /// The same word, allowing for a typo or a different ending: equal, or one starts the other (from four letters), or their character trigrams overlap by 60 % (from five).
-fn same_word(a: &str, b: &str) -> bool {
+pub fn same_word(a: &str, b: &str) -> bool {
     if a == b {
         return true;
     }

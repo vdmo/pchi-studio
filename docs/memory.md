@@ -58,10 +58,30 @@ Shipped recall: 22 of 25 answerable questions answered correctly, **0 wrong**, 3
 
 **Read that with care.** The sample is synthetic, written by us, and small. The abstention threshold was first set at 0.25, which answered three questions about things never written down ("who is the lighting designer" with the lighting convention); it was changed to 0.45 and the rule to weight words by rarity *after seeing that*, so the sample no longer tests it fairly. It says the machinery works; it does not say how it will do on your shows. Write a golden set from your own recordings and questions, and run it before you rely on recall.
 
+## In Studio
+
+Live tab, **Memory**: ask a question (an answer shows each note as *verified* or *draft: not yet verified*; when memory does not know it says so, with the reason and what came closest, marked as not an answer); **Derive from this run**; **Waiting for a person**, the drafts, each with **Verify** and **Archive**; **Memories that disagree**, shown together, with **This one is right** on each (the other is archived and points to it); and the verified notes. The panel only asks: the runtime decides who may verify, archive or settle (an operator or an editor), and says so in words when someone else tries.
+
+The hand-over page (`docs/report.md`) has a **Memory from this run** section: how many drafts the run left waiting, how many are verified, how many more could be derived, and the drafts themselves, so the review after a show is one routine: derive, read the page, verify what is worth keeping.
+
+## Writing a golden set from your own shows
+
+The sample that ships tells you the machinery works. It cannot tell you how recall does on *your* questions, and it is mostly easy: its own report says 21 of its 25 questions share most of their words with the answer. To find out for real:
+
+```bash
+pchi-memory golden-init run1.jsonl run2.jsonl --out golden.json   # the notes your real runs give rise to, as m1, m2, ...
+# write the questions yourself, the way a person would ask them, in other words than the notes use
+pchi-memory golden-check golden.json                              # what makes it say little
+pchi-memory eval golden.json --save-baseline base.json            # the numbers, and a baseline to hold later changes to
+pchi-memory eval golden.json --baseline base.json --max-wrong 0   # after any change: fails if recall fell or a wrong answer appeared
+```
+
+`golden-check` and the top of every `eval` report say when the set is too small (under 30 answerable questions: one question moves recall by 3 or more points), has fewer than 5 questions memory should decline, has notes no question expects, repeats the same question, or has questions that repeat almost every word of their answer (they test nothing a keyword search would not). `eval` also reports recall **by how much of the question's wording the right note shares**. That table is the one that answers whether a real embedding model is worth adding: it would have to beat the trigram search in the "shares few or none" row, and there is no point in adding one before you have enough questions in that row to tell. The three such questions in the shipped sample are found by no search, so the sample cannot say.
+
 ## What it does not do
 
 - It does not understand meaning. Words that mean the same but look different are missed (the trigram search is not an embedding; a real one can be put behind the same interface, and `eval` is how you would know if it helps).
 - It does not decide what is *true*, only who vouched for it and how long ago. A verified memory can be wrong.
 - It is not shared: each runtime has its own file, a standby has its own, and nothing syncs between shows or venues. After a takeover run `POST /memory/derive` on the standby. Sharing across shows is a decision about whose notes go where, and has not been built.
 - The derived memories are only the kinds listed. A run's meaning is not extracted.
-- There is no Studio screen for it yet: use the HTTP routes, the command, or an agent over MCP.
+- Studio's screen (below) is plain: ask, review, verify. It has no search of the verified notes, no editing of a note's words (supersede is the command or the route), and no pinning.

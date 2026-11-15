@@ -84,6 +84,19 @@ enum Cmd {
     Export,
     /// Counts.
     Stats,
+    /// Start a golden set from real recordings: writes the memories the runs give rise to (kept as keys m1, m2, ...) and an empty list of questions for a PERSON to write, in their own words, not copied from the notes. Questions you make up from the answer's wording test little; `golden-check` says so.
+    GoldenInit {
+        recordings: Vec<String>,
+        #[arg(long, default_value = "golden.json")]
+        out: String,
+    },
+    /// Check a golden set for what makes it say little: too few questions, none that memory should decline, questions that repeat their answer's words, memories nobody asks about.
+    GoldenCheck {
+        golden: String,
+        /// Exit non-zero on any warning, not only on an error.
+        #[arg(long)]
+        strict: bool,
+    },
     /// Measure memory against a golden set (see docs/memory.md). `--sample` uses the synthetic one that ships with the crate.
     Eval {
         golden: Option<String>,
@@ -97,6 +110,12 @@ enum Cmd {
         max_wrong: Option<usize>,
         #[arg(long)]
         report: Option<String>,
+        /// Compare with a baseline saved earlier: fail if recall@5 fell, fewer questions are answered correctly, or more are answered wrongly.
+        #[arg(long)]
+        baseline: Option<String>,
+        /// Save these results as the baseline to compare against next time.
+        #[arg(long)]
+        save_baseline: Option<String>,
     },
 }
 
@@ -105,7 +124,35 @@ fn main() -> anyhow::Result<()> {
     let now = pchi_memory::now_ms();
     let me = cli.name.clone().unwrap_or_else(|| std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_else(|_| "cli".into()));
     let who = if cli.agent { Who::agent(&me) } else { Who::person(&me) };
-    if let Cmd::Eval { golden, sample, fail_under_recall5, max_wrong, report } = &cli.cmd {
+    if let Cmd::GoldenInit { recordings, out } = &cli.cmd {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut mems = Vec::new();
+        for p in recordings {
+            let records = derive::parse_recording(&std::fs::read_to_string(p).with_context(|| format!("reading {p}"))?).map_err(anyhow::Error::msg)?;
+            for n in derive::from_run(&records).map_err(anyhow::Error::msg)? {
+                if seen.insert(pchi_memory::make_id(n.kind, &n.key, &n.text, &n.show)) {
+                    mems.push(serde_json::json!({"key": format!("m{}", mems.len() + 1), "kind": n.kind.name(), "text": n.text, "dept": n.dept, "source": p}));
+                }
+            }
+        }
+        let g = serde_json::json!({"note": "A golden set made from real recordings. Write the questions yourself, the way a person would ask them, in other words than the notes use: {\"q\": \"...\", \"expect\": [\"m3\"]}, and some the memory should decline: {\"q\": \"...\", \"abstain\": true}. Then run golden-check, then eval.", "memories": mems, "questions": []});
+        std::fs::write(out, serde_json::to_string_pretty(&g)?)?;
+        println!("{} memory(ies) from {} recording(s) written to {out}: now write at least 30 questions and 5 it should decline.", g["memories"].as_array().map_or(0, |a| a.len()), recordings.len());
+        return Ok(());
+    }
+    if let Cmd::GoldenCheck { golden, strict } = &cli.cmd {
+        let g: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(golden).with_context(|| format!("reading {golden}"))?).context("the golden set is not JSON")?;
+        let r = eval::run(&g).map_err(anyhow::Error::msg)?;
+        for w in &r.warnings {
+            println!("warning: {w}");
+        }
+        println!("{} memory(ies), {} answerable question(s), {} to decline; {} warning(s).", g["memories"].as_array().map_or(0, |a| a.len()), r.answerable, r.unanswerable, r.warnings.len());
+        if *strict && !r.warnings.is_empty() {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+    if let Cmd::Eval { golden, sample, fail_under_recall5, max_wrong, report, baseline, save_baseline } = &cli.cmd {
         let text = match (golden, sample) {
             (Some(p), _) => std::fs::read_to_string(p).with_context(|| format!("reading {p}"))?,
             (None, true) => eval::SAMPLE.to_string(),
@@ -126,6 +173,27 @@ fn main() -> anyhow::Result<()> {
         if let Some(max) = max_wrong {
             if r.wrong + r.answered_anyway > *max {
                 eprintln!("FAIL: {} wrong confident answers, more than {max}", r.wrong + r.answered_anyway);
+                failed = true;
+            }
+        }
+        if let Some(p) = save_baseline {
+            std::fs::write(p, serde_json::to_string_pretty(&r.to_json())?)?;
+            println!("baseline saved to {p}");
+        }
+        if let Some(p) = baseline {
+            let b: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(p).with_context(|| format!("reading {p}"))?)?;
+            let (was5, now5) = (b["hybrid"]["recall_at_5"].as_f64().unwrap_or(0.0), r.hybrid.at5);
+            let (was_ok, was_bad) = (b["shipped"]["correct"].as_u64().unwrap_or(0) as usize, (b["shipped"]["wrong"].as_u64().unwrap_or(0) + b["shipped"]["answered_anyway"].as_u64().unwrap_or(0)) as usize);
+            if now5 + 1e-9 < was5 {
+                eprintln!("REGRESSION: hybrid recall@5 fell from {was5:.2} to {now5:.2}");
+                failed = true;
+            }
+            if r.correct < was_ok {
+                eprintln!("REGRESSION: {} questions answered correctly, was {was_ok}", r.correct);
+                failed = true;
+            }
+            if r.wrong + r.answered_anyway > was_bad {
+                eprintln!("REGRESSION: {} wrong confident answers, was {was_bad}", r.wrong + r.answered_anyway);
                 failed = true;
             }
         }
@@ -201,7 +269,7 @@ fn main() -> anyhow::Result<()> {
         }
         Cmd::Export => print!("{}", mem.export_jsonl().map_err(e)?),
         Cmd::Stats => println!("{}", mem.stats().map_err(e)?),
-        Cmd::Eval { .. } => unreachable!(),
+        Cmd::Eval { .. } | Cmd::GoldenInit { .. } | Cmd::GoldenCheck { .. } => unreachable!(),
     }
     Ok(())
 }

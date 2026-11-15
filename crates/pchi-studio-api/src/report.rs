@@ -81,7 +81,33 @@ ul{margin:6px 0;padding-left:20px}@media print{body{font-size:12px}main{padding:
 ";
 
 /// The report as an HTML page. `chain` is the receipts' check, if the receipts were supplied.
-pub fn html(records: &[EventRecord], chain: Option<&Chain>) -> Result<String, String> {
+/// What the show's memory holds about this run, for the report.
+pub struct MemoryView {
+    /// Drafts from this run that wait for a person: (id, kind, text, in conflict).
+    pub waiting: Vec<(String, String, String, bool)>,
+    pub verified: usize,
+    /// Notes this run would give rise to that have not been derived yet.
+    pub not_yet_derived: usize,
+    /// Memories anywhere in the file that disagree and wait for a person to settle.
+    pub conflicts: usize,
+}
+
+/// Look at the memory without changing it.
+pub fn memory_view(mem: &pchi_memory::Memory, records: &[EventRecord]) -> Result<MemoryView, String> {
+    let start = records.iter().rposition(|r| r.event_type == recorder::RUN_START).ok_or("there is no recorded run")?;
+    let source_ref = format!("run:{}", records[start].timestamp);
+    let all = mem.list(&pchi_memory::Filter::default()).map_err(|e| e.0)?;
+    let mine: Vec<_> = all.iter().filter(|r| r.source_ref == source_ref && r.status != pchi_memory::Status::Archived).collect();
+    let not_yet = pchi_memory::derive::from_run(records)?.iter().filter(|n| !all.iter().any(|r| r.id == pchi_memory::make_id(n.kind, &n.key, &n.text, &n.show))).count();
+    Ok(MemoryView {
+        waiting: mine.iter().filter(|r| r.status == pchi_memory::Status::Draft).map(|r| (r.id.clone(), r.kind.name().to_string(), r.text.clone(), !r.conflicts_with.is_empty())).collect(),
+        verified: mine.iter().filter(|r| r.status == pchi_memory::Status::Verified).count(),
+        not_yet_derived: not_yet,
+        conflicts: all.iter().filter(|r| r.status != pchi_memory::Status::Archived && !r.conflicts_with.is_empty()).count(),
+    })
+}
+
+pub fn html(records: &[EventRecord], chain: Option<&Chain>, memory: Option<&MemoryView>) -> Result<String, String> {
     let view = recording::view(records)?;
     let replay = recording::verify(records)?;
     let start = records.iter().rposition(|r| r.event_type == recorder::RUN_START).ok_or("there is no recorded run")?;
@@ -140,6 +166,9 @@ pub fn html(records: &[EventRecord], chain: Option<&Chain>) -> Result<String, St
     }
     if let Some(c) = chain.filter(|c| !c.ok) {
         flags.push(("bad", format!("The signed record does not verify: {}", c.text)));
+    }
+    if let Some(m) = memory.filter(|m| m.conflicts > 0) {
+        flags.push(("warn", format!("{} memory(ies) disagree and wait for a person to settle them (Studio: Live, Memory).", m.conflicts)));
     }
     let verdict = if flags.is_empty() { "<p class=\"ok\"><b>Nothing to report.</b> The run replays exactly, every cue reached a device, and none was more than a quarter of a second late.</p>".to_string() } else { format!("<ul>{}</ul>", flags.iter().map(|(c, t)| format!("<li class=\"{c}\">{}</li>", esc(t))).collect::<String>()) };
 
@@ -274,6 +303,22 @@ pub fn html(records: &[EventRecord], chain: Option<&Chain>) -> Result<String, St
         None => h += "<p class=\"mut\">No signed receipts were supplied with this report (pass the governance export).</p>",
     }
 
+    // memory
+    h += "<h2>Memory from this run</h2>";
+    match memory {
+        None => h += "<p class=\"mut\">Memory is off, or was not given to this report (start the runtime with --memory FILE, or give pchi-run-report --memory FILE).</p>",
+        Some(m) => {
+            h += &format!("<p>{} draft(s) from this run wait for a person to verify; {} already verified{}.</p>", m.waiting.len(), m.verified, if m.not_yet_derived > 0 { format!("; {} more could be derived from the run but have not been (Studio: Live, Memory, Derive from this run)", m.not_yet_derived) } else { String::new() });
+            if !m.waiting.is_empty() {
+                h += "<table><tr><th>Kind</th><th>What the run says</th><th>Id</th></tr>";
+                for (id, kind, text, conflict) in m.waiting.iter().take(30) {
+                    h += &format!("<tr><td>{}</td><td>{}{}</td><td class=\"mut\">{}</td></tr>", esc(kind), esc(text), if *conflict { " <b class=\"warn\">(in conflict)</b>" } else { "" }, esc(id));
+                }
+                h += "</table><p class=\"mut\">Drafts are what the log says happened, not what anyone has decided is worth remembering. They count for little until a person verifies them.</p>";
+            }
+        }
+    }
+
     // replay
     h += "<h2>Does the recording hold up?</h2>";
     h += &format!("<p class=\"{}\">{}</p>", if replay["matches"] == true { "ok" } else { "bad" }, esc(replay["verdict"].as_str().unwrap_or("")));
@@ -306,7 +351,7 @@ mod tests {
 
     #[test]
     fn the_report_says_what_went_wrong_and_escapes_what_it_quotes() {
-        let page = html(&run(), None).unwrap();
+        let page = html(&run(), None, None).unwrap();
         assert!(page.contains("<title>Run report: demo</title>"));
         assert!(page.contains("did not reach a device"), "a failed delivery should be flagged");
         assert!(page.contains("400 ms off"), "the late cue should be flagged");
@@ -320,15 +365,32 @@ mod tests {
     fn a_clean_run_says_so() {
         let mut r = run();
         r.truncate(2);
-        let page = html(&r, None).unwrap();
+        let page = html(&r, None, None).unwrap();
         assert!(page.contains("Nothing to report"), "{page}");
         assert!(page.contains("None: this runtime ran the whole show"));
     }
 
     #[test]
+    fn the_report_says_what_the_run_left_in_memory_for_a_person_to_verify() {
+        let mem = pchi_memory::Memory::in_memory().unwrap();
+        let view = memory_view(&mem, &run()).unwrap();
+        assert_eq!((view.waiting.len(), view.not_yet_derived), (0, 3), "nothing derived yet: the report says what could be");
+        pchi_memory::derive::derive_into(&mem, &run(), &pchi_memory::Who::agent("derive"), 1).unwrap();
+        let view = memory_view(&mem, &run()).unwrap();
+        assert_eq!((view.waiting.len(), view.verified, view.not_yet_derived), (3, 0, 0));
+        let id = view.waiting[0].0.clone();
+        mem.verify(&pchi_memory::Who::person("Alex"), &id, 2).unwrap();
+        let view = memory_view(&mem, &run()).unwrap();
+        assert_eq!((view.waiting.len(), view.verified), (2, 1));
+        let page = html(&run(), None, Some(&view)).unwrap();
+        assert!(page.contains("Memory from this run") && page.contains("2 draft(s) from this run wait for a person to verify; 1 already verified"), "{page}");
+        assert!(!html(&run(), None, None).unwrap().contains("wait for a person to verify"));
+    }
+
+    #[test]
     fn a_broken_chain_is_called_out() {
         let bad = Chain { count: 2, ok: false, text: "receipt 2 does not follow the one before it".into() };
-        let page = html(&run(), Some(&bad)).unwrap();
+        let page = html(&run(), Some(&bad), None).unwrap();
         assert!(page.contains("The signed record does not verify"));
         let none = check_chain(&json!({"receipts": [], "count": 0, "verifying_key": null, "note": "receipts are off"}));
         assert!(none.ok && none.count == 0);

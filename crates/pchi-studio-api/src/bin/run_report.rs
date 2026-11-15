@@ -2,7 +2,8 @@ use anyhow::Context;
 use clap::Parser;
 
 /// Turn a recording of a run into one page to read and hand over: where the show went, how late the cues were, what failed to reach a device, every edit,
-/// takeover and pause, who decided what, and whether the signed receipts hold together. One self-contained HTML file (no scripts, no network).
+/// takeover and pause, who decided what, what the run left in memory for a person to verify, and whether the signed receipts hold together. One
+/// self-contained HTML file (no scripts, no network).
 ///
 /// The recording is a `--record` file, a one-file export (`GET /recording`, `--export-run`), or the database the show ran against (`--db`).
 /// See docs/report.md.
@@ -17,6 +18,9 @@ struct Cli {
     /// The signed receipts (`GET /governance/export` saved to a file), to check and include.
     #[arg(long, value_name = "FILE")]
     chain: Option<String>,
+    /// The memory file (the runtime's `--memory`): the report then says what the run left for a person to verify. It is only read.
+    #[arg(long, value_name = "FILE")]
+    memory: Option<String>,
     /// Where to write the page. Default: run-report.html.
     #[arg(long, default_value = "run-report.html")]
     out: String,
@@ -36,7 +40,14 @@ fn main() -> anyhow::Result<()> {
         }
         None => None,
     };
-    let page = pchi_studio_api::report::html(&records, chain.as_ref()).map_err(anyhow::Error::msg)?;
+    let view = match &cli.memory {
+        Some(p) => {
+            let mem = pchi_memory::Memory::open(p).map_err(|e| anyhow::anyhow!("opening memory {p}: {e}"))?;
+            Some(pchi_studio_api::report::memory_view(&mem, &records).map_err(anyhow::Error::msg)?)
+        }
+        None => None,
+    };
+    let page = pchi_studio_api::report::html(&records, chain.as_ref(), view.as_ref()).map_err(anyhow::Error::msg)?;
     std::fs::write(&cli.out, page).with_context(|| format!("writing {}", cli.out))?;
     println!("report written to {}", cli.out);
     if let Some(c) = &chain {
