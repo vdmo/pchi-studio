@@ -47,6 +47,34 @@ A primary that is merely busy must not be replaced: two runtimes sending at once
 
 The primary measures its own event loop ten times a second (how late a timer fires) and reports it with every answer. `GET /role` on either runtime shows `lag_ms` (the last three seconds) and `lag_worst_ms` (the last minute); the standby's `/role` shows `primary_health` (`ok`, `slow`, `stalled`, `gone`, `unreachable`) and Studio's Standby note says it in words. The limit is not zero: a primary stuck for good is still replaced, after the extra wait.
 
+## A witness: so a cut network cannot give you two senders
+
+Without a witness the standby has to guess whether a silent primary is dead or only out of reach, and when it guesses wrong both runtimes send until the link is mended (shown below). A **witness** removes the guess. It is a third process, `pchi-witness`, on a machine of its own, that grants one thing: the right to send, as a lease.
+
+```bash
+pchi-witness --bind 0.0.0.0:3300 --failover-key "$KEY"                                   # the third machine
+pchi-studio-api show.pchi --db a.db --failover-key "$KEY" --witness witness:3300 --advertise primary:3100
+pchi-studio-api show.pchi --db b.db --failover-key "$KEY" --witness witness:3300 --advertise standby:3100 --standby-of primary:3100
+```
+
+- The runtime running the show asks the witness for the lease every quarter of its length (`--witness-ttl`, default 6 s, 2 to 120). While the witness says yes it sends.
+- If the witness says **no** (someone else holds the lease), or cannot be reached for the whole lease, the runtime **pauses**: it sends nothing, streams no lighting, disarms its lasers, ignores inputs, and says so (`GET /role` shows `"role": "paused"` and why; Studio shows a banner). It goes on by itself when it holds the lease again: cues that came due meanwhile are skipped, not fired late, and lasers stay disarmed.
+- A standby may take over only after the witness **grants it the lease**, and the witness grants it only once the primary's lease has run out. So a standby that merely cannot reach a living primary is told no (its `/role` says so in `witness.note`), and a primary cut off from the witness stops itself *before* the standby is allowed to start. The primary counts its lease from when it *asked*, and treats it as 90 % as long as the witness does, so the two do not overlap by the length of one answer.
+- After a takeover the standby holds the lease and keeps asking. The old primary, if it comes back, is refused the lease (it starts paused), and is fenced as before.
+
+**Measured** (`cargo test -p pchi-studio-api --test witness_procs`, real processes on one machine, lease 3 s, `--takeover-after 2`):
+
+| | |
+|---|---|
+| Standby cut off from a **living** primary that still reaches the witness | the standby did **not** take over in 9 s of trying; the desk heard only the primary |
+| Primary cut off from both the standby and the witness | primary **paused** after about **2.6 s**; standby active after about **3.1 s**; the desk heard the last primary datagram about **0.6 s before** the first standby one, never both |
+| Witness unreachable for a moment | the primary paused, sent nothing, and went on by itself when the witness came back; the standby did not take over |
+| Primary killed | standby active after about **3.1 s**, holding the lease; the witness reported the show on the standby |
+
+**What you give up, chosen on purpose.** With the witness down, nothing can take over, and the runtime that holds the lease pauses when it runs out: the show stops rather than doubles. If the primary is dead and you know the witness is down, `POST /takeover?witness=ignore` (with the failover key) takes over without a lease; the takeover receipt says it was on a person's word, and that runtime then runs unleased. Put the witness on a machine that fails separately from both runtimes, and on a network path both can reach. A witness restarted loses who held the lease: the first to ask gets it, and a standby only asks at the moment it would take over, so the primary asks first.
+
+The witness is plain HTTP and the failover key crosses the network with every claim: keep it on a network you control, or put TLS in front of it (`docs/tls.md`).
+
 ## Stopping the old primary (fencing)
 
 Once the standby is running it keeps telling the old primary, every few seconds, which takeover it is on. A primary that hears a newer one **stops**:
@@ -85,14 +113,28 @@ Everything that talked to the primary must talk to the standby after a takeover:
 
 - **Studio follows by itself.** On the Live tab, **Backup runtime** takes the standby's address (for example `10.0.0.6:3100`). Studio then watches both runtimes' `GET /role` every two seconds and moves to the one that is running the show: it stays where it is while that runtime is `active`, moves when it is not and the other is, and when both claim to be active (a takeover that has not yet stopped the old primary) the later takeover wins. A banner says when it moves. A session belongs to one runtime, so after a move you sign in again (a typed operator key still works on both).
   Studio reaches the backup directly from the browser, so start the backup with `--allow-origin http://<the address Studio is served from>` (several, comma-separated, are fine; `*` is refused). Only listed origins are answered; every request still needs the token and key it always needed.
-- **Anything else** (a button box, the audience gateway) does not move by itself. Put both behind one name you can repoint (DNS, a reverse proxy, a load balancer's health check on `GET /role`: `"role": "active"` is the one to send to), or tell people the second address.
+- **A fixed address: `pchi-follow`.** A button box or gateway has one address in its settings. `pchi-follow --listen 0.0.0.0:3100 --runtime primary:3100,standby:3100` listens on that address, asks each runtime's `GET /role` every half second, and passes connections (HTTP and WebSocket) to the one that says `active`. When the show moves it closes the connections it carried so they reconnect to the new one. Two active at once (a cut link, before the fence): the later takeover. None active: connections are refused until one is. `--status 127.0.0.1:3199` serves what it sees. Run it where the button boxes can reach it (if it is on a runtime's machine, give it a different port). It is one process: a second copy elsewhere is the way to not depend on it. Measured on loopback: the fixed address led to the standby about **3.4 s** after the primary was killed.
+- **Ask where the show is.** Every runtime answers `GET /primary`: `{"primary": "host:port", "self": true|false, "role": …}`. The running one says `self: true` and its `--advertise` address; a standby names the primary it follows; a runtime that was fenced names the one that fenced it. With a witness, `GET /primary` on the witness answers from the lease (null while nobody holds it).
+- **Anything else** that cannot ask: put both behind one name you can repoint (DNS, a reverse proxy, a load balancer's health check on `GET /role`: `"role": "active"` is the one to send to), or tell people the second address.
+
+## A failover day: prove it on the real network
+
+Everything above was shown on one computer. A network adds delay, loss, clocks that disagree, firewalls, and a switch that is slow after a cable moves. `pchi-netcheck` runs the checks over the real network between the real machines and writes down what it measured:
+
+```bash
+pchi-netcheck --primary primary:3100 --standby standby:3100 --witness witness:3300 --failover-key "$KEY"
+```
+
+First the checks that change nothing: answer time and loss to each runtime (best, median, worst), how far each machine's clock is from the one running the check, that the roles are as expected, that the standby is following and hears the primary, that the primary's event loop keeps up, a rehearsed takeover, and that the witness answers and **refuses a second sender** while the primary holds the lease. Then, only if those pass and you type `CUT`, the cut test: you cut the primary off (pull the cable, switch off its port, stop the program; cutting only its link to the standby is the interesting one) and it times the takeover; you restore it and type `DONE`, and it times how long the old primary takes to stop, and notes whether both said active in between. It writes `failover-report-<date>.md` and exits non-zero if anything failed. It sends nothing to any tool; whether the standby can reach the *tools* is `pchi-gearcheck`, run on the standby's machine. Do the cut test only when nothing relies on the primary.
+
+The same program ran against real processes on loopback (cut test included, in `witness_procs`): the takeover was measured 3.3 s after `CUT` with a 3 s lease, and the restored old primary was held paused by the witness. Loopback shows the logic; the delay, loss and clock figures only mean something on the real network.
 
 ## What it does not do
 
 - It does not make the show survive a loss of the **tools** (the lights, the laser), only of the runtime.
 - Two standbys following one primary would both take over. Run one.
 - The copy is as old as the last poll (one second): an input pressed in that second on a primary that then dies is lost. The run report on the standby shows where the log ends.
-- It is checked on loopback only, with real processes (below), not on two machines in a venue.
+- It is checked on loopback only, with real processes (below), not on two machines in a venue. `pchi-netcheck` (above) is how you check it on yours.
 
 ## What has been checked, and what it showed
 

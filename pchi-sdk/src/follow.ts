@@ -4,7 +4,7 @@
 export type Which = 'primary' | 'backup'
 
 /** What a runtime said about itself, or null if it did not answer. */
-export type RoleInfo = { role: 'active' | 'standby' | 'fenced'; epoch?: number } | null
+export type RoleInfo = { role: 'active' | 'standby' | 'fenced' | 'paused'; epoch?: number } | null
 
 const active = (r: RoleInfo) => r?.role === 'active'
 

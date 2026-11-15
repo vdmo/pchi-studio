@@ -61,6 +61,9 @@ pub mod profiles;
 pub mod recording;
 pub mod rehearse;
 pub mod timecode;
+pub mod netcheck;
+pub mod witness;
+pub mod follow;
 pub mod rig;
 
 use futures_util::{SinkExt, StreamExt};
@@ -169,6 +172,12 @@ pub struct Show {
     /// Failover: which takeover this run is on (0 until a standby takes over; a standby that does so is one higher), who took over from it, and the secret a standby proves itself with.
     epoch: std::sync::atomic::AtomicU64,
     fenced: Mutex<Option<Value>>,
+    /// Set while this runtime does not hold the witness's lease: it sends nothing until it does (see `witness`).
+    paused: Mutex<Option<Value>>,
+    /// How this runtime sees the witness: shown in `/role`.
+    witness_view: Mutex<Option<Value>>,
+    /// The address other machines should use to reach this runtime (`--advertise`), told to the witness and to `GET /primary`.
+    advertise: Mutex<Option<String>>,
     failover_key: Mutex<Option<String>>,
     /// Votes counted but not yet written to the log: they are written together every half second (a vote a record would be too many).
     vote_buf: Mutex<Vec<(String, String, String)>>,
@@ -229,6 +238,9 @@ impl Show {
             signin_fails: Mutex::new((0, 0)),
             epoch: std::sync::atomic::AtomicU64::new(0),
             fenced: Mutex::new(None),
+            paused: Mutex::new(None),
+            witness_view: Mutex::new(None),
+            advertise: Mutex::new(None),
             failover_key: Mutex::new(None),
             vote_buf: Mutex::new(Vec::new()),
             vote_flush: std::sync::atomic::AtomicBool::new(false),
@@ -1677,30 +1689,117 @@ impl Show {
         self.epoch.store(e, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// Whether this runtime must do nothing: another runtime took over (fenced for good), or it does not hold the witness's lease (paused until it does).
     pub fn is_fenced(&self) -> bool {
+        self.fenced.lock().unwrap().is_some() || self.paused.lock().unwrap().is_some()
+    }
+
+    pub fn is_taken_over(&self) -> bool {
         self.fenced.lock().unwrap().is_some()
+    }
+
+    pub fn set_advertise(&self, addr: Option<String>) {
+        *self.advertise.lock().unwrap() = addr.filter(|a| !a.is_empty());
+    }
+
+    pub fn advertised(&self) -> Option<String> {
+        self.advertise.lock().unwrap().clone()
+    }
+
+    /// Record how the witness looks from here (for `/role`).
+    pub fn set_witness_view(&self, v: Value) {
+        *self.witness_view.lock().unwrap() = Some(v);
+    }
+
+    /// Stop sending because the witness's lease is not held. Nothing is lost: the show's scene and context stay as they are, and the runtime goes on
+    /// when it holds the lease again (`resume_lease`); but a runtime that cannot prove it is the only sender must not send.
+    pub fn pause_lease(self: &Arc<Self>, why: &str) {
+        if self.is_taken_over() {
+            return;
+        }
+        let ts = now_ms();
+        {
+            let mut p = self.paused.lock().unwrap();
+            if let Some(info) = p.as_mut() {
+                info["why"] = json!(why);
+                return;
+            }
+            let out = self.output.lock().unwrap().clone();
+            *p = Some(json!({"why": why, "since": ts, "was_sending": out.as_ref().is_some_and(|o| o.sending())}));
+        }
+        let out = self.output.lock().unwrap().clone();
+        if let Some(out) = out {
+            for l in out.lasers() {
+                out.set_armed(&l.id, false);
+            }
+            tokio::spawn(async move { out.silence().await });
+        }
+        self.inner.lock().unwrap().generation += 1;
+        self.publish(json!({"type": "paused", "ts": ts, "why": why}));
+        self.receipt("failover.lease", "ALLOW", &Actor::Person(None), &format!("this runtime paused: {why}. It sends nothing and its lasers are disarmed until it holds the witness's lease again"));
+    }
+
+    /// The lease is held again: go on. Cues that came due while paused are not fired late; the rest keep their original times. Lasers stay disarmed.
+    pub fn resume_lease(self: &Arc<Self>) {
+        if self.is_taken_over() {
+            return;
+        }
+        let Some(info) = self.paused.lock().unwrap().take() else { return };
+        let ts = now_ms();
+        if info["was_sending"].as_bool().unwrap_or(false) {
+            if let Some(out) = self.output.lock().unwrap().clone() {
+                out.set_sending(true);
+            }
+        }
+        let (generation, elapsed) = {
+            let mut g = self.inner.lock().unwrap();
+            g.generation += 1;
+            (g.generation, (now_ms() - g.entered_at).max(0) as u64)
+        };
+        self.arm_from(generation, elapsed);
+        self.publish(json!({"type": "resumed", "ts": ts}));
+        let secs = (ts - info["since"].as_i64().unwrap_or(ts)) as f64 / 1000.0;
+        self.receipt("failover.lease", "ALLOW", &Actor::Person(None), &format!("this runtime holds the witness's lease again after {secs:.1} s paused: it is sending again (cues that came due meanwhile were skipped; lasers stay disarmed)"));
     }
 
     /// Whether this runtime is the one running the show, and which takeover it is on.
     pub fn role_json(&self) -> Value {
         let fenced = self.fenced.lock().unwrap().clone();
-        json!({"role": if fenced.is_some() { "fenced" } else { "active" }, "epoch": self.epoch(), "fenced_by": fenced, "failover": self.failover_enabled(), "ts": now_ms(),
-               "lag_ms": self.lag_ms(3_000), "lag_worst_ms": self.lag_ms(60_000)})
+        let paused = self.paused.lock().unwrap().clone();
+        json!({"role": if fenced.is_some() { "fenced" } else if paused.is_some() { "paused" } else { "active" }, "epoch": self.epoch(), "fenced_by": fenced, "paused": paused, "failover": self.failover_enabled(), "ts": now_ms(),
+               "lag_ms": self.lag_ms(3_000), "lag_worst_ms": self.lag_ms(60_000), "witness": self.witness_view.lock().unwrap().clone()})
+    }
+
+    /// Which runtime is running the show, as far as this one knows: the answer a button box or gateway asks (`GET /primary`).
+    pub fn primary_json(&self) -> Value {
+        let role = self.role_json();
+        let me = self.advertised();
+        let (primary, is_me) = match role["role"].as_str() {
+            Some("active") => (me, true),
+            Some("fenced") => (role["fenced_by"]["url"].as_str().map(String::from), false),
+            _ => (None, false),
+        };
+        json!({"primary": primary, "self": is_me, "role": role["role"], "epoch": role["epoch"], "ts": now_ms()})
     }
 
     /// Another runtime (a standby) says it has taken over at `epoch`. If that is newer than this one's, this runtime stops: it
     /// sends nothing more, streams no lighting, disarms its lasers, ignores inputs and timers, and says so to every client.
     /// Stopping is the only safe answer to "someone else is running the show"; the person decides what to do next.
     pub fn fence(self: &Arc<Self>, epoch: u64, by: &str) -> Value {
+        self.fence_from(epoch, by, None)
+    }
+
+    /// As `fence`, with the address the runtime that took over can be reached at (so `GET /primary` here can say where the show went).
+    pub fn fence_from(self: &Arc<Self>, epoch: u64, by: &str, url: Option<&str>) -> Value {
         if epoch <= self.epoch() {
-            return json!({"fenced": self.is_fenced(), "epoch": self.epoch(), "note": "not newer than this runtime's own epoch: ignored"});
+            return json!({"fenced": self.is_taken_over(), "epoch": self.epoch(), "note": "not newer than this runtime's own epoch: ignored"});
         }
-        if self.is_fenced() {
+        if self.is_taken_over() {
             self.set_epoch(epoch);
             return json!({"fenced": true, "epoch": epoch});
         }
         let ts = now_ms();
-        let info = json!({"by": by, "epoch": epoch, "ts": ts});
+        let info = json!({"by": by, "epoch": epoch, "ts": ts, "url": url});
         *self.fenced.lock().unwrap() = Some(info.clone());
         self.set_epoch(epoch);
         let out = self.output.lock().unwrap().clone();
@@ -1969,6 +2068,7 @@ pub fn router_with_token(show: Arc<Show>, token: Option<String>) -> Router {
         .route("/recording", get(get_recording))
         .route("/replay", get(get_replay).post(post_replay).layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024)))
         .route("/role", get(get_role))
+        .route("/primary", get(get_primary))
         .route("/replicate", get(get_replicate))
         .route("/fence", post(post_fence))
         .route("/ws", get(ws_upgrade))
@@ -2398,6 +2498,13 @@ async fn get_role(State(a): State<App>, q: Query<HashMap<String, String>>, h: He
     (StatusCode::OK, Json(a.show.role_json()))
 }
 
+async fn get_primary(State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap) -> impl IntoResponse {
+    if !authorized(&a.token, &q, &h) {
+        return unauthorized();
+    }
+    (StatusCode::OK, Json(a.show.primary_json()))
+}
+
 fn failover_key_of(h: &HeaderMap) -> Option<&str> {
     h.get("x-pchi-failover-key").and_then(|v| v.to_str().ok())
 }
@@ -2434,7 +2541,8 @@ async fn post_fence(State(a): State<App>, q: Query<HashMap<String, String>>, h: 
         return (StatusCode::BAD_REQUEST, Json(json!({"error": "send {\"epoch\": N, \"by\": \"name\"}"})));
     };
     let by = body["by"].as_str().unwrap_or("a standby");
-    (StatusCode::OK, Json(a.show.fence(epoch, &by.chars().take(60).collect::<String>())))
+    let url = body["url"].as_str().map(|u| u.chars().take(200).collect::<String>());
+    (StatusCode::OK, Json(a.show.fence_from(epoch, &by.chars().take(60).collect::<String>(), url.as_deref())))
 }
 
 async fn ws_upgrade(ws: WebSocketUpgrade, State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap) -> impl IntoResponse {

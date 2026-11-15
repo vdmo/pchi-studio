@@ -21,6 +21,18 @@ path = "src/bin/drill.rs"
 name = "pchi-gearcheck"
 path = "src/bin/gearcheck.rs"
 
+[[bin]]
+name = "pchi-witness"
+path = "src/bin/witness.rs"
+
+[[bin]]
+name = "pchi-follow"
+path = "src/bin/follow.rs"
+
+[[bin]]
+name = "pchi-netcheck"
+path = "src/bin/netcheck.rs"
+
 [dependencies]
 pchi-showchart = { path = "../pchi-showchart" }
 pchi-eventstore = { path = "../pchi-eventstore" }

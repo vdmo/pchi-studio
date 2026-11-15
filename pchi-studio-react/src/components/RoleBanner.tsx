@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { chooseRuntime, type RoleInfo } from '@pchi/sdk'
 import { apiBase, backupBase, feedToken, followRuntime, runtimeWhich, setBackupBase, useRuntimeWhich } from './liveFeed'
 
-type Role = { role: 'active' | 'standby' | 'fenced'; epoch?: number; fenced_by?: { by: string; epoch: number } | null; following?: string; copied_records?: number; last_heard_ms_ago?: number | null; problem?: string | null; stuck?: boolean; primary_health?: string; primary_lag_ms?: number; takeover?: { mode: 'auto' | 'manual'; after_s?: number }; name?: string }
+type Role = { role: 'active' | 'standby' | 'fenced' | 'paused'; paused?: { why?: string } | null; epoch?: number; fenced_by?: { by: string; epoch: number } | null; following?: string; copied_records?: number; last_heard_ms_ago?: number | null; problem?: string | null; stuck?: boolean; primary_health?: string; primary_lag_ms?: number; takeover?: { mode: 'auto' | 'manual'; after_s?: number }; name?: string }
 
 async function roleAt(base: string): Promise<Role | null> {
   try {
@@ -82,9 +82,16 @@ export default function RoleBanner() {
         </p>
       )
     }
+    if (r.role === 'paused') {
+      return (
+        <p className="role-banner fenced" role="alert">
+          <b>This runtime is paused.</b> It does not hold the witness's lease, so it sends nothing, streams no lighting and ignores inputs until it does: {r.paused?.why ?? 'the witness has not granted it'}. It goes on by itself when the lease is held again; its lasers stay disarmed.
+        </p>
+      )
+    }
     if (r.role === 'standby') {
       const heard = r.last_heard_ms_ago == null ? 'has not heard from the primary yet' : `heard from the primary ${(r.last_heard_ms_ago / 1000).toFixed(0)} s ago`
-      const trouble: Record<string, string> = { slow: `The primary is answering but running behind ( ms late): it is not being replaced.`, stalled: 'The primary accepts connections but has stopped answering: waiting a little longer before taking over.', gone: 'Nothing is listening at the primary.', unreachable: 'The network does not reach the primary.' }
+      const trouble: Record<string, string> = { slow: `The primary is answering but running behind (${r.primary_lag_ms ?? '?'} ms late): it is not being replaced.`, stalled: 'The primary accepts connections but has stopped answering: waiting a little longer before taking over.', gone: 'Nothing is listening at the primary.', unreachable: 'The network does not reach the primary.' }
       return (
         <p className={`role-banner standby ${r.stuck || r.primary_health === 'stalled' || r.primary_health === 'gone' ? 'bad' : ''}`} role="status">
           <b>Standby.</b> Following {r.following}: {r.copied_records ?? 0} records copied, {heard}.{' '}

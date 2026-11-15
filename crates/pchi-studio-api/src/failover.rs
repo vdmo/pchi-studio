@@ -71,11 +71,15 @@ pub struct Config {
     pub serve_token: Option<String>,
     /// The `--record` file, so the run goes on being written to it after a takeover.
     pub record: Option<String>,
+    /// The witness that decides who may send, if there is one (see `witness`): a takeover needs its lease.
+    pub witness: Option<crate::witness::Cfg>,
+    /// Where others can reach this standby (`--advertise`): told to the runtime it fences and shown by `GET /primary`.
+    pub advertise: Option<String>,
 }
 
 impl Config {
     pub fn new(primary: &str, name: &str, key: &str) -> Self {
-        Self { primary: primary.into(), name: name.into(), key: key.into(), token: None, takeover_after: Duration::from_secs(6), auto: true, poll_every: Duration::from_millis(1000), db: None, stall_grace: Duration::from_secs(6), poll_timeout: Duration::from_secs(3), governance: None, serve_token: None, record: None }
+        Self { primary: primary.into(), name: name.into(), key: key.into(), token: None, takeover_after: Duration::from_secs(6), auto: true, poll_every: Duration::from_millis(1000), db: None, stall_grace: Duration::from_secs(6), poll_timeout: Duration::from_secs(3), governance: None, serve_token: None, record: None, witness: None, advertise: None }
     }
 }
 
@@ -112,6 +116,8 @@ struct Status {
     /// The primary's own account of the show as of the last answer (see `Show::replicate_json`).
     primary_summary: Value,
     took_over: Option<Value>,
+    /// What the witness last said to a takeover that was refused (empty if there is none or it agreed).
+    witness_note: String,
 }
 
 pub struct Standby {
@@ -356,17 +362,44 @@ impl Standby {
 
     /// Become the running show, from the copy of the log. Fences the primary at once if it is reachable.
     pub async fn take_over(self: &Arc<Self>, why: &str) -> Result<Value, String> {
+        self.take_over_with(why, false).await
+    }
+
+    /// `ignore_witness`: a person who knows the witness is down and the primary is dead takes over without its lease.
+    pub async fn take_over_with(self: &Arc<Self>, why: &str, ignore_witness: bool) -> Result<Value, String> {
         if self.taking.swap(true, Ordering::SeqCst) || self.is_active() {
             return Err("already running the show".into());
         }
-        let result = self.take_over_inner(why).await;
+        let result = self.take_over_inner(why, ignore_witness).await;
         if result.is_err() {
             self.taking.store(false, Ordering::SeqCst);
         }
         result
     }
 
-    async fn take_over_inner(self: &Arc<Self>, why: &str) -> Result<Value, String> {
+    async fn take_over_inner(self: &Arc<Self>, why: &str, ignore_witness: bool) -> Result<Value, String> {
+        // with a witness, nothing starts until it says this runtime is the only one that may send
+        let mut leased: Option<Instant> = None;
+        let mut witness_text = String::new();
+        if let Some(w) = &self.cfg.witness {
+            let sent = Instant::now();
+            let refusal = match crate::witness::claim(w).await {
+                Ok(c) if c.granted => {
+                    leased = Some(sent);
+                    self.status.lock().unwrap().witness_note.clear();
+                    None
+                }
+                Ok(c) => Some(format!("the witness at {} says {} holds the show's lease ({:.0} s left): the primary can still reach the witness, so this standby did not take over", w.addr, c.holder, c.left_ms as f64 / 1000.0)),
+                Err(e) => Some(format!("the witness at {} could not be reached ({e}): taking over without it could put two runtimes on the show, so this standby did not take over", w.addr)),
+            };
+            if let Some(note) = refusal {
+                if !ignore_witness {
+                    self.status.lock().unwrap().witness_note = note.clone();
+                    return Err(note);
+                }
+                witness_text = format!(" Taken over WITHOUT the witness's lease, on a person's word. The witness had said: {note}.");
+            }
+        }
         let _ = self.poll_once().await; // the last of the log, if the primary can still say it
         let (epoch, copied) = {
             let st = self.status.lock().unwrap();
@@ -390,6 +423,11 @@ impl Standby {
         }
         let adoption = self.adopt_receipts(true);
         let (show, router) = (self.activate)(fresh, epoch)?;
+        show.set_advertise(self.cfg.advertise.clone());
+        if let Some(w) = self.cfg.witness.clone().filter(|_| leased.is_some()) {
+            // from now on this runtime holds the lease; a takeover on a person's word without one runs unleased, as that person asked
+            crate::witness::hold(Arc::clone(&show), w, leased);
+        }
         let started = self.started.lock().unwrap().as_ref().map(|h| h(Arc::clone(&show)));
         if let Some(fut) = started {
             fut.await?;
@@ -399,7 +437,7 @@ impl Standby {
             let mut st = self.status.lock().unwrap();
             st.took_over = Some(info.clone());
         }
-        show.receipt("failover.takeover", "ALLOW", &crate::governance::Actor::Person(None), &format!("{} took over the show from {} (takeover {epoch}): {why}.{}", self.cfg.name, self.cfg.primary, adoption.text));
+        show.receipt("failover.takeover", "ALLOW", &crate::governance::Actor::Person(None), &format!("{} took over the show from {} (takeover {epoch}): {why}.{}{}", self.cfg.name, self.cfg.primary, adoption.text, witness_text));
         println!("failover: {} took over as takeover {epoch} in {} ({why}); lasers are disarmed and departments must report READY again", self.cfg.name, info["state"].as_str().unwrap_or("the show"));
         *self.active.lock().unwrap() = Some(router);
         let me = Arc::clone(self);
@@ -548,7 +586,7 @@ impl Standby {
     /// Tell the old primary, for as long as this runs, which takeover it is on, so one that comes back stops at once.
     async fn fence_loop(self: Arc<Self>, epoch: u64) {
         let bearer = self.cfg.token.as_ref().map(|t| format!("Bearer {t}"));
-        let body = json!({"epoch": epoch, "by": self.cfg.name}).to_string();
+        let body = json!({"epoch": epoch, "by": self.cfg.name, "url": self.cfg.advertise}).to_string();
         let mut told = false;
         loop {
             if let Ok((200, v)) = http(&self.cfg.primary, "POST", "/fence", &self.headers(&bearer), Some(&body)).await {
@@ -573,8 +611,9 @@ impl Standby {
         let st = self.status.lock().unwrap();
         let silent = st.last_ok.map(|t| t.elapsed().as_millis() as u64);
         json!({
-            "role": "standby", "name": self.cfg.name, "following": self.cfg.primary, "copied_records": st.copied,
+            "ts": crate::now_ms(), "role": "standby", "name": self.cfg.name, "following": self.cfg.primary, "copied_records": st.copied,
             "primary_epoch": st.primary_epoch, "primary_state": st.primary_state, "primary_fenced": st.primary_fenced,
+            "witness": self.cfg.witness.as_ref().map(|w| json!({"addr": w.addr, "note": st.witness_note})),
             "last_heard_ms_ago": silent, "problem": st.problem, "stuck": st.stuck,
             "primary_lag_ms": st.primary_lag_ms,
             // ok: answering well; slow: answering but its own event loop is running behind; stalled: accepts connections, does not answer; gone: nothing listening; unreachable: the network
@@ -602,6 +641,7 @@ async fn entry(State(sb): State<Arc<Standby>>, req: Request) -> Response {
     let key = req.headers().get("x-pchi-failover-key").and_then(|v| v.to_str().ok()).map(String::from);
     match (method.as_str(), path.as_str()) {
         ("GET", "/role") => (StatusCode::OK, Json(sb.role_json())).into_response(),
+        ("GET", "/primary") => (StatusCode::OK, Json(json!({"primary": sb.cfg.primary, "self": false, "role": "standby", "epoch": sb.role_json()["primary_epoch"], "health": sb.role_json()["primary_health"]}))).into_response(),
         ("GET", "/takeover-check") => {
             let bearer = req.headers().get("authorization").and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")).map(String::from);
             let q_token = req.uri().query().and_then(|q| q.split('&').find_map(|p| p.strip_prefix("token="))).map(String::from);
@@ -614,7 +654,8 @@ async fn entry(State(sb): State<Arc<Standby>>, req: Request) -> Response {
             if key.as_deref() != Some(sb.cfg.key.as_str()) {
                 return (StatusCode::FORBIDDEN, Json(json!({"error": "taking over needs the failover key"}))).into_response();
             }
-            match sb.take_over("a person asked for it").await {
+            let ignore = req.uri().query().is_some_and(|q| q.split('&').any(|p| p == "witness=ignore"));
+            match sb.take_over_with("a person asked for it", ignore).await {
                 Ok(info) => (StatusCode::OK, Json(json!({"took_over": true, "info": info}))).into_response(),
                 Err(e) => (StatusCode::CONFLICT, Json(json!({"error": e}))).into_response(),
             }

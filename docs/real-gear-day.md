@@ -61,6 +61,10 @@ the PA muted before any scene recall. DMX: nothing strobing or moving that you h
 4. Keep the reports: put them in `docs/gear-results/<date>/` with the tool versions.
 5. Say, in the commit message, what was and was not tried. A claim is proven only for the version and set-up you tried.
 
+## If you run a standby: add a failover day
+
+The tools are one half; the other is the second machine. Run `pchi-netcheck` between the real primary, standby and (ideally) witness, and keep its report next to the gear reports. It measures the network delay, loss and clock difference between the machines and times a real takeover that you cause by cutting the primary off; see "A failover day" in `docs/failover.md`. Then run `pchi-gearcheck` once **from the standby's machine** against the same rig: a standby that cannot reach the console is not a standby.
+
 ## What the day will not prove
 
 - A different version of the tool, or a different console surface, may behave differently.

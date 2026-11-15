@@ -112,6 +112,15 @@ struct Cli {
     /// Standby only: the primary's --token, if different from this runtime's own.
     #[arg(long, env = "PCHI_PRIMARY_TOKEN")]
     primary_token: Option<String>,
+    /// HOST:PORT of a witness (pchi-witness): sending becomes a lease it grants. This runtime sends only while it holds the lease and pauses when it cannot prove it does; a standby takes over only when granted it. Needs --failover-key (the witness has the same). See docs/failover.md.
+    #[arg(long, value_name = "HOST:PORT", env = "PCHI_WITNESS", requires = "failover_key")]
+    witness: Option<String>,
+    /// Seconds a lease lasts (2 to 120). A primary that loses the witness pauses after this long; a standby can take over no sooner. Default 6.
+    #[arg(long, default_value_t = 6)]
+    witness_ttl: u64,
+    /// The address other machines reach THIS runtime at (HOST:PORT). Told to the witness and to a runtime this one fences, so GET /primary can say where the show is.
+    #[arg(long, value_name = "HOST:PORT", env = "PCHI_ADVERTISE")]
+    advertise: Option<String>,
 }
 
 #[tokio::main]
@@ -248,6 +257,24 @@ async fn main() -> anyhow::Result<()> {
     if show.failover_enabled() {
         println!("failover: a standby with the failover key may follow this runtime (GET /replicate) and tell it, if it takes over, to stop (POST /fence)");
     }
+    show.set_advertise(cli.advertise.clone());
+    if let Some(w) = witness_cfg(&cli, "primary") {
+        let sent = std::time::Instant::now();
+        match pchi_studio_api::witness::claim(&w).await {
+            Ok(c) if c.granted => {
+                println!("witness: holding the lease at {} (every {} s it is asked again; if it cannot be, this runtime pauses)", w.addr, w.ttl.as_secs_f64() / 4.0);
+                pchi_studio_api::witness::hold(show.clone(), w, Some(sent));
+            }
+            Ok(c) => {
+                eprintln!("witness: {} holds the lease ({:.0} s left): this runtime is PAUSED and sends nothing until it is granted it", c.holder, c.left_ms as f64 / 1000.0);
+                pchi_studio_api::witness::hold(show.clone(), w, None);
+            }
+            Err(e) => {
+                eprintln!("witness: {e}: this runtime is PAUSED and sends nothing until the witness answers");
+                pchi_studio_api::witness::hold(show.clone(), w, None);
+            }
+        }
+    }
     start_inputs(&show, &cli).await?;
     let listener = tokio::net::TcpListener::bind(&cli.bind).await.with_context(|| format!("binding {}", cli.bind))?;
     println!("pchi-studio-api: {} on http://{} (ws://{}/ws), recording to {}",
@@ -264,6 +291,13 @@ async fn main() -> anyhow::Result<()> {
     let origins = allowed_origins(&cli)?;
     axum::serve(listener, pchi_studio_api::with_cors(router_with_token(show, cli.token), origins)).await?;
     Ok(())
+}
+
+/// How this runtime reaches the witness, if `--witness` is given.
+fn witness_cfg(cli: &Cli, name: &str) -> Option<pchi_studio_api::witness::Cfg> {
+    let addr = cli.witness.as_deref().filter(|a| !a.is_empty())?;
+    let key = cli.failover_key.as_deref().filter(|k| !k.is_empty())?;
+    Some(pchi_studio_api::witness::Cfg::new(addr, key, name, cli.advertise.clone().filter(|a| !a.is_empty()), cli.witness_ttl.saturating_mul(1000)))
 }
 
 /// The origins `--allow-origin` lists; `*` is refused.
@@ -381,6 +415,8 @@ async fn run_standby(cli: Cli, primary: String, devices: Option<Vec<rig::Device>
     cfg.db = cli.db.clone();
     cfg.record = cli.record.clone();
     cfg.serve_token = cli.token.clone();
+    cfg.advertise = cli.advertise.clone().filter(|a| !a.is_empty());
+    cfg.witness = witness_cfg(&cli, cli.standby_name.as_deref().unwrap_or("standby"));
     if let Some(dir) = &cli.governance {
         cfg.governance = Some((cli.governance_key.clone().unwrap_or_else(|| format!("{dir}/governance_key.hex")), format!("{dir}/governance_log.jsonl")));
         std::fs::create_dir_all(dir).with_context(|| format!("creating {dir}"))?;
