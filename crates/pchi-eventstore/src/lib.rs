@@ -8,4 +8,4 @@ pub mod replay;
 pub mod store;
 
 pub use replay::{replay_latest, ReplayError, ReplayReport, ReplayStep};
-pub use store::{EventRecord, EventStore, StoreError};
+pub use store::{EventRecord, EventStore, StoreError, Tee};

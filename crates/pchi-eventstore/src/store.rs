@@ -23,8 +23,12 @@ pub struct EventRecord {
     pub payload: Value,
 }
 
+/// Called with every record as it is written (see `EventStore::set_tee`).
+pub type Tee = Box<dyn Fn(&EventRecord) + Send>;
+
 pub struct EventStore {
     conn: Connection,
+    tee: Option<Tee>,
 }
 
 const SCHEMA: &str = "
@@ -41,13 +45,13 @@ CREATE INDEX IF NOT EXISTS events_type ON events(event_type);
 
 impl EventStore {
     pub fn open(path: &str) -> Result<Self> {
-        let s = Self { conn: Connection::open(path)? };
+        let s = Self { conn: Connection::open(path)?, tee: None };
         s.conn.execute_batch(SCHEMA)?;
         Ok(s)
     }
 
     pub fn open_in_memory() -> Result<Self> {
-        let s = Self { conn: Connection::open_in_memory()? };
+        let s = Self { conn: Connection::open_in_memory()?, tee: None };
         s.conn.execute_batch(SCHEMA)?;
         Ok(s)
     }
@@ -57,7 +61,11 @@ impl EventStore {
             "INSERT INTO events (timestamp, source, target, event_type, payload) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![timestamp, source, target, event_type, serde_json::to_string(payload)?],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        let id = self.conn.last_insert_rowid();
+        if let Some(tee) = &self.tee {
+            tee(&EventRecord { id, timestamp, source: source.to_string(), target: target.map(String::from), event_type: event_type.to_string(), payload: payload.clone() });
+        }
+        Ok(id)
     }
 
     /// Every record, oldest first.
@@ -72,6 +80,11 @@ impl EventStore {
             out.push(EventRecord { id, timestamp, source, target, event_type, payload: serde_json::from_str(&payload)? });
         }
         Ok(out)
+    }
+
+    /// Send a copy of every record written from now on to `tee` (a file the run is also written to as it happens, for example).
+    pub fn set_tee(&mut self, tee: Tee) {
+        self.tee = Some(tee);
     }
 
     /// Records after `id` (exclusive), oldest first, at most `limit`: how a standby follows a log.

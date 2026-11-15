@@ -18,6 +18,16 @@ values at that moment, how many cues had gone, and everything that had happened 
 The line above the bar says whether the run **replays exactly**: the recorded inputs are played back through the show (with each live edit applied where it happened) and must
 go where the recording says. A recording that does not replay was edited, or comes from a show that has since changed in a way that matters.
 
+## Written to a file as it happens
+
+```bash
+pchi-studio-api show.pchi --db show.db --record run.jsonl
+```
+
+Every record of the run is appended to `run.jsonl` the moment it is written: one line each, flushed at once and synced to disk every second. If the database is lost, the file is the run, to within the last second. A resumed run starts a complete file (what the database already held is written first). A standby with `--record` writes what it copies, and goes on writing as the show that took over, so the file runs through the takeover as one run.
+
+The file is read by everything that reads a recording: `--replay run.jsonl`, `--rehearse --recording run.jsonl`, and Studio's **Open a recording**. A last line cut off by a crash is dropped; damage anywhere else is an error. If one file holds several runs (it was used for a new run), the latest is read. It holds what the one-file recording holds (see below): treat it like the show file.
+
 ## From the command line
 
 ```bash

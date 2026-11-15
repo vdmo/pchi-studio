@@ -36,8 +36,73 @@ pub fn export(records: &[EventRecord]) -> Result<Value, String> {
     }))
 }
 
-/// Read a recording back into records.
+/// The line-by-line format `--record` writes: a header line, then one record a line, so a run is on disk as it happens.
+pub const LOG_FORMAT: &str = "pchi-runlog/1";
+
+/// Called with every record as it is written.
+pub type Tee = pchi_eventstore::Tee;
+
+fn record_json(r: &EventRecord) -> Value {
+    json!({"id": r.id, "ts": r.timestamp, "source": r.source, "target": r.target, "type": r.event_type, "payload": r.payload})
+}
+
+/// A tee that appends each record, as a line, to `path` (with a header line first if the file is new or empty; then `existing` is written too, so a runtime
+/// that is resuming a run starts a complete file). Each line is flushed as it is written, and the file is synced to disk at most once a second.
+pub fn file_tee(path: &str, existing: &[EventRecord]) -> Result<Tee, String> {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path).map_err(|e| format!("opening {path}: {e}"))?;
+    let fresh = f.metadata().map(|m| m.len() == 0).unwrap_or(true);
+    if fresh {
+        writeln!(f, "{}", json!({"format": LOG_FORMAT})).map_err(|e| format!("writing {path}: {e}"))?;
+        for r in existing {
+            writeln!(f, "{}", record_json(r)).map_err(|e| format!("writing {path}: {e}"))?;
+        }
+        f.flush().and_then(|_| f.sync_data()).map_err(|e| format!("writing {path}: {e}"))?;
+    }
+    let state = std::sync::Mutex::new((f, std::time::Instant::now()));
+    let path = path.to_string();
+    Ok(Box::new(move |r: &EventRecord| {
+        let mut g = state.lock().unwrap();
+        let line = format!("{}\n", record_json(r));
+        if let Err(e) = g.0.write_all(line.as_bytes()).and_then(|_| g.0.flush()) {
+            eprintln!("warning: could not write the record to {path}: {e}");
+            return;
+        }
+        if g.1.elapsed() >= std::time::Duration::from_secs(1) {
+            let _ = g.0.sync_data();
+            g.1 = std::time::Instant::now();
+        }
+    }))
+}
+
+/// Read a `--record` file: the latest run in it. A last line that was cut off (the runtime died mid-write) is dropped, not an error.
+fn parse_log(text: &str) -> Result<Vec<EventRecord>, String> {
+    let mut lines = text.lines().filter(|l| !l.trim().is_empty());
+    let head = lines.next().ok_or("the file is empty")?;
+    if serde_json::from_str::<Value>(head).map_err(|e| format!("not a recording: {e}"))?["format"] != json!(LOG_FORMAT) {
+        return Err(format!("not a recording: the first line should say \"format\": \"{LOG_FORMAT}\""));
+    }
+    let rest: Vec<&str> = lines.collect();
+    let mut out = Vec::with_capacity(rest.len());
+    for (i, l) in rest.iter().enumerate() {
+        match serde_json::from_str::<Value>(l) {
+            Ok(r) => {
+                let (Some(ts), Some(kind)) = (r["ts"].as_i64(), r["type"].as_str()) else { return Err(format!("line {} has no time or type", i + 2)) };
+                out.push(EventRecord { id: r["id"].as_i64().unwrap_or(i as i64 + 1), timestamp: ts, source: r["source"].as_str().unwrap_or("").to_string(), target: r["target"].as_str().map(String::from), event_type: kind.to_string(), payload: r["payload"].clone() });
+            }
+            Err(_) if i + 1 == rest.len() => {} // cut off mid-write
+            Err(e) => return Err(format!("line {} is not a record: {e}", i + 2)),
+        }
+    }
+    let start = out.iter().rposition(|r| r.event_type == recorder::RUN_START).ok_or("not a recording: it holds no run")?;
+    Ok(out.split_off(start))
+}
+
+/// Read a recording back into records: the one-file format `export` writes, or a `--record` file.
 pub fn parse(text: &str) -> Result<Vec<EventRecord>, String> {
+    if text.trim_start().starts_with(&format!("{{\"format\":\"{LOG_FORMAT}\"")) {
+        return parse_log(text);
+    }
     let v: Value = serde_json::from_str(text).map_err(|e| format!("not a recording: {e}"))?;
     if v["format"] != json!(FORMAT) {
         return Err(format!("not a recording: it should say \"format\": \"{FORMAT}\""));

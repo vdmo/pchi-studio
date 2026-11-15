@@ -39,6 +39,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tower::ServiceExt;
 
+/// A primary whose event loop runs this far behind its own timers is called slow.
+pub const SLOW_MS: u64 = 250;
+
 /// How the standby follows and when it takes over.
 #[derive(Clone)]
 pub struct Config {
@@ -58,17 +61,30 @@ pub struct Config {
     pub poll_every: Duration,
     /// Where the standby's copy of the log is kept (`None`: in memory).
     pub db: Option<String>,
+    /// A primary that accepts connections but does not answer is alive and stuck, not gone: it gets this much longer before a takeover.
+    pub stall_grace: Duration,
+    /// How long one request to the primary may take before it counts as not answered.
+    pub poll_timeout: Duration,
+    /// This standby's governance key file and log file (the same paths it runs with): to continue the primary's signed record when it takes over.
+    pub governance: Option<(String, String)>,
+    /// The token this standby's own address asks for (`GET /takeover-check` needs it when set).
+    pub serve_token: Option<String>,
+    /// The `--record` file, so the run goes on being written to it after a takeover.
+    pub record: Option<String>,
 }
 
 impl Config {
     pub fn new(primary: &str, name: &str, key: &str) -> Self {
-        Self { primary: primary.into(), name: name.into(), key: key.into(), token: None, takeover_after: Duration::from_secs(6), auto: true, poll_every: Duration::from_millis(1000), db: None }
+        Self { primary: primary.into(), name: name.into(), key: key.into(), token: None, takeover_after: Duration::from_secs(6), auto: true, poll_every: Duration::from_millis(1000), db: None, stall_grace: Duration::from_secs(6), poll_timeout: Duration::from_secs(3), governance: None, serve_token: None, record: None }
     }
 }
 
 /// Builds the running show from the standby's copy of the log: given a store holding the copy and the takeover number, it returns the
 /// show (resumed, configured as the primary was) and the router to serve it. Supplied by `main`, which knows the command line.
 pub type Activate = Box<dyn Fn(EventStore, u64) -> Result<(Arc<Show>, Router), String> + Send + Sync>;
+
+/// Builds the show a takeover would run, from a copy of the log, with sending off and nothing configured: to look at, not to run. Supplied by `main`.
+pub type Probe = Box<dyn Fn(EventStore) -> Result<Arc<Show>, String> + Send + Sync>;
 
 /// Runs once after taking over, for what needs waiting on (opening the inputs).
 pub type Started = Box<dyn Fn(Arc<Show>) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>> + Send + Sync>;
@@ -84,7 +100,17 @@ struct Status {
     primary_epoch: u64,
     primary_state: String,
     primary_fenced: bool,
+    /// How the last failed request failed: gone, stalled, unreachable, other (empty after a good answer).
+    last_kind: &'static str,
+    /// How far behind its own timers the primary's event loop was running, as of its last answer (ms).
+    primary_lag_ms: u64,
     copied: u64,
+    /// The primary's signed receipts as far as they have been copied, and the key it signs with.
+    receipts: Vec<Value>,
+    primary_vk: Option<String>,
+    receipts_note: String,
+    /// The primary's own account of the show as of the last answer (see `Show::replicate_json`).
+    primary_summary: Value,
     took_over: Option<Value>,
 }
 
@@ -96,28 +122,55 @@ pub struct Standby {
     activate: Activate,
     taking: AtomicBool,
     started: Mutex<Option<Started>>,
+    probe: Mutex<Option<Probe>>,
     stop: AtomicBool,
 }
 
-/// One HTTP request to a runtime, over a plain socket. `Err` means it could not be reached or did not answer in time.
+struct Adoption {
+    adopted: usize,
+    text: String,
+}
+
+/// One HTTP request to a runtime, over a plain socket. `Err` means it could not be reached or did not answer in time. The text starts with what kind of
+/// trouble it was, because a standby treats them differently: `refused:` (nothing is listening, or it hung up: the process is gone), `unreachable:` (the
+/// network did not carry it) and `stalled:` (it accepted the connection and then did not answer: alive and stuck).
 pub async fn http(addr: &str, method: &str, path: &str, headers: &[(&str, &str)], body: Option<&str>) -> Result<(u16, Value), String> {
+    http_t(addr, method, path, headers, body, Duration::from_secs(3)).await
+}
+
+pub async fn http_t(addr: &str, method: &str, path: &str, headers: &[(&str, &str)], body: Option<&str>, timeout: Duration) -> Result<(u16, Value), String> {
+    let began = Instant::now();
+    let mut s = match tokio::time::timeout(timeout, TcpStream::connect(addr)).await {
+        Err(_) => return Err(format!("unreachable: {addr} did not accept the connection in time")),
+        Ok(Err(e)) if matches!(e.kind(), std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted) => return Err(format!("refused: nothing is listening at {addr} ({e})")),
+        Ok(Err(e)) => return Err(format!("unreachable: cannot reach {addr}: {e}")),
+        Ok(Ok(s)) => s,
+    };
+    let body = body.unwrap_or("");
+    let mut head = format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", body.len());
+    for (k, v) in headers {
+        head += &format!("{k}: {v}\r\n");
+    }
+    let rest_of_time = timeout.saturating_sub(began.elapsed());
     let io = async {
-        let mut s = TcpStream::connect(addr).await.map_err(|e| format!("cannot reach {addr}: {e}"))?;
-        let body = body.unwrap_or("");
-        let mut head = format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", body.len());
-        for (k, v) in headers {
-            head += &format!("{k}: {v}\r\n");
-        }
-        s.write_all(format!("{head}\r\n{body}").as_bytes()).await.map_err(|e| e.to_string())?;
+        s.write_all(format!("{head}\r\n{body}").as_bytes()).await.map_err(|e| format!("refused: {addr} hung up ({e})"))?;
         let mut out = Vec::new();
-        s.read_to_end(&mut out).await.map_err(|e| e.to_string())?;
+        s.read_to_end(&mut out).await.map_err(|e| format!("refused: {addr} hung up ({e})"))?;
+        if out.is_empty() {
+            return Err(format!("refused: {addr} closed the connection without answering"));
+        }
         let text = String::from_utf8_lossy(&out).into_owned();
-        let status: u16 = text.split_whitespace().nth(1).and_then(|s| s.parse().ok()).ok_or("not an HTTP answer")?;
+        let status: u16 = text.split_whitespace().nth(1).and_then(|s| s.parse().ok()).ok_or_else(|| "other: not an HTTP answer".to_string())?;
         let (h, rest) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
         let rest = if h.to_ascii_lowercase().contains("transfer-encoding: chunked") { crate::mcp::dechunk(rest) } else { rest.to_string() };
         Ok::<_, String>((status, serde_json::from_str(rest.trim()).unwrap_or(Value::Null)))
     };
-    tokio::time::timeout(Duration::from_secs(3), io).await.map_err(|_| format!("{addr} did not answer in time"))?
+    tokio::time::timeout(rest_of_time, io).await.map_err(|_| format!("stalled: {addr} accepted the connection but did not answer in time"))?
+}
+
+/// What kind of trouble a failed request was (see `http`).
+fn kind_of(err: &str) -> &'static str {
+    if err.starts_with("refused:") { "gone" } else if err.starts_with("stalled:") { "stalled" } else if err.starts_with("unreachable:") { "unreachable" } else { "other" }
 }
 
 fn copy_into(from: &EventStore, to: &EventStore) -> Result<(), String> {
@@ -129,7 +182,19 @@ fn copy_into(from: &EventStore, to: &EventStore) -> Result<(), String> {
 
 impl Standby {
     pub fn new(cfg: Config, store: EventStore, activate: Activate) -> Arc<Self> {
-        Arc::new(Self { cfg, store: Mutex::new(store), status: Mutex::new(Status::default()), active: Mutex::new(None), activate, taking: AtomicBool::new(false), started: Mutex::new(None), stop: AtomicBool::new(false) })
+        let mut status = Status::default();
+        if let Some((_, log)) = &cfg.governance {
+            // what an earlier run of this standby had already copied
+            if let Ok(text) = std::fs::read_to_string(format!("{log}.primary")) {
+                status.receipts = text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).collect();
+            }
+        }
+        Arc::new(Self { cfg, store: Mutex::new(store), status: Mutex::new(status), active: Mutex::new(None), activate, taking: AtomicBool::new(false), started: Mutex::new(None), probe: Mutex::new(None), stop: AtomicBool::new(false) })
+    }
+
+    /// How to build a takeover for a rehearsal (see `rehearse_takeover`).
+    pub fn set_probe(&self, p: Probe) {
+        *self.probe.lock().unwrap() = Some(p);
     }
 
     /// What to do once this standby is running the show (open the inputs).
@@ -139,6 +204,11 @@ impl Standby {
 
     pub fn is_active(&self) -> bool {
         self.active.lock().unwrap().is_some()
+    }
+
+    /// How many of the primary's signed receipts this standby holds.
+    pub fn receipts_copied(&self) -> usize {
+        self.status.lock().unwrap().receipts.len()
     }
 
     /// How many records of the primary's log this standby holds.
@@ -163,12 +233,14 @@ impl Standby {
                 let after = s.last_id().map_err(|e| e.to_string())?;
                 (after, s.timestamp_of(after).map_err(|e| e.to_string())?)
             };
-            let path = format!("/replicate?after={after}{}", last_ts.map(|t| format!("&last_ts={t}")).unwrap_or_default());
-            let res = http(&self.cfg.primary, "GET", &path, &self.headers(&bearer), None).await;
+            let have = self.status.lock().unwrap().receipts.len();
+            let path = format!("/replicate?after={after}&receipts_after={have}{}", last_ts.map(|t| format!("&last_ts={t}")).unwrap_or_default());
+            let res = http_t(&self.cfg.primary, "GET", &path, &self.headers(&bearer), None, self.cfg.poll_timeout).await;
             let (code, v) = match res {
                 Ok(x) => x,
                 Err(e) => {
                     let mut st = self.status.lock().unwrap();
+                    st.last_kind = kind_of(&e);
                     if !st.stuck {
                         st.problem = Some(e.clone()); // a refusal stays the reason until the primary answers properly
                     }
@@ -204,9 +276,36 @@ impl Standby {
                 }
             }
             let mut st = self.status.lock().unwrap();
+            // the primary's signed receipts: if it has fewer than we hold, it is a different record (a fresh run): start the copy again
+            if v["receipts_total"].as_u64().is_some_and(|n| (n as usize) < st.receipts.len()) {
+                st.receipts.clear();
+                st.receipts_note.clear();
+                if let Some((_, log)) = &self.cfg.governance {
+                    let _ = std::fs::remove_file(format!("{log}.primary"));
+                }
+            }
+            // kept only while each one follows the one before
+            for r in v["receipts"].as_array().into_iter().flatten() {
+                let parent = st.receipts.last().and_then(|l| l["decision_hash"].as_str());
+                if r["parent_decision_hash"].as_str() != parent {
+                    st.receipts_note = "the primary's receipts did not follow one another when copied".into();
+                    break;
+                }
+                st.receipts.push(r.clone());
+                if let Some((_, log)) = &self.cfg.governance {
+                    use std::io::Write;
+                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(format!("{log}.primary")) {
+                        let _ = writeln!(f, "{r}");
+                    }
+                }
+            }
+            st.primary_vk = v["verifying_key"].as_str().map(String::from);
+            st.primary_summary = v["summary"].clone();
             st.copied += recs.len() as u64;
             st.last_ok = Some(Instant::now());
             st.stuck = false;
+            st.last_kind = "";
+            st.primary_lag_ms = v["lag_ms"].as_u64().unwrap_or(0);
             st.problem = None;
             st.primary_epoch = v["epoch"].as_u64().unwrap_or(0);
             st.primary_state = v["state"].as_str().unwrap_or("").to_string();
@@ -229,16 +328,25 @@ impl Standby {
             if self.poll_once().await.is_ok() {
                 continue;
             }
-            let (silent, stuck, has_run) = {
+            let (silent, stuck, has_run, kind) = {
                 let st = self.status.lock().unwrap();
-                (st.last_ok.map(|t| t.elapsed()), st.stuck, st.copied > 0)
+                (st.last_ok.map(|t| t.elapsed()), st.stuck, st.copied > 0, st.last_kind)
             };
             // a standby that was refused does not take over: that is a mistake to fix, not a dead primary
             if stuck || !has_run || !self.cfg.auto {
                 continue;
             }
-            if silent.is_some_and(|s| s >= self.cfg.takeover_after) {
-                let why = format!("the primary at {} was silent for {:.0} s", self.cfg.primary, silent.unwrap().as_secs_f64());
+            // a primary that still accepts connections but does not answer is stuck, not gone: it is given longer, since taking over from a runtime that is only
+            // busy is how two runtimes end up sending at once
+            let limit = if kind == "stalled" { self.cfg.takeover_after + self.cfg.stall_grace } else { self.cfg.takeover_after };
+            if silent.is_some_and(|s| s >= limit) {
+                let how = match kind {
+                    "stalled" => " (it accepted connections but stopped answering)",
+                    "gone" => " (nothing was listening)",
+                    "unreachable" => " (the network did not reach it)",
+                    _ => "",
+                };
+                let why = format!("the primary at {} was silent for {:.0} s{how}", self.cfg.primary, silent.unwrap().as_secs_f64());
                 if let Err(e) = self.take_over(&why).await {
                     self.status.lock().unwrap().problem = Some(format!("could not take over: {e}"));
                 }
@@ -265,7 +373,7 @@ impl Standby {
             (st.primary_epoch + 1, st.copied)
         };
         // the show gets its own store, so a refusal leaves the copy untouched for another try
-        let fresh = match &self.cfg.db {
+        let mut fresh = match &self.cfg.db {
             Some(p) => EventStore::open(p).map_err(|e| e.to_string())?,
             None => {
                 let s = EventStore::open_in_memory().map_err(|e| e.to_string())?;
@@ -276,22 +384,165 @@ impl Standby {
         if fresh.all().map_err(|e| e.to_string())?.iter().all(|r| r.event_type != recorder::RUN_START) {
             return Err("nothing has been copied from the primary yet: there is no run to take over".into());
         }
+        if let Some(path) = &self.cfg.record {
+            // the file already holds everything copied so far; from here the show writes to it
+            fresh.set_tee(crate::recording::file_tee(path, &[])?);
+        }
+        let adoption = self.adopt_receipts(true);
         let (show, router) = (self.activate)(fresh, epoch)?;
         let started = self.started.lock().unwrap().as_ref().map(|h| h(Arc::clone(&show)));
         if let Some(fut) = started {
             fut.await?;
         }
-        let info = json!({"epoch": epoch, "why": why, "copied_records": copied, "primary": self.cfg.primary, "state": show.current_state()});
+        let info = json!({"epoch": epoch, "why": why, "copied_records": copied, "primary": self.cfg.primary, "state": show.current_state(), "receipts_adopted": adoption.adopted, "receipts": adoption.text});
         {
             let mut st = self.status.lock().unwrap();
             st.took_over = Some(info.clone());
         }
-        show.receipt("failover.takeover", "ALLOW", &crate::governance::Actor::Person(None), &format!("{} took over the show from {} (takeover {epoch}): {why}", self.cfg.name, self.cfg.primary));
+        show.receipt("failover.takeover", "ALLOW", &crate::governance::Actor::Person(None), &format!("{} took over the show from {} (takeover {epoch}): {why}.{}", self.cfg.name, self.cfg.primary, adoption.text));
         println!("failover: {} took over as takeover {epoch} in {} ({why}); lasers are disarmed and departments must report READY again", self.cfg.name, info["state"].as_str().unwrap_or("the show"));
         *self.active.lock().unwrap() = Some(router);
         let me = Arc::clone(self);
         tokio::spawn(async move { me.fence_loop(epoch).await });
         Ok(info)
+    }
+
+    /// Make the primary's signed receipts the start of this runtime's own log, so the record goes on as one chain that one verifying key checks. That works only
+    /// with the same signing key on both machines and a governance log here that is still empty; otherwise this runtime starts its own chain and the takeover
+    /// receipt says which of the primary's receipts it follows, so a reader can join the two by hand.
+    fn adopt_receipts(&self, write: bool) -> Adoption {
+        use primeswarm_pchi::governance::{verify_receipt, GovernanceReceipt};
+        let (receipts, vk) = {
+            let st = self.status.lock().unwrap();
+            (st.receipts.clone(), st.primary_vk.clone())
+        };
+        let Some((key, log)) = &self.cfg.governance else { return Adoption { adopted: 0, text: String::new() } };
+        let Some(tail) = receipts.last().and_then(|r| r["decision_hash"].as_str()) else { return Adoption { adopted: 0, text: " The primary had written no signed receipts.".into() } };
+        let follows = format!(" This runtime's own record follows the primary's receipt {tail} (primary verifying key {}).", vk.as_deref().unwrap_or("unknown"));
+        let separate = |why: &str| Adoption { adopted: 0, text: format!(" The primary's signed receipts were not adopted: {why}.{follows}") };
+        if std::fs::metadata(log).map(|m| m.len() > 0).unwrap_or(false) {
+            return separate("this runtime's own governance log already holds receipts, so its chain stays separate");
+        }
+        let probe = std::env::temp_dir().join(format!("pchi-vk-probe-{}-{}", std::process::id(), tail.chars().take(8).collect::<String>()));
+        let own = primeswarm_pchi::GovernanceLog::open(key, &probe.to_string_lossy());
+        let _ = std::fs::remove_file(&probe);
+        let own_vk = match own {
+            Ok(l) => l.verifying_key_hex(),
+            Err(e) => return separate(&format!("this runtime's signing key could not be read ({e})")),
+        };
+        if vk.as_deref() != Some(own_vk.as_str()) {
+            return separate("this runtime signs with a different key than the primary: use the same --governance-key file on both to continue one chain");
+        }
+        let mut parent: Option<String> = None;
+        let mut lines = String::new();
+        for r in &receipts {
+            let Ok(rec) = serde_json::from_value::<GovernanceReceipt>(r.clone()) else { return separate("a copied receipt could not be read") };
+            if rec.parent_decision_hash != parent || !verify_receipt(&rec, &own_vk) {
+                return separate("the copied receipts did not verify");
+            }
+            parent = Some(rec.decision_hash.clone());
+            lines += &format!("{r}\n");
+        }
+        if !write {
+            return Adoption { adopted: receipts.len(), text: format!(" The primary's {} signed receipts would be adopted: the record would go on as one chain.", receipts.len()) };
+        }
+        if let Some(dir) = std::path::Path::new(log).parent().filter(|p| !p.as_os_str().is_empty()) {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Err(e) = std::fs::write(log, lines) {
+            return separate(&format!("the log could not be written ({e})"));
+        }
+        Adoption { adopted: receipts.len(), text: format!(" The primary's {} signed receipts were adopted: the record goes on as one chain.", receipts.len()) }
+    }
+
+    /// Rehearse a takeover now, changing nothing: copy the last of the log, build the show a takeover would run (sending off, nothing configured, no inputs
+    /// opened, no fence sent), and compare it with the primary's own account of the show. Says whether a takeover now would carry the show on, what it would
+    /// skip, and how the signed record would continue. The rehearsal show is stopped before it returns.
+    pub async fn rehearse_takeover(&self) -> Value {
+        let began = Instant::now();
+        let reached = self.poll_once().await.is_ok();
+        let (primary, health, heard, copied, stuck) = {
+            let st = self.status.lock().unwrap();
+            (st.primary_summary.clone(), st.last_kind, st.last_ok.map(|t| t.elapsed().as_millis() as u64), st.copied, st.stuck)
+        };
+        let mut problems: Vec<String> = Vec::new();
+        let mut notes: Vec<String> = Vec::new();
+        if stuck {
+            problems.push(self.status.lock().unwrap().problem.clone().unwrap_or_else(|| "the primary refused this standby".into()));
+        } else if copied == 0 {
+            problems.push("nothing has been copied from the primary yet".into());
+        }
+        if !reached && !stuck {
+            notes.push(format!("the primary did not answer just now ({}): this compares with what it said the last time{}", if health.is_empty() { "unknown" } else { health }, heard.map(|h| format!(", {:.0} s ago", h as f64 / 1000.0)).unwrap_or_default()));
+        }
+        let mut carried = Value::Null;
+        let mut skipped: Vec<String> = Vec::new();
+        let mut took_ms = 0u64;
+        if problems.is_empty() {
+            let copy = EventStore::open_in_memory().map_err(|e| e.to_string()).and_then(|s| copy_into(&self.store.lock().unwrap(), &s).map(|_| s));
+            let probe = self.probe.lock().unwrap();
+            match (copy, probe.as_ref()) {
+                (Err(e), _) => problems.push(format!("the copy could not be read: {e}")),
+                (_, None) => problems.push("this standby was not set up for rehearsals".into()),
+                (Ok(store), Some(build)) => {
+                    let t = Instant::now();
+                    match build(store) {
+                        Err(e) => problems.push(format!("a takeover would be refused: {e}")),
+                        Ok(show) => {
+                            took_ms = t.elapsed().as_millis() as u64;
+                            let snap = show.snapshot();
+                            let polls: Vec<Value> = show.polls_json().as_array().cloned().unwrap_or_default();
+                            let pending = show.proposals().as_array().map_or(0, |a| a.iter().filter(|p| p["status"] == "pending").count());
+                            carried = json!({"state": snap["state"], "context": snap["context"], "polls": polls, "proposals_pending": pending, "undo_depth": snap["undo_depth"]});
+                            skipped = snap["resumed"]["skipped_cues"].as_array().into_iter().flatten().filter_map(|c| c.as_str().map(String::from)).collect();
+                            if primary.is_object() {
+                                let mut diff = |what: &str, mine: &Value, theirs: &Value| {
+                                    if mine != theirs {
+                                        problems.push(format!("{what} would differ: a takeover would have {mine}, the primary has {theirs}"));
+                                    }
+                                };
+                                diff("the scene", &snap["state"], &primary["state"]);
+                                diff("the context", &snap["context"], &primary["context"]);
+                                diff("the show's definition", &json!(primeswarm_pchi::governance::hash_state(&snap["definition"])), &primary["definition_hash"]);
+                                diff("the undo list", &snap["undo_depth"], &primary["undo_depth"]);
+                                diff("the waiting proposals", &json!(pending), &primary["proposals_pending"]);
+                                for t in primary["polls"].as_array().into_iter().flatten() {
+                                    let mine = polls.iter().find(|p| p["id"] == t["id"]);
+                                    match mine {
+                                        None => problems.push(format!("the poll '{}' would be missing", t["id"].as_str().unwrap_or(""))),
+                                        Some(m) if m["open"] != t["open"] => problems.push(format!("the poll '{}' would be {} instead of {}", t["id"].as_str().unwrap_or(""), if m["open"] == json!(true) { "open" } else { "closed" }, if t["open"] == json!(true) { "open" } else { "closed" })),
+                                        Some(m) if m["total"] != t["total"] => notes.push(format!("the poll '{}' would have {} votes, the primary has {}: votes in the last half second are written to the log in batches", t["id"].as_str().unwrap_or(""), m["total"], t["total"])),
+                                        _ => {}
+                                    }
+                                }
+                            } else {
+                                notes.push("the primary has not given an account of itself to compare with".into());
+                            }
+                            // retire the rehearsal show: its timers do nothing from here
+                            show.fence(u64::MAX / 2, "rehearsal");
+                        }
+                    }
+                }
+            }
+        }
+        let adoption = self.adopt_receipts(false);
+        if !adoption.text.trim().is_empty() {
+            notes.push(adoption.text.trim().to_string());
+        }
+        if !skipped.is_empty() {
+            notes.push(format!("a takeover now would skip {} cue(s) that are already due: {}", skipped.len(), skipped.join(", ")));
+        }
+        if matches!(health, "stalled" | "gone" | "unreachable") {
+            notes.push("the primary is not answering: a takeover may already be under way".into());
+        }
+        notes.push("not carried over in any case: signed-in sessions (people sign in again), lasers (they start disarmed), departments' READY reports (they report again)".into());
+        let ready = problems.is_empty();
+        json!({
+            "ready": ready,
+            "verdict": if ready { format!("ready: a takeover now would carry the show on from {}", carried["state"].as_str().unwrap_or("where it is")) } else { format!("NOT ready: {}", problems[0]) },
+            "problems": problems, "notes": notes, "carried": carried, "skipped_cues": skipped,
+            "build_ms": took_ms, "took_ms": began.elapsed().as_millis() as u64, "records_copied": copied, "primary_health": health,
+        })
     }
 
     /// Tell the old primary, for as long as this runs, which takeover it is on, so one that comes back stops at once.
@@ -325,6 +576,9 @@ impl Standby {
             "role": "standby", "name": self.cfg.name, "following": self.cfg.primary, "copied_records": st.copied,
             "primary_epoch": st.primary_epoch, "primary_state": st.primary_state, "primary_fenced": st.primary_fenced,
             "last_heard_ms_ago": silent, "problem": st.problem, "stuck": st.stuck,
+            "primary_lag_ms": st.primary_lag_ms,
+            // ok: answering well; slow: answering but its own event loop is running behind; stalled: accepts connections, does not answer; gone: nothing listening; unreachable: the network
+            "primary_health": if st.last_kind.is_empty() { if st.last_ok.is_none() { "unknown" } else if st.primary_lag_ms >= SLOW_MS { "slow" } else { "ok" } } else { st.last_kind },
             "takeover": if self.cfg.auto { json!({"mode": "auto", "after_s": self.cfg.takeover_after.as_secs_f64()}) } else { json!({"mode": "manual"}) },
             "ready": st.copied > 0 && !st.stuck,
         })
@@ -348,6 +602,14 @@ async fn entry(State(sb): State<Arc<Standby>>, req: Request) -> Response {
     let key = req.headers().get("x-pchi-failover-key").and_then(|v| v.to_str().ok()).map(String::from);
     match (method.as_str(), path.as_str()) {
         ("GET", "/role") => (StatusCode::OK, Json(sb.role_json())).into_response(),
+        ("GET", "/takeover-check") => {
+            let bearer = req.headers().get("authorization").and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")).map(String::from);
+            let q_token = req.uri().query().and_then(|q| q.split('&').find_map(|p| p.strip_prefix("token="))).map(String::from);
+            if sb.cfg.serve_token.as_deref().is_some_and(|t| bearer.as_deref() != Some(t) && q_token.as_deref() != Some(t)) {
+                return (StatusCode::UNAUTHORIZED, Json(json!({"error": "token required"}))).into_response();
+            }
+            (StatusCode::OK, Json(sb.rehearse_takeover().await)).into_response()
+        }
         ("POST", "/takeover") => {
             if key.as_deref() != Some(sb.cfg.key.as_str()) {
                 return (StatusCode::FORBIDDEN, Json(json!({"error": "taking over needs the failover key"}))).into_response();
@@ -374,6 +636,16 @@ pub fn merge_rig(logged: Option<Vec<rig::Device>>, from_file: Option<Vec<rig::De
         }
         (None, f) => f,
     }
+}
+
+/// The probe `main` hands to a standby: resume from the copy, sending off, nothing else.
+pub fn probe(file_devices: Option<Vec<rig::Device>>) -> Probe {
+    Box::new(move |store| {
+        let records = store.all().map_err(|e| e.to_string())?;
+        let (chart, logged) = Show::logged_show(&records)?;
+        let output = merge_rig(logged, file_devices.clone()).map(|d| crate::output::Output::new(d, false));
+        Show::resume(chart, store, output).map(|(show, _)| show)
+    })
 }
 
 /// Make the activation `main` hands to a standby: resume from the copy, with the rig as the log last had it.

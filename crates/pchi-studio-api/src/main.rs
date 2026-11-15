@@ -73,6 +73,9 @@ struct Cli {
     /// Don't run: play this edited show file against the run recorded in --db and print what would differ (path, cues that would be cut off, timing). Needs no gear.
     #[arg(long, value_name = "FILE")]
     rehearse: Option<String>,
+    /// Write every record of the run to this file as it happens (one line each, flushed at once, synced to disk every second), so the run survives the loss of the database. A resumed run starts a complete file. Read it back with --replay, --rehearse --recording, or Studio's Replay. See docs/replay.md.
+    #[arg(long, value_name = "FILE", env = "PCHI_RECORD")]
+    record: Option<String>,
     /// Write the latest run in --db as a recording file (a single JSON file you can keep, send, replay and open in Studio) and exit. See docs/replay.md.
     #[arg(long, value_name = "FILE")]
     export_run: Option<String>,
@@ -97,6 +100,9 @@ struct Cli {
     /// Standby only: seconds of silence from the primary before an auto takeover (2 to 600). Default 6.
     #[arg(long, default_value_t = 6)]
     takeover_after: u64,
+    /// Standby only: extra seconds to wait before taking over from a primary that still accepts connections but has stopped answering (alive and stuck, not gone). Default: as long as --takeover-after again. 0 treats it like a dead one.
+    #[arg(long)]
+    stall_grace: Option<u64>,
     /// Standby only: the name the primary's record shows for it. Default "standby".
     #[arg(long)]
     standby_name: Option<String>,
@@ -183,10 +189,16 @@ async fn main() -> anyhow::Result<()> {
     let (chart, devices) = rig::load(&std::fs::read_to_string(&file).with_context(|| format!("reading {file}"))?)
         .map_err(anyhow::Error::msg)
         .with_context(|| format!("parsing {file}"))?;
-    let store = match &cli.db {
+    let mut store = match &cli.db {
         Some(p) => EventStore::open(p).with_context(|| format!("opening {p}"))?,
         None => EventStore::open_in_memory()?,
     };
+    if let Some(path) = &cli.record {
+        if cli.rehearse.is_none() {
+            store.set_tee(pchi_studio_api::recording::file_tee(path, &store.all()?).map_err(anyhow::Error::msg)?);
+            println!("recording: every record of the run is written to {path} as it happens");
+        }
+    }
     if let Some(cand) = &cli.rehearse {
         let (cchart, cdev) = rig::load(&std::fs::read_to_string(cand).with_context(|| format!("reading {cand}"))?).map_err(anyhow::Error::msg).with_context(|| format!("parsing {cand}"))?;
         let dev = cdev.or(devices).unwrap_or_default();
@@ -365,11 +377,19 @@ async fn run_standby(cli: Cli, primary: String, devices: Option<Vec<rig::Device>
         other => anyhow::bail!("--takeover is auto or manual, not '{other}'"),
     };
     cfg.takeover_after = std::time::Duration::from_secs(cli.takeover_after.clamp(2, 600));
+    cfg.stall_grace = std::time::Duration::from_secs(cli.stall_grace.unwrap_or(cli.takeover_after).clamp(0, 600));
     cfg.db = cli.db.clone();
+    cfg.record = cli.record.clone();
+    cfg.serve_token = cli.token.clone();
+    if let Some(dir) = &cli.governance {
+        cfg.governance = Some((cli.governance_key.clone().unwrap_or_else(|| format!("{dir}/governance_key.hex")), format!("{dir}/governance_log.jsonl")));
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {dir}"))?;
+    }
     let c2 = cli.clone();
     let configure_fn: Box<dyn Fn(&std::sync::Arc<Show>) -> Result<(), String> + Send + Sync> = Box::new(move |show| configure(show, &c2, "took over as the standby").map_err(|e| format!("{e:#}")));
     let activate = activation(devices.clone(), cli.send, cli.token.clone(), configure_fn);
     let sb = Standby::new(cfg, store, activate);
+    sb.set_probe(pchi_studio_api::failover::probe(devices.clone()));
     let c3 = cli.clone();
     sb.on_active(Box::new(move |show| {
         let (c, show) = (c3.clone(), show.clone());

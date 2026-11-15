@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { chooseRuntime, type RoleInfo } from '@pchi/sdk'
 import { apiBase, backupBase, feedToken, followRuntime, runtimeWhich, setBackupBase, useRuntimeWhich } from './liveFeed'
 
-type Role = { role: 'active' | 'standby' | 'fenced'; epoch?: number; fenced_by?: { by: string; epoch: number } | null; following?: string; copied_records?: number; last_heard_ms_ago?: number | null; problem?: string | null; stuck?: boolean; takeover?: { mode: 'auto' | 'manual'; after_s?: number }; name?: string }
+type Role = { role: 'active' | 'standby' | 'fenced'; epoch?: number; fenced_by?: { by: string; epoch: number } | null; following?: string; copied_records?: number; last_heard_ms_ago?: number | null; problem?: string | null; stuck?: boolean; primary_health?: string; primary_lag_ms?: number; takeover?: { mode: 'auto' | 'manual'; after_s?: number }; name?: string }
 
 async function roleAt(base: string): Promise<Role | null> {
   try {
@@ -26,6 +26,20 @@ export default function RoleBanner() {
   const [backupErr, setBackupErr] = useState('')
   const [moved, setMoved] = useState<string>('')
   const [tick, setTick] = useState(0) // bumped when the backup address changes
+  type Check = { ready: boolean; verdict: string; problems: string[]; notes: string[]; took_ms?: number }
+  const [check, setCheck] = useState<Check | { error: string } | { busy: true } | null>(null)
+  const runCheck = async () => {
+    setCheck({ busy: true })
+    try {
+      const t = feedToken()
+      const res = await fetch(`${backupBase()}/takeover-check`, { headers: t ? { Authorization: `Bearer ${t}` } : {} })
+      const body = await res.json().catch(() => null)
+      if (!res.ok) return setCheck({ error: String(body?.error ?? `The backup said ${res.status}. Is it a standby, started with --allow-origin for this page?`) })
+      setCheck(body as Check)
+    } catch {
+      setCheck({ error: 'Could not reach the backup. Is it running, and started with --allow-origin for this page?' })
+    }
+  }
 
   useEffect(() => {
     let live = true
@@ -70,10 +84,12 @@ export default function RoleBanner() {
     }
     if (r.role === 'standby') {
       const heard = r.last_heard_ms_ago == null ? 'has not heard from the primary yet' : `heard from the primary ${(r.last_heard_ms_ago / 1000).toFixed(0)} s ago`
+      const trouble: Record<string, string> = { slow: `The primary is answering but running behind ( ms late): it is not being replaced.`, stalled: 'The primary accepts connections but has stopped answering: waiting a little longer before taking over.', gone: 'Nothing is listening at the primary.', unreachable: 'The network does not reach the primary.' }
       return (
-        <p className={`role-banner standby ${r.stuck ? 'bad' : ''}`} role="status">
+        <p className={`role-banner standby ${r.stuck || r.primary_health === 'stalled' || r.primary_health === 'gone' ? 'bad' : ''}`} role="status">
           <b>Standby.</b> Following {r.following}: {r.copied_records ?? 0} records copied, {heard}.{' '}
           {r.takeover?.mode === 'auto' ? `Takes over by itself after ${r.takeover.after_s} s of silence.` : 'Takes over only when told (POST /takeover).'}
+          {r.primary_health && trouble[r.primary_health] ? ` ${trouble[r.primary_health]}` : ''}
           {r.problem ? ` ${r.problem}.` : ''}
         </p>
       )
@@ -101,6 +117,21 @@ export default function RoleBanner() {
         </form>
         <p className="muted">If the runtime Studio talks to stops being the one running the show and this one is, Studio moves to it. The backup must be started with <code>--allow-origin</code> for this page's address. Reading from {apiBase()}.</p>
         {backupErr && <p className="rt-err" role="alert">{backupErr}</p>}
+        {backupBase() && (
+          <>
+            <button onClick={runCheck} disabled={!!check && 'busy' in check} title="Ask the standby to rebuild the show from its copy, changing nothing, and compare it with the running show">Rehearse a takeover</button>
+            {check && 'error' in check && <p className="rt-err" role="alert">{check.error}</p>}
+            {check && 'verdict' in check && (
+              <div role="status">
+                <p className={check.ready ? 'rt-ok' : 'rt-err'}>{check.ready ? '✓ ' : '⚠ '}{check.verdict}</p>
+                <ul className="rt-notes">
+                  {check.problems.map((p, i) => <li key={`p${i}`} className="bad">{p}</li>)}
+                  {check.notes.map((n, i) => <li key={`n${i}`}>{n}</li>)}
+                </ul>
+              </div>
+            )}
+          </>
+        )}
       </details>
     </>
   )

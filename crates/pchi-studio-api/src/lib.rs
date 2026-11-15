@@ -173,6 +173,10 @@ pub struct Show {
     /// Votes counted but not yet written to the log: they are written together every half second (a vote a record would be too many).
     vote_buf: Mutex<Vec<(String, String, String)>>,
     vote_flush: std::sync::atomic::AtomicBool,
+    /// How far behind its own timers this runtime's event loop has been running lately: (when, ms), the last minute. A runtime that is alive but starved of
+    /// time (a long calculation, a loaded machine) shows here, and a standby reads it to tell slow from dead.
+    lag: Mutex<std::collections::VecDeque<(i64, u64)>>,
+    lag_watch: std::sync::atomic::AtomicBool,
 }
 
 /// How long a department page may stay silent before it counts as not linked (mirrors the Studio).
@@ -228,6 +232,8 @@ impl Show {
             failover_key: Mutex::new(None),
             vote_buf: Mutex::new(Vec::new()),
             vote_flush: std::sync::atomic::AtomicBool::new(false),
+            lag: Mutex::new(std::collections::VecDeque::new()),
+            lag_watch: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -353,6 +359,36 @@ impl Show {
         Ok((show, info))
     }
 
+    /// Measure, ten times a second, how late a timer fires: the event loop's lag. Runs once; stops by itself when the show is dropped.
+    fn watch_lag(self: &Arc<Self>) {
+        use std::sync::atomic::Ordering;
+        // a show built outside a runtime (a plain test, a tool) has nothing to measure
+        if tokio::runtime::Handle::try_current().is_err() || self.lag_watch.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let weak = Arc::downgrade(self);
+        tokio::spawn(async move {
+            loop {
+                let t = std::time::Instant::now();
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let over = t.elapsed().saturating_sub(Duration::from_millis(100)).as_millis() as u64;
+                let Some(show) = weak.upgrade() else { break };
+                let now = now_ms();
+                let mut q = show.lag.lock().unwrap();
+                q.push_back((now, over));
+                while q.front().is_some_and(|(at, _)| now - at > 60_000) {
+                    q.pop_front();
+                }
+            }
+        });
+    }
+
+    /// The worst lag in the last `window_ms` (0 if the loop has not been measured yet).
+    pub fn lag_ms(&self, window_ms: i64) -> u64 {
+        let now = now_ms();
+        self.lag.lock().unwrap().iter().filter(|(at, _)| now - at <= window_ms).map(|(_, l)| *l).max().unwrap_or(0)
+    }
+
     /// The show a recorded run started with and the rig it last had, read from the log alone (a standby has no other source that
     /// is certain to be current: the show file it was started with may be older than the live edits).
     pub fn logged_show(records: &[pchi_eventstore::EventRecord]) -> Result<(Showchart, Option<Vec<rig::Device>>), String> {
@@ -368,6 +404,7 @@ impl Show {
     /// stops by itself when the show is dropped.
     fn watch_links(self: &Arc<Self>) {
         use std::sync::atomic::Ordering;
+        self.watch_lag();
         if self.output.lock().unwrap().is_none() || self.watching.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -1647,7 +1684,8 @@ impl Show {
     /// Whether this runtime is the one running the show, and which takeover it is on.
     pub fn role_json(&self) -> Value {
         let fenced = self.fenced.lock().unwrap().clone();
-        json!({"role": if fenced.is_some() { "fenced" } else { "active" }, "epoch": self.epoch(), "fenced_by": fenced, "failover": self.failover_enabled(), "ts": now_ms()})
+        json!({"role": if fenced.is_some() { "fenced" } else { "active" }, "epoch": self.epoch(), "fenced_by": fenced, "failover": self.failover_enabled(), "ts": now_ms(),
+               "lag_ms": self.lag_ms(3_000), "lag_worst_ms": self.lag_ms(60_000)})
     }
 
     /// Another runtime (a standby) says it has taken over at `epoch`. If that is newer than this one's, this runtime stops: it
@@ -1685,7 +1723,7 @@ impl Show {
 
     /// The log after record `after`, for a standby. `last_ts` is the timestamp the standby holds for record `after`: if the log
     /// here has a different one, this is not the log the standby has been following and it must start again.
-    pub fn replicate_json(&self, after: i64, last_ts: Option<i64>) -> Result<Value, (u16, String)> {
+    pub fn replicate_json(&self, after: i64, last_ts: Option<i64>, receipts_after: usize) -> Result<Value, (u16, String)> {
         self.flush_votes();
         let g = self.inner.lock().unwrap();
         if after > 0 {
@@ -1697,8 +1735,24 @@ impl Show {
         }
         let recs = g.store.after(after, 500).map_err(|e| (500u16, e.to_string()))?;
         let last = g.store.last_id().map_err(|e| (500u16, e.to_string()))?;
+        // the signed receipts after the ones the standby has: so that, if it takes over, the record can go on as one chain
+        let (receipts, receipts_total, vk) = match self.gov.log.get() {
+            Some(l) => {
+                let all = l.export();
+                let list = all["receipts"].as_array().cloned().unwrap_or_default();
+                (list.iter().skip(receipts_after).take(500).cloned().collect::<Vec<_>>(), list.len(), all["verifying_key"].clone())
+            }
+            None => (Vec::new(), 0, Value::Null),
+        };
         let list: Vec<Value> = recs.iter().map(|r| json!({"id": r.id, "ts": r.timestamp, "source": r.source, "target": r.target, "type": r.event_type, "payload": r.payload})).collect();
-        Ok(json!({"records": list, "last_id": last, "epoch": self.epoch(), "state": g.engine.current_state, "ts": now_ms(), "fenced": self.is_fenced()}))
+        // a short account of the show as it is now, so a standby can check that what it would rebuild matches it
+        let summary = json!({
+            "state": g.engine.current_state, "context": g.engine.context,
+            "definition_hash": primeswarm_pchi::governance::hash_state(&json!(g.engine.chart)),
+            "polls": self.polls_json(), "proposals_pending": self.gov.pending_json().as_array().map_or(0, |a| a.len()), "undo_depth": self.history.lock().unwrap().len(),
+        });
+        Ok(json!({"records": list, "last_id": last, "summary": summary, "epoch": self.epoch(), "state": g.engine.current_state, "ts": now_ms(), "fenced": self.is_fenced(), "lag_ms": self.lag_ms(3_000),
+                "receipts": receipts, "receipts_total": receipts_total, "verifying_key": vk}))
     }
 
     /// Whether a restarted runtime carried on a run (see `resume`).
@@ -2361,7 +2415,8 @@ async fn get_replicate(State(a): State<App>, q: Query<HashMap<String, String>>, 
     }
     let after = q.get("after").and_then(|v| v.parse().ok()).unwrap_or(0i64);
     let last_ts = q.get("last_ts").and_then(|v| v.parse().ok());
-    match a.show.replicate_json(after, last_ts) {
+    let receipts_after = q.get("receipts_after").and_then(|v| v.parse().ok()).unwrap_or(0usize);
+    match a.show.replicate_json(after, last_ts, receipts_after) {
         Ok(v) => (StatusCode::OK, Json(v)),
         Err((code, e)) => (StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR), Json(json!({"error": e}))),
     }
@@ -5446,5 +5501,436 @@ mod tests {
         eprintln!("longest silence while a key was hashed: {worst:?}");
         assert_eq!(code, 200, "{v}");
         assert!(worst < Duration::from_millis(700), "the runtime went silent for {worst:?} while a key was being checked");
+    }
+
+    // ---- slow, stuck and gone are different ----
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn a_runtime_that_was_starved_of_time_says_how_far_behind_it_ran() {
+        let show = Show::start(quick(), EventStore::open_in_memory().unwrap()).unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await; // the ticker is running
+        assert!(show.lag_ms(3_000) < 100, "an idle runtime is on time: {}", show.lag_ms(3_000));
+        // a long calculation on the one worker thread: the ticker cannot run until it is over
+        tokio::spawn(async { std::thread::sleep(Duration::from_millis(700)) }).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let behind = show.lag_ms(3_000);
+        assert!(behind >= 400, "the 700 ms stall should show as lag, saw {behind} ms");
+        assert_eq!(show.role_json()["lag_ms"].as_u64().unwrap(), behind);
+        assert!(show.replicate_json(0, None, 0).unwrap()["lag_ms"].as_u64().unwrap() >= 400);
+    }
+
+    /// A front for a runtime that can pass requests through, or accept them and say nothing (a runtime that is alive and stuck).
+    async fn stallable(target: std::net::SocketAddr) -> (std::net::SocketAddr, Arc<std::sync::atomic::AtomicBool>, tokio::task::JoinHandle<()>) {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let stall = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Arc::clone(&stall);
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((mut c, _)) = l.accept().await else { break };
+                if flag.load(std::sync::atomic::Ordering::SeqCst) {
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_secs(30)).await; // held open, never answered
+                        drop(c);
+                    });
+                    continue;
+                }
+                tokio::spawn(async move {
+                    if let Ok(mut up) = tokio::net::TcpStream::connect(target).await {
+                        let _ = tokio::io::copy_bidirectional(&mut c, &mut up).await;
+                    }
+                });
+            }
+        });
+        (addr, stall, task)
+    }
+
+    fn quick_standby(primary: std::net::SocketAddr) -> Arc<failover::Standby> {
+        let mut cfg = failover::Config::new(&primary.to_string(), "nova-b", "fk");
+        cfg.poll_every = Duration::from_millis(40);
+        cfg.poll_timeout = Duration::from_millis(200);
+        cfg.takeover_after = Duration::from_millis(500);
+        cfg.stall_grace = Duration::from_millis(500);
+        failover::Standby::new(cfg, EventStore::open_in_memory().unwrap(), failover::activation(None, false, None, Box::new(|_| Ok(()))))
+    }
+
+    #[tokio::test]
+    async fn a_primary_that_is_stuck_gets_longer_than_one_that_is_gone() {
+        // gone: nothing is listening any more
+        let primary = primary_show();
+        primary.apply("studio", "START");
+        let (paddr, _p) = serve_app(router(primary.clone())).await;
+        let (front, _stall, front_task) = stallable(paddr).await;
+        let sb = quick_standby(front);
+        tokio::spawn(sb.clone().follow());
+        assert!(fo_until(5, || sb.copied() > 3).await);
+        assert_eq!(sb.role_json()["primary_health"], "ok");
+        let t = std::time::Instant::now();
+        front_task.abort();
+        assert!(fo_until(5, || sb.is_active()).await, "a gone primary was not replaced");
+        let gone = t.elapsed();
+
+        // stuck: it takes the connection and never answers
+        let primary2 = primary_show();
+        primary2.apply("studio", "START");
+        let (paddr2, _p2) = serve_app(router(primary2)).await;
+        let (front2, stall2, _t2) = stallable(paddr2).await;
+        let sb2 = quick_standby(front2);
+        tokio::spawn(sb2.clone().follow());
+        assert!(fo_until(5, || sb2.copied() > 3).await);
+        let t2 = std::time::Instant::now();
+        stall2.store(true, std::sync::atomic::Ordering::SeqCst);
+        let mut saw_stalled = false;
+        while !sb2.is_active() && t2.elapsed() < Duration::from_secs(8) {
+            saw_stalled |= sb2.role_json()["primary_health"] == "stalled";
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(sb2.is_active(), "a stuck primary must still be replaced in the end");
+        let stuck = t2.elapsed();
+        eprintln!("primary gone: standby took over after {gone:?}; primary stuck: after {stuck:?}");
+        assert!(saw_stalled, "the standby should have said the primary was stalled while it waited");
+        assert!(gone < Duration::from_millis(850), "{gone:?}");
+        assert!(stuck >= Duration::from_millis(900), "a stuck primary was given only {stuck:?}");
+    }
+
+    #[tokio::test]
+    async fn a_primary_that_answers_but_runs_behind_is_called_slow_and_is_not_replaced() {
+        let primary = primary_show();
+        primary.apply("studio", "START");
+        let (paddr, _p) = serve_app(router(primary.clone())).await;
+        let sb = quick_standby(paddr);
+        tokio::spawn(sb.clone().follow());
+        assert!(fo_until(5, || sb.copied() > 3).await);
+        primary.lag.lock().unwrap().push_back((now_ms(), 900)); // its loop has been running behind
+        assert!(fo_until(3, || sb.role_json()["primary_health"] == "slow").await, "{}", sb.role_json());
+        assert_eq!(sb.role_json()["primary_lag_ms"], 900);
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        assert!(!sb.is_active(), "a slow primary still answers: it is not dead");
+    }
+
+    // ---- one signed record across a takeover ----
+
+    /// A primary with signed receipts (its key in `key_a`) and a standby whose governance files are `key_b` and `log_b`.
+    async fn governed_pair(dir: &std::path::Path, key_b_is_a_copy: bool) -> (Arc<Show>, Arc<failover::Standby>, std::net::SocketAddr, tokio::task::JoinHandle<()>, String) {
+        std::fs::create_dir_all(dir).unwrap();
+        let (key_a, log_a, key_b, log_b) = (dir.join("a.key"), dir.join("a.jsonl"), dir.join("b.key"), dir.join("b.jsonl"));
+        let primary = primary_show();
+        primary.set_governance(primeswarm_pchi::GovernanceLog::open(key_a.to_str().unwrap(), log_a.to_str().unwrap()).unwrap());
+        if key_b_is_a_copy {
+            std::fs::copy(&key_a, &key_b).unwrap();
+        }
+        primary.apply("studio", "START");
+        let actor = Actor::Member { name: "Alex".into(), role: "operator".into() };
+        primary.receipt("show.go", "ALLOW", &actor, "input 'START' moved the show to INTRO");
+        primary.receipt("laser.arm", "ALLOW", &actor, "armed b1");
+        primary.receipt("show.edit", "ALLOW", &actor, "sent an edited show");
+        let (paddr, ptask) = serve_app(router(primary.clone())).await;
+
+        let mut cfg = failover::Config::new(&paddr.to_string(), "nova-b", "fk");
+        cfg.poll_every = Duration::from_millis(40);
+        cfg.takeover_after = Duration::from_millis(400);
+        cfg.governance = Some((key_b.to_string_lossy().into_owned(), log_b.to_string_lossy().into_owned()));
+        let (kb, lb) = (key_b.to_string_lossy().into_owned(), log_b.to_string_lossy().into_owned());
+        // what main does when it configures the show that took over: open the signed log and write its first receipt
+        let configure: Box<dyn Fn(&Arc<Show>) -> Result<(), String> + Send + Sync> = Box::new(move |show| {
+            show.set_governance(primeswarm_pchi::GovernanceLog::open(&kb, &lb).map_err(|e| e.to_string())?);
+            show.receipt("show.start", "ALLOW", &Actor::Person(None), "runtime took over as the standby");
+            Ok(())
+        });
+        let sb = failover::Standby::new(cfg, EventStore::open_in_memory().unwrap(), failover::activation(None, false, None, configure));
+        tokio::spawn(sb.clone().follow());
+        let (saddr, _s) = serve_app(failover::standby_router(sb.clone())).await;
+        std::mem::forget(_s);
+        assert!(fo_until(5, || sb.copied() as usize >= primary.records().len() && sb.receipts_copied() >= 3).await, "copied {} records, {} receipts", sb.copied(), sb.receipts_copied());
+        ptask.abort();
+        assert!(fo_until(6, || sb.is_active()).await);
+        let export = primary.governance_export();
+        let vk = export["verifying_key"].as_str().unwrap().to_string();
+        let _ = saddr;
+        (primary, sb, saddr, ptask, vk)
+    }
+
+    #[tokio::test]
+    async fn the_signed_record_goes_on_as_one_chain_across_a_takeover_when_both_sign_with_the_same_key() {
+        use primeswarm_pchi::governance::{verify_receipt, GovernanceReceipt};
+        let dir = std::env::temp_dir().join(format!("pchi-chain-same-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (primary, _sb, saddr, _t, vk) = governed_pair(&dir, true).await;
+        let theirs = primary.governance_export()["receipts"].as_array().unwrap().clone();
+        let (_, export) = fo_get(saddr, "/governance/export", None).await;
+        let mine = export["receipts"].as_array().unwrap().clone();
+        assert_eq!(export["verifying_key"], json!(vk), "one verifying key checks the whole record");
+        assert!(mine.len() >= theirs.len() + 2, "the primary's {} receipts and the new runtime's own: {}", theirs.len(), mine.len());
+        // the primary's receipts come first, unchanged, and every receipt chains to the one before and verifies
+        for (i, r) in theirs.iter().enumerate() {
+            assert_eq!(mine[i]["decision_hash"], r["decision_hash"], "receipt {i}");
+        }
+        let mut parent: Option<String> = None;
+        for r in &mine {
+            let rec: GovernanceReceipt = serde_json::from_value(r.clone()).unwrap();
+            assert_eq!(rec.parent_decision_hash, parent, "the chain is unbroken at {}", rec.receipt_id);
+            assert!(verify_receipt(&rec, &vk), "{} must verify", rec.receipt_id);
+            parent = Some(rec.decision_hash);
+        }
+        let messages: Vec<&str> = mine.iter().filter_map(|r| r["message"].as_str()).collect();
+        assert!(messages.iter().any(|m| m.contains("took over the show") && m.contains("adopted") && m.contains("one chain")), "{messages:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn with_a_different_key_the_chain_stays_separate_and_the_takeover_receipt_names_where_it_joins() {
+        let dir = std::env::temp_dir().join(format!("pchi-chain-diff-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (primary, _sb, saddr, _t, vk) = governed_pair(&dir, false).await;
+        let theirs = primary.governance_export()["receipts"].as_array().unwrap().clone();
+        let tail = theirs.last().unwrap()["decision_hash"].as_str().unwrap().to_string();
+        let (_, export) = fo_get(saddr, "/governance/export", None).await;
+        let mine = export["receipts"].as_array().unwrap().clone();
+        assert_ne!(export["verifying_key"], json!(vk), "a different key signs this chain");
+        assert!(mine.iter().all(|r| r["parent_decision_hash"].is_null() || mine.iter().any(|o| o["decision_hash"] == r["parent_decision_hash"])), "its own chain stands alone");
+        assert!(!mine.iter().any(|r| theirs.iter().any(|t| t["decision_hash"] == r["decision_hash"])), "the primary's receipts are not mixed into a chain they were not signed for");
+        let takeover = mine.iter().filter_map(|r| r["message"].as_str()).find(|m| m.contains("took over the show")).unwrap();
+        assert!(takeover.contains("not adopted") && takeover.contains(&tail) && takeover.contains(&vk) && takeover.contains("--governance-key"), "{takeover}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_standby_without_a_governance_folder_says_nothing_about_receipts() {
+        let primary = primary_show();
+        primary.apply("studio", "START");
+        let (paddr, _p) = serve_app(router(primary.clone())).await;
+        let sb = standby_of(paddr, false);
+        tokio::spawn(sb.clone().follow());
+        assert!(fo_until(3, || sb.copied() > 3).await);
+        let info = sb.take_over("test").await.unwrap();
+        assert_eq!(info["receipts_adopted"], 0);
+        assert_eq!(info["receipts"], "");
+    }
+
+    // ---- rehearsing a takeover ----
+
+    #[tokio::test]
+    async fn a_takeover_can_be_rehearsed_without_changing_anything() {
+        let primary = primary_show();
+        primary.apply("studio", "START");
+        primary.set_context("energy", json!(0.6));
+        let mut e1 = quick();
+        move_cue(&mut e1, "INTRO", "laser", 1500);
+        primary.replace(e1.clone(), None, true).unwrap();
+        primary.poll_open(&Actor::Person(None), "next", &["calm".into(), "hype".into()]).unwrap();
+        primary.cast_vote("next", "hype", "v1").unwrap();
+        let mut idea = e1.clone();
+        move_cue(&mut idea, "INTRO", "lighting", 600);
+        primary.propose(&Actor::Agent("nova".into()), idea, None, "let the lights breathe").unwrap();
+        let (paddr, _p) = serve_app(router(primary.clone())).await;
+
+        let sb = standby_of(paddr, false);
+        sb.set_probe(failover::probe(Some(vec![device("b1", "beyond", 9)])));
+        tokio::spawn(sb.clone().follow());
+        let (saddr, _s) = serve_app(failover::standby_router(sb.clone())).await;
+        assert!(fo_until(5, || sb.copied() as usize >= primary.records().len()).await);
+
+        let (code, v) = fo_get(saddr, "/takeover-check", None).await;
+        assert_eq!(code, 200, "{v}");
+        assert_eq!(v["ready"], true, "{v}");
+        assert!(v["verdict"].as_str().unwrap().starts_with("ready: a takeover now would carry the show on from INTRO"), "{v}");
+        assert_eq!(v["carried"]["state"], "INTRO");
+        assert_eq!(v["carried"]["context"]["energy"], 0.6);
+        assert_eq!(v["carried"]["undo_depth"], 1);
+        assert_eq!(v["carried"]["proposals_pending"], 1);
+        assert_eq!(v["carried"]["polls"][0]["total"], 1);
+        assert!(v["notes"].as_array().unwrap().iter().any(|n| n.as_str().unwrap().contains("signed-in sessions")), "{v}");
+        assert!(v["took_ms"].as_u64().unwrap() < 2000);
+
+        // nothing happened: the standby is still waiting, the primary still runs, and nothing was sent or recorded as a takeover
+        assert!(!sb.is_active());
+        assert!(!primary.is_fenced());
+        assert_eq!(fo_get(saddr, "/state", None).await.0, 503);
+        assert_eq!(fo_get(saddr, "/role", None).await.1["role"], "standby");
+        assert!(!primary.events().iter().any(|e| e["type"] == "show.fenced"));
+        // it can be asked again, and a real takeover still works afterwards
+        assert_eq!(fo_get(saddr, "/takeover-check", None).await.1["ready"], true);
+        let info = sb.take_over("after the rehearsal").await.unwrap();
+        assert_eq!(info["state"], "INTRO");
+    }
+
+    #[tokio::test]
+    async fn a_rehearsal_says_plainly_when_a_takeover_would_not_work() {
+        // nothing copied yet
+        let primary = primary_show();
+        let (paddr, _p) = serve_app(router(primary.clone())).await;
+        let sb = standby_of(paddr, false);
+        sb.set_probe(failover::probe(None));
+        let (saddr, _s) = serve_app(failover::standby_router(sb.clone())).await;
+        // the check itself catches up if it can: with the primary running, a run exists to copy
+        assert_eq!(fo_get(saddr, "/takeover-check", None).await.1["ready"], true);
+
+        // a standby with the wrong key is refused by the primary
+        let mut cfg = failover::Config::new(&paddr.to_string(), "nova-b", "wrong-key");
+        cfg.poll_every = Duration::from_millis(40);
+        let bad = failover::Standby::new(cfg, EventStore::open_in_memory().unwrap(), failover::activation(None, false, None, Box::new(|_| Ok(()))));
+        bad.set_probe(failover::probe(None));
+        let v = bad.rehearse_takeover().await;
+        assert_eq!(v["ready"], false);
+        assert!(v["verdict"].as_str().unwrap().starts_with("NOT ready") && v["verdict"].as_str().unwrap().contains("failover key"), "{v}");
+
+        // a standby that was not set up for rehearsals says so
+        let (paddr2, _p2) = serve_app(router(primary_show())).await;
+        let plain = standby_of(paddr2, false);
+        let v = plain.rehearse_takeover().await;
+        assert!(v["verdict"].as_str().unwrap().contains("not set up for rehearsals"), "{v}");
+
+        // the primary is gone: it compares with what the primary said last, and says so
+        let primary3 = primary_show();
+        primary3.apply("studio", "START");
+        let (paddr3, p3) = serve_app(router(primary3)).await;
+        let sb3 = standby_of(paddr3, false);
+        sb3.set_probe(failover::probe(None));
+        assert!(sb3.poll_once().await.is_ok());
+        p3.abort();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let v = sb3.rehearse_takeover().await;
+        assert_eq!(v["ready"], true, "what it holds still rebuilds: {v}");
+        assert!(v["notes"].as_array().unwrap().iter().any(|n| n.as_str().unwrap().contains("did not answer just now")), "{v}");
+        assert!(v["notes"].as_array().unwrap().iter().any(|n| n.as_str().unwrap().contains("a takeover may already be under way")), "{v}");
+    }
+
+    #[tokio::test]
+    async fn the_rehearsal_needs_the_standbys_token_when_it_has_one() {
+        let primary = primary_show();
+        primary.apply("studio", "START");
+        let (paddr, _p) = serve_app(router(primary)).await;
+        let mut cfg = failover::Config::new(&paddr.to_string(), "nova-b", "fk");
+        cfg.serve_token = Some("tok-12345".into());
+        cfg.poll_every = Duration::from_millis(40);
+        let sb = failover::Standby::new(cfg, EventStore::open_in_memory().unwrap(), failover::activation(None, false, None, Box::new(|_| Ok(()))));
+        sb.set_probe(failover::probe(None));
+        let (saddr, _s) = serve_app(failover::standby_router(sb)).await;
+        assert_eq!(fo_get(saddr, "/takeover-check", None).await.0, 401);
+        let (code, v) = failover::http(&saddr.to_string(), "GET", "/takeover-check", &[("Authorization", "Bearer tok-12345")], None).await.unwrap();
+        assert_eq!(code, 200, "{v}");
+        let (code, _) = failover::http(&saddr.to_string(), "GET", "/takeover-check?token=tok-12345", &[], None).await.unwrap();
+        assert_eq!(code, 200);
+    }
+
+    // ---- the run written to a file as it happens ----
+
+    async fn fo_post(addr: std::net::SocketAddr, path: &str, body: &str) -> (u16, Value) {
+        failover::http(&addr.to_string(), "POST", path, &[], Some(body)).await.unwrap()
+    }
+
+    fn runlog_path(tag: &str) -> String {
+        std::env::temp_dir().join(format!("pchi-runlog-{tag}-{}-{}.jsonl", std::process::id(), now_ms())).to_string_lossy().into_owned()
+    }
+
+    #[tokio::test]
+    async fn a_run_is_on_disk_as_it_happens_and_reads_back_the_same_as_the_log() {
+        let path = runlog_path("live");
+        let mut store = EventStore::open_in_memory().unwrap();
+        store.set_tee(recording::file_tee(&path, &store.all().unwrap()).unwrap());
+        let show = Show::start_with(quick(), store, Some(Output::new(vec![device("b1", "beyond", 9)], false))).unwrap();
+        show.apply("studio", "START");
+        show.set_context("energy", json!(0.7));
+        // the file already has them, without waiting for anything to be exported
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(on_disk.lines().next().unwrap().contains("pchi-runlog/1"), "{on_disk}");
+        assert!(on_disk.contains("\"type\":\"show.input\"") && on_disk.contains("\"key\":\"energy\""), "{on_disk}");
+        tokio::time::sleep(Duration::from_millis(550)).await;
+        let mut edited = quick();
+        move_cue(&mut edited, "INTRO", "laser", 1500);
+        show.replace(edited, None, true).unwrap();
+
+        // it reads back as a recording: the same timeline the database gives, and it replays exactly
+        let from_file = recording::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let from_log = show.records();
+        assert_eq!(from_file.len(), from_log.len());
+        let (a, b) = (recording::view(&from_file).unwrap(), recording::view(&from_log).unwrap());
+        assert_eq!(a["frames"], b["frames"]);
+        assert_eq!(recording::verify(&from_file).unwrap()["matches"], true);
+        assert_eq!(a["summary"]["edits"], 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_recording_file_that_was_cut_off_is_still_read_and_one_that_is_not_a_recording_is_not() {
+        let path = runlog_path("torn");
+        let mut store = EventStore::open_in_memory().unwrap();
+        store.set_tee(recording::file_tee(&path, &[]).unwrap());
+        let engine = ShowEngine::new(quick()).unwrap();
+        recorder::begin_run(&store, &engine, 1_000).unwrap();
+        store.append(2_000, "studio", None, "show.input", &json!({"event": "START", "from": "PRESHOW", "to": "INTRO", "applied": true, "actions": []})).unwrap();
+        let whole = std::fs::read_to_string(&path).unwrap();
+        // the runtime died in the middle of writing the next line
+        let torn = format!("{whole}{{\"id\":3,\"ts\":3000,\"source\":\"studio\",\"type\":\"show.inp");
+        let records = recording::parse(&torn).unwrap();
+        assert_eq!(records.len(), 2, "the half line is dropped, the rest is kept");
+        // damage in the middle is not silently skipped
+        let broken = whole.replacen("\"type\":\"run.start\"", "\"type\":\"run.start\"@@", 1);
+        assert!(recording::parse(&broken).is_err());
+        // not a recording
+        assert!(recording::parse("{\"format\":\"pchi-runlog/1\"}\n").is_err(), "a header and no run");
+        assert!(recording::parse("{\"format\":\"something-else\"}\n{}").is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn a_resumed_run_starts_a_complete_file_and_a_second_run_in_a_file_is_the_one_read() {
+        let db = temp_db("runlog-resume");
+        let a = Show::start(quick(), EventStore::open(&db).unwrap()).unwrap();
+        a.apply("studio", "START");
+        crash(a);
+        // resume, recording to a file that does not exist yet: it holds the run from its start
+        let path = runlog_path("resumed");
+        let mut store = EventStore::open(&db).unwrap();
+        store.set_tee(recording::file_tee(&path, &store.all().unwrap()).unwrap());
+        let (b, _) = Show::resume(quick(), store, None).unwrap();
+        b.set_context("energy", json!(0.4));
+        let records = recording::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(records[0].event_type, "run.start");
+        let kinds: Vec<&str> = records.iter().map(|r| r.event_type.as_str()).collect();
+        assert!(kinds.contains(&"show.input") && kinds.contains(&"show.resume") && kinds.contains(&"show.context"), "{kinds:?}");
+        assert_eq!(recording::verify(&records).unwrap()["matches"], true);
+        // a fresh run written to the same file later: the latest one is what is read
+        let mut again = EventStore::open_in_memory().unwrap();
+        again.set_tee(recording::file_tee(&path, &[]).unwrap());
+        let c = Show::start(quick(), again).unwrap();
+        c.apply("studio", "START");
+        let latest = recording::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(latest.len() < records.len() + 8 && latest.iter().filter(|r| r.event_type == "run.start").count() == 1, "{} records", latest.len());
+        assert!(!latest.iter().any(|r| r.event_type == "show.resume"), "the earlier run is not in the latest one");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[tokio::test]
+    async fn the_file_goes_on_through_a_takeover_as_one_run() {
+        let path = runlog_path("takeover");
+        let primary = primary_show();
+        primary.apply("studio", "START");
+        primary.set_context("energy", json!(0.9));
+        let (paddr, ptask) = serve_app(router(primary.clone())).await;
+        // the standby records its copy, and goes on recording as the show that took over
+        let mut cfg = failover::Config::new(&paddr.to_string(), "nova-b", "fk");
+        cfg.poll_every = Duration::from_millis(40);
+        cfg.takeover_after = Duration::from_millis(400);
+        cfg.record = Some(path.clone());
+        let mut copy = EventStore::open_in_memory().unwrap();
+        copy.set_tee(recording::file_tee(&path, &[]).unwrap());
+        let sb = failover::Standby::new(cfg, copy, failover::activation(None, false, None, Box::new(|_| Ok(()))));
+        tokio::spawn(sb.clone().follow());
+        assert!(fo_until(5, || sb.copied() as usize >= primary.records().len()).await);
+        ptask.abort();
+        assert!(fo_until(6, || sb.is_active()).await);
+        let (saddr, _s) = serve_app(failover::standby_router(sb.clone())).await;
+        assert_eq!(fo_post(saddr, "/input", r#"{"event":"DROP"}"#).await.0, 200);
+
+        let records = recording::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let kinds: Vec<&str> = records.iter().map(|r| r.event_type.as_str()).collect();
+        assert_eq!(records.iter().filter(|r| r.event_type == "run.start").count(), 1, "one run: {kinds:?}");
+        assert!(kinds.contains(&"show.resume"), "the takeover is in it: {kinds:?}");
+        let v = recording::view(&records).unwrap();
+        assert!(v["summary"]["path"].as_array().unwrap().len() >= 2, "{}", v["summary"]);
+        assert_eq!(recording::verify(&records).unwrap()["matches"], true, "{}", recording::verify(&records).unwrap());
+        let _ = std::fs::remove_file(&path);
     }
 }

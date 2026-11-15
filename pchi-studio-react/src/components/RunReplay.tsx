@@ -105,7 +105,7 @@ export default function RunReplay() {
         <button onClick={() => load('/replay', undefined, 'live')} disabled={busy}>Load this run</button>
         <label className="file-btn" title="Open a recording saved earlier (a .json file)">
           Open a recording…
-          <input type="file" accept=".json,application/json" hidden onChange={(e) => { openFile(e.target.files?.[0]); e.target.value = '' }} />
+          <input type="file" accept=".json,.jsonl,application/json" hidden onChange={(e) => { openFile(e.target.files?.[0]); e.target.value = '' }} />
         </label>
         <button onClick={save} disabled={busy} title="Save the run on the runtime as one file to keep or send">Save recording</button>
       </div>

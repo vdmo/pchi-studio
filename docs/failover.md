@@ -34,6 +34,19 @@ not before. Its own `--db` and `--governance` folders must be its own.
 A standby that was *refused* by the primary (wrong key, a log that is not the one it followed) does **not** take over: that is a mistake to fix, not a death to cover.
 `GET /role` on the standby says which.
 
+## Slow, stuck and gone are different
+
+A primary that is merely busy must not be replaced: two runtimes sending at once is worse than a pause. So the standby reads *how* the primary is quiet:
+
+| What the standby sees | It means | The standby |
+|---|---|---|
+| nothing is listening, or the connection is dropped | the process is gone | takes over after `--takeover-after` |
+| the network does not carry the request | unknown | takes over after `--takeover-after` |
+| it accepts the connection and does not answer | alive and stuck | waits `--stall-grace` longer (default: as long again) |
+| it answers, but its own event loop runs behind | slow | does **not** take over |
+
+The primary measures its own event loop ten times a second (how late a timer fires) and reports it with every answer. `GET /role` on either runtime shows `lag_ms` (the last three seconds) and `lag_worst_ms` (the last minute); the standby's `/role` shows `primary_health` (`ok`, `slow`, `stalled`, `gone`, `unreachable`) and Studio's Standby note says it in words. The limit is not zero: a primary stuck for good is still replaced, after the extra wait.
+
 ## Stopping the old primary (fencing)
 
 Once the standby is running it keeps telling the old primary, every few seconds, which takeover it is on. A primary that hears a newer one **stops**:
@@ -42,6 +55,29 @@ with `--resume`, does not fight the standby for the lights. (In the check we ran
 
 **The one case it cannot cover:** if the network between the two is cut while both can still reach the tools, the standby cannot hear the primary or tell it anything, and both
 will send until the network is mended. Use `--takeover manual` if that is how your network can fail, and decide with your eyes.
+
+## One signed record across a takeover
+
+The standby copies the primary's signed receipts as well as its log. If **both runtimes sign with the same key** (copy the primary's `--governance-key` file to the standby by a channel you trust), the standby starts its own governance log from the primary's receipts, and everything after the takeover continues the same hash chain. One verifying key then checks the whole show:
+
+```bash
+curl -s http://standby:3100/governance/export > chain.json
+python scripts/verify_governance_chain.py chain.json     # every receipt: chain, hash and signature OK
+```
+
+(Checked: three receipts from the primary and two from the standby verified as one chain.)
+
+A copy of the signing key on a second machine is a trade: whoever can read it on either machine can forge the record. If you do not want that, give the standby its own key. Its chain is then separate, and the takeover receipt says so and names the primary's last receipt and verifying key, so a reader can join the two by hand: *"…not adopted: this runtime signs with a different key … It follows the primary's receipt <hash> (primary verifying key <key>)."* The same note appears if the standby's governance log already holds receipts. The standby keeps the primary's receipts in `<governance log>.primary` meanwhile, so a restarted standby does not lose them.
+
+## Rehearse a takeover
+
+`GET /takeover-check` on the standby (with its `--token` if it has one) rebuilds the show a takeover would run from the standby's copy, **changing nothing**: sending is off, no input is opened, nothing is fenced, and the rehearsal show is stopped before it answers. It then compares what it rebuilt with the primary's own account of the show and answers:
+
+- `ready` and a one-line verdict, or what would not work (the scene, context, definition, undo list, waiting proposals or poll differ; the primary refused the standby; nothing copied yet).
+- what a takeover now would carry (scene, context, polls, proposals, undo depth), cues it would skip because they are already due, and how the signed record would continue.
+- what is not carried in any case.
+
+In Studio, with a backup address set, **Backup runtime → Rehearse a takeover** shows the same. It takes a few tens of milliseconds, so it can be done before every show and again after any change. Votes in the last half second are written to the log in batches, so a poll's count can differ by those; the check says so as a note, not a failure.
 
 ## Pointing things at the right runtime
 
