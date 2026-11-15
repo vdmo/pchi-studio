@@ -22,6 +22,18 @@ name = "pchi-gearcheck"
 path = "src/bin/gearcheck.rs"
 
 [[bin]]
+name = "pchi-run-report"
+path = "src/bin/run_report.rs"
+
+[[bin]]
+name = "pchi-import"
+path = "src/bin/import.rs"
+
+[[bin]]
+name = "pchi-venueday"
+path = "src/bin/venueday.rs"
+
+[[bin]]
 name = "pchi-witness"
 path = "src/bin/witness.rs"
 
@@ -51,6 +63,7 @@ sha2 = "0.10"
 base64 = "0.22"
 pbkdf2 = "0.12"
 hex = "0.4"
+roxmltree = "0.20"
 rand = "0.8"
 primeswarm-pchi = { path = "../../primeswarm-pchi" }
 midir = { version = "0.10", optional = true }

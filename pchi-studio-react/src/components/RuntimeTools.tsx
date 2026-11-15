@@ -139,6 +139,14 @@ export default function RuntimeTools({ getFile, locked = false, undoDepth = 0 }:
     setReport(r?.ok ? (r.body ?? {}) : { error: 'Could not read the report. Is the runtime running?' })
   }
 
+  const openPage = async () => {
+    const t = feedToken()
+    const res = await fetch(`${apiBase()}/run-report`, { headers: t ? { Authorization: `Bearer ${t}` } : {} }).catch(() => null)
+    if (!res?.ok) return setReport({ error: 'Could not build the hand-over page. Is the runtime running, and has a show been run?' })
+    const url = URL.createObjectURL(new Blob([await res.text()], { type: 'text/html' }))
+    window.open(url, '_blank')
+    setTimeout(() => URL.revokeObjectURL(url), 60_000)
+  }
   const d = send?.diff
   const nothing = d && d.changes.length === 0 && d.blockers.length === 0
   return (
@@ -149,6 +157,7 @@ export default function RuntimeTools({ getFile, locked = false, undoDepth = 0 }:
         <button onClick={openDoors} title="Check the whole show against the rig and each tool before the doors open">Doors check</button>
         <button onClick={openRehearse} title="Play this edited show against what already happened in the run, without sending anything">Rehearse</button>
         <button onClick={openReport} title="How the run went: cue timing, failed sends, edits made mid-show">Run report</button>
+        <button onClick={openPage} title="The whole run as one page to read and hand over: where the show went, timing, failed sends, interruptions, who decided what, the signed record">Hand-over page</button>
         <button onClick={() => setReplayOpen(true)} title="Go back through the run: drag through it, or open a recording saved earlier">Replay a run</button>
       </div>
 

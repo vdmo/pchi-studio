@@ -61,7 +61,9 @@ pub mod profiles;
 pub mod recording;
 pub mod rehearse;
 pub mod timecode;
+pub mod import;
 pub mod netcheck;
+pub mod report;
 pub mod witness;
 pub mod follow;
 pub mod rig;
@@ -2066,6 +2068,7 @@ pub fn router_with_token(show: Arc<Show>, token: Option<String>) -> Router {
         .route("/ready/:dept", post(post_ready))
         .route("/input", post(post_input))
         .route("/recording", get(get_recording))
+        .route("/run-report", get(get_run_report))
         .route("/replay", get(get_replay).post(post_replay).layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024)))
         .route("/role", get(get_role))
         .route("/primary", get(get_primary))
@@ -2458,6 +2461,20 @@ async fn get_recording(State(a): State<App>, q: Query<HashMap<String, String>>, 
     match recording::export(&a.show.records()) {
         Ok(v) => (StatusCode::OK, Json(v)),
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e}))),
+    }
+}
+
+/// `GET /run-report`: the latest run as one page to read and hand over (HTML), with the signed receipts checked if there are any.
+async fn get_run_report(State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if !authorized(&a.token, &q, &h) {
+        return unauthorized().into_response();
+    }
+    let export = a.show.governance_export();
+    let chain = if export["count"].as_u64().unwrap_or(0) > 0 { Some(report::check_chain(&export)) } else { None };
+    match report::html(&a.show.records(), chain.as_ref()) {
+        Ok(page) => axum::response::Html(page).into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e}))).into_response(),
     }
 }
 

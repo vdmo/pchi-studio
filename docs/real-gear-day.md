@@ -70,4 +70,19 @@ The tools are one half; the other is the second machine. Run `pchi-netcheck` bet
 - A different version of the tool, or a different console surface, may behave differently.
 - Loopback proves the message, not the venue's network, switches or Wi-Fi. A show-network rehearsal is its own thing.
 - A short test is not a long run: nothing here shows hours of uptime.
+- The importer and the report have only been tried on files made for the tests, not on a real QLab workspace or a real show.
 - It says nothing about the people. The drill's human questions are for them.
+
+## Run the day with one command
+
+`pchi-venueday` runs the steps above in order and keeps everything in one folder (`docs/gear-results/<date>/` by default):
+
+```bash
+pchi-venueday show.pchi --runtime 127.0.0.1:3100 \
+  --primary primary:3100 --standby standby:3100 --witness witness:3300 --failover-key "$KEY" \
+  --recording run.jsonl
+```
+
+It runs the doors check on the running show, the safety drill, the gear check (you at the keyboard; it sends for real after you say yes), the failover day check if you give a standby, and the run report of a rehearsal if you give a recording. Leave steps out with `--skip drill,gear,failover,report`. At the end it asks what you did **not** try and writes that into `index.md` beside the results, with the version of each tool, so the folder says what was proven and for what. It exits non-zero if any step reported a problem.
+
+Afterwards, `pchi-run-report` turns the rehearsal into a page you can hand to the client (`docs/report.md`).
