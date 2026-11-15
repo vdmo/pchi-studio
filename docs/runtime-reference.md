@@ -100,6 +100,7 @@ Every route needs the token if `--token` is set, except where noted. Anything th
 | `/role` | GET | `active`, `standby`, `fenced` or `paused` ([failover.md](failover.md)) |
 | `/primary` | GET | where the active runtime is |
 | `/whoami` | GET | who the runtime thinks you are, and what you may do |
+| `/describe` | GET | the runtime describing itself to the caller: their powers, the show now, the rig, what needs attention, the rules ([mcp.md](mcp.md)) |
 | `/ws` | WebSocket | the live feed; also accepts `ready` and input messages |
 
 ### Driving the show

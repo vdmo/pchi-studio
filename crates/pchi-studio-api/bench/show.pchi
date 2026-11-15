@@ -1,0 +1,44 @@
+{
+  "version": "1.0",
+  "project": "Bench",
+  "name": "bench-show",
+  "nodes": [
+    { "id": "resolume-1", "type": "resolume", "label": "Visuals", "position": { "x": 0, "y": 0 }, "dept": "visual", "params": { "host": "10.0.0.10", "port": 7000 } },
+    { "id": "grandma-1", "type": "grandma3", "label": "Lighting desk", "position": { "x": 0, "y": 80 }, "dept": "lighting", "params": { "host": "10.0.0.11", "port": 8000 } },
+    { "id": "laser-1", "type": "beyond", "label": "Main laser", "position": { "x": 0, "y": 160 }, "dept": "laser", "params": { "host": "10.0.0.12", "port": 8001 } },
+    { "id": "qlab-1", "type": "qlab", "label": "Playback", "position": { "x": 0, "y": 240 }, "dept": "audio", "params": { "host": "10.0.0.13", "port": 53000 } }
+  ],
+  "edges": [],
+  "timeline": [],
+  "assets": [],
+  "showchart": {
+    "id": "bench-show",
+    "name": "Bench show",
+    "initial": "PRESHOW",
+    "states": [
+      { "id": "PRESHOW", "label": "Doors open" },
+      { "id": "INTRO", "label": "Introduction", "timeline": { "duration_ms": 8000, "lanes": [
+        { "id": "visual", "name": "Visuals", "dept": "visual", "cues": [
+          { "id": "v1", "at_ms": 0, "num": 1, "action": { "kind": "scene.activate", "payload": { "scene": "1" } } } ] },
+        { "id": "lighting", "name": "Lighting", "dept": "lighting", "cues": [
+          { "id": "l1", "at_ms": 500, "num": 2, "action": { "kind": "lighting.look", "payload": { "look": "401" } } } ] },
+        { "id": "audio", "name": "Audio", "dept": "audio", "cues": [
+          { "id": "a1", "at_ms": 800, "num": 3, "action": { "kind": "audio.cue", "payload": { "cue": "1" } } } ] },
+        { "id": "laser", "name": "Lasers", "dept": "laser", "cues": [
+          { "id": "z1", "at_ms": 4000, "length_ms": 2000, "num": 4, "action": { "kind": "laser.cue", "payload": { "cue": "l_intro" } } } ] }
+      ] } },
+      { "id": "DROP", "label": "The drop", "timeline": { "lanes": [
+        { "id": "visual", "name": "Visuals", "dept": "visual", "cues": [
+          { "id": "v2", "at_ms": 0, "num": 5, "action": { "kind": "scene.activate", "payload": { "scene": "2" } } } ] },
+        { "id": "lighting", "name": "Lighting", "dept": "lighting", "cues": [
+          { "id": "l2", "at_ms": 0, "num": 6, "action": { "kind": "lighting.look", "payload": { "look": "402" } } } ] }
+      ] } },
+      { "id": "FINALE", "label": "Finale" }
+    ],
+    "transitions": [
+      { "source": "PRESHOW", "target": "INTRO", "event": "START" },
+      { "source": "INTRO", "target": "DROP", "event": "DROP" },
+      { "source": "DROP", "target": "FINALE", "event": "FINALE" }
+    ]
+  }
+}

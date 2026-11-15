@@ -45,6 +45,14 @@ path = "src/bin/follow.rs"
 name = "pchi-netcheck"
 path = "src/bin/netcheck.rs"
 
+[[bin]]
+name = "pchi-twin"
+path = "src/bin/twin.rs"
+
+[[bin]]
+name = "pchi-bench"
+path = "src/bin/bench.rs"
+
 [dependencies]
 pchi-showchart = { path = "../pchi-showchart" }
 pchi-eventstore = { path = "../pchi-eventstore" }

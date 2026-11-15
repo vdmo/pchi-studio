@@ -13,6 +13,7 @@ This is the map. Start with the first section that fits you.
 | Building a show in the Studio editor | [studio-guide.md](studio-guide.md), [command-bar.md](command-bar.md) |
 | Running a show on the night | [show-day-handbook.md](show-day-handbook.md) |
 | Looking up a flag, route, tool or file format | [runtime-reference.md](runtime-reference.md), [show-file.md](show-file.md), [tools-reference.md](tools-reference.md) |
+| Developing or measuring agents | [mcp.md](mcp.md), [bench.md](bench.md), [twin.md](twin.md) |
 | Locking it down for a shared network | [security.md](security.md) |
 | Stuck | [troubleshooting.md](troubleshooting.md), [glossary.md](glossary.md) |
 | Deciding what to trust | [LIMITATIONS.md](LIMITATIONS.md), [foh-proof.md](foh-proof.md) |
@@ -46,6 +47,8 @@ This is the map. Start with the first section that fits you.
 - [failover.md](failover.md): a standby, a witness, and following a takeover
 - [virtual-events.md](virtual-events.md): audience votes
 - [narration.md](narration.md): what a proposed edit says in words
+- [bench.md](bench.md): the agent benchmark
+- [twin.md](twin.md): the rig twin, stand-in devices that can fail
 
 **After the show**
 - [replay.md](replay.md): recordings and replay

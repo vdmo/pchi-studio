@@ -22,6 +22,8 @@
 
 **Draft.** A memory not yet verified by a person. Counts for 0.55 of a verified one.
 
+**Digital twin.** Stand-in devices on loopback that record what the runtime sends and can be made to go down or lag. [twin.md](twin.md)
+
 **Dry run.** The runtime's default: cues are reported ("would go to ...") and nothing is sent. Turned off with `--send`.
 
 **Edit key.** The shared operator key (`--edit-key`).

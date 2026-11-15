@@ -66,6 +66,9 @@ pub mod import;
 pub mod netcheck;
 pub mod report;
 pub mod witness;
+pub mod twin;
+pub mod describe;
+pub mod bench;
 pub mod follow;
 pub mod rig;
 
@@ -2050,6 +2053,7 @@ pub fn router_with_token(show: Arc<Show>, token: Option<String>) -> Router {
             (StatusCode::OK, Json(a.show.preflight()))
         }))
         .route("/whoami", get(get_whoami))
+        .route("/describe", get(get_describe))
         .route("/signin", post(post_signin))
         .route("/signout", post(post_signout))
         .route("/vote", post(post_vote))
@@ -2187,6 +2191,15 @@ async fn get_whoami(State(a): State<App>, q: Query<HashMap<String, String>>, h: 
     let probe: Vec<&str> = if depts.is_empty() { vec!["laser"] } else { depts.iter().map(String::as_str).collect() };
     let can: Vec<&str> = governance::ALL_PERMS.iter().filter(|(p, _)| probe.iter().any(|d| a.show.allow(&actor, *p, Some(d)))).map(|(_, n)| *n).collect();
     (StatusCode::OK, Json(json!({"name": actor.name(), "role": actor.role(), "signed_in": !matches!(actor, Actor::Anonymous), "locked": a.show.is_locked(), "can": can, "depts": a.show.depts_of(&actor)})))
+}
+
+/// `GET /describe`: the runtime describing itself to the caller: their powers, the show now, the rig, what needs attention, the rules.
+async fn get_describe(State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap) -> impl IntoResponse {
+    if !authorized(&a.token, &q, &h) {
+        return unauthorized();
+    }
+    let actor = who(&a, &q, &h);
+    (StatusCode::OK, Json(a.show.describe(&actor)))
 }
 
 /// `POST /show` (a show file, as Studio saves it) replaces the running show's definition;

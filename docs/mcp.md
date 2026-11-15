@@ -15,6 +15,7 @@ It talks to a runtime that is already running (`pchi-studio-api show.pchi ...`).
 
 | Tool | Does |
 |---|---|
+| `pchi_describe` | **start here.** The runtime describes itself to you: who it takes you to be, every action with whether it is allowed *for you* and what it becomes (an agent's edit is a proposal), where the show is, which ways out of the current scene would fire right now, the rig, what needs attention, and the rules to follow. See below |
 | `pchi_state` | the scene, how long it has run, the context (including audience votes), timecode, edits waiting for a person |
 | `pchi_show` | the running show's definition as JSON: the base to edit a copy of |
 | `pchi_doors_check` | the whole show against the rig and each tool: what will not work, what to look at |
@@ -51,3 +52,21 @@ So the worst an agent can do through this server is propose edits a person will 
 - It speaks plain HTTP to the runtime, so run it on the same machine or a trusted network.
 - Tested with a hand-written client of the protocol (initialise, list, call, errors, notifications) and a real runtime. It has not been run inside a particular
   agent product: if yours negotiates a different protocol version, or wants something this server does not answer, that will show up on first use.
+
+## Describing itself: `pchi_describe` and `GET /describe`
+
+An agent should not need a manual. `GET /describe` (the tool `pchi_describe`) returns one JSON answer, `pchi-describe/1`, written for the caller:
+
+| Field | Says |
+|---|---|
+| `you` | who the runtime takes you to be (name, role, whether you are an agent, your departments) |
+| `you_may` | every action with its route and an **outcome**: `allowed`, `allowed_as_proposal` (an agent's edit or memory note), or `refused`. It asks the same permission check the routes ask, for you, so it cannot drift from what is enforced |
+| `runtime` | whether this runtime is the active one, whether it is sending or in a dry run |
+| `show`, `now` | the scenes, the events the show answers to, the current scene, how long it has run, the context, and **each way out of this scene with whether it would fire right now** (a guard that does not hold says so; a scene still held by its minimum says for how long) |
+| `rig`, `readiness` | the devices (armed, link) and each department's last word |
+| `waiting_for_a_person` | proposals not yet decided |
+| `attention` | what to look at first: a department on hold, a lost link, an armed laser, a dry run, a runtime that is not the active one |
+| `rules` | the house rules as sentences: rehearse before you propose, say why, a refusal is final, you cannot press GO or arm, STOP LASERS is yours, do not guess when memory does not know |
+| `how_to` | the edit loop and where the docs are |
+
+It tells you your own powers and no one else's, and it changes nothing: the routes still enforce. The agent benchmark ([bench.md](bench.md)) is how you measure whether an agent *follows* it.

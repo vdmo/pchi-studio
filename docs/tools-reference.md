@@ -11,6 +11,8 @@ Every binary in the workspace, what it is for, and where it is explained. All ac
 | [`pchi-gearcheck`](#pchi-gearcheck) | prove each tool, one at a time | on the real rig |
 | [`pchi-netcheck`](#pchi-netcheck) | measure the network and rehearse a takeover | before doors, with a standby |
 | [`pchi-venueday`](#pchi-venueday) | run all of the above into one folder | the day at the venue |
+| [`pchi-twin`](#pchi-twin) | stand-in devices for the rig, that can be made to fail | testing without gear |
+| [`pchi-bench`](#pchi-bench) | give an agent jobs and grade what it did | developing and comparing agents |
 | [`pchi-witness`](#pchi-witness), [`pchi-follow`](#pchi-follow) | failover helpers | with a standby |
 | [`pchi-run-report`](#pchi-run-report) | the hand-over page | after the show |
 | [`pchi-memory`](#pchi-memory) | agent memory from the command line | after the show |
@@ -76,6 +78,24 @@ pchi-venueday my-show.pchi --runtime 10.0.0.5:3100 \
 ```
 
 Runs the preflight, the drill, the gear check, the network check and the report in order, into one folder with an `index.md` (results, what was **not** tried, tool versions). `--skip` takes `preflight,drill,gear,failover,report`. See [real-gear-day.md](real-gear-day.md).
+
+## pchi-twin
+
+```bash
+pchi-twin my-show.pchi --runtime 127.0.0.1:3100 --control 127.0.0.1:3400
+```
+
+Stands up one loopback device per UDP device in the rig, writes `my-show.twin.pchi` pointed at them, reports each department READY, and serves a control API (`GET /devices`, `GET /seen/<id>`, `POST /fault`, `POST /ready`, `POST /clear`). A device can be `down` or `lag:<ms>`. See [twin.md](twin.md).
+
+## pchi-bench
+
+```bash
+pchi-bench --agent careful                         # a reference agent: checks the benchmark itself
+pchi-bench --agent-cmd ./my-agent.sh --report bench.md --json bench.json
+pchi-bench --list | --print-show | --only move-cue,stop-lasers | --timeout 120 | --pass-mark 0.8
+```
+
+Runs each scenario against a real runtime and a twin, gives the agent its task, and grades the outcome and the conduct from the runtime and a trace of every request. Exit 1 if any scenario fails. See [bench.md](bench.md).
 
 ## pchi-witness
 

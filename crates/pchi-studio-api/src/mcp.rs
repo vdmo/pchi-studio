@@ -85,6 +85,7 @@ fn schema(props: Value, required: &[&str]) -> Value {
 pub fn tools() -> Value {
     let show = json!({"type": "object", "description": "A whole show (the JSON from pchi_show, edited)."});
     json!([
+        {"name": "pchi_describe", "description": "START HERE. The runtime describes itself to you: who it takes you to be, every action with whether it is allowed for you (and what it becomes: an agent's edit is a proposal), where the show is, which ways out of the current scene would fire right now, the rig and its state, what is waiting for a person, what needs attention, and the rules to follow. Read-only.", "inputSchema": schema(json!({}), &[])},
         {"name": "pchi_state", "description": "Where the running show is now: the scene, how long it has been there, the context (including audience votes under 'vote'), timecode, and edits waiting for a person. Read-only.", "inputSchema": schema(json!({}), &[])},
         {"name": "pchi_show", "description": "The running show's full definition (scenes, transitions, timelines, cues) as JSON: the base to edit a copy of. Read-only.", "inputSchema": schema(json!({}), &[])},
         {"name": "pchi_doors_check", "description": "Check the whole show against the rig and each tool, as the operator would before the doors: what will not work, and what to look at. Read-only.", "inputSchema": schema(json!({}), &[])},
@@ -121,6 +122,7 @@ impl Client {
     pub async fn run_tool(&self, name: &str, args: &Value) -> Result<String, String> {
         let said = |a: &Value| a["said"].as_str().unwrap_or("").trim().to_string();
         match name {
+            "pchi_describe" => Ok(pretty(&self.ok("GET", "/describe", None).await?)),
             "pchi_state" => {
                 let s = self.ok("GET", "/state", None).await?;
                 Ok(pretty(&json!({"scene": s["state"], "elapsed_ms": s["elapsed_ms"], "context": s["context"], "timecode": s["timecode"], "polls": s["polls"], "waiting_for_a_person": s["proposals"], "output": s["output"], "edit_locked": s["edit_locked"]})))
@@ -215,7 +217,7 @@ impl Client {
                 let want = msg["params"]["protocolVersion"].as_str().unwrap_or("");
                 let version = if PROTOCOLS.contains(&want) { want } else { PROTOCOLS[0] };
                 reply(id, Ok(json!({"protocolVersion": version, "capabilities": {"tools": {}}, "serverInfo": {"name": "pchi", "version": env!("CARGO_PKG_VERSION")},
-                    "instructions": "PCHI runs live shows. You can read the show and the run, rehearse an edit, and propose it for a person to approve. You cannot press GO, arm lasers, or change the live show directly."})))
+                    "instructions": "PCHI runs live shows. Call pchi_describe first: it says what you may do, where the show is and what needs attention. You can read the show and the run, rehearse an edit, and propose it for a person to approve. You cannot press GO, arm lasers, or change the live show directly."})))
             }
             "ping" => reply(id, Ok(json!({}))),
             "tools/list" => reply(id, Ok(json!({"tools": tools()}))),
