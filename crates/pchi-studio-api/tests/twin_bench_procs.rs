@@ -88,7 +88,7 @@ fn a_real_agent_is_just_a_command_and_its_requests_are_graded() {
         .output()
         .unwrap();
     let t = String::from_utf8_lossy(&good.stdout);
-    assert!(good.status.success() && t.contains("1 of 1 scenarios passed"), "{t}");
+    assert!(good.status.success() && t.contains("1 of 1 runs passed"), "{t}");
 
     // it tries to press GO: refused by the runtime, and the benchmark sees the attempt in the trace
     let bad = Command::new(env!("CARGO_BIN_EXE_pchi-bench"))

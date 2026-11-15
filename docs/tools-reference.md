@@ -93,6 +93,8 @@ Stands up one loopback device per UDP device in the rig, writes `my-show.twin.pc
 pchi-bench --agent careful                         # a reference agent: checks the benchmark itself
 pchi-bench --agent-cmd ./my-agent.sh --report bench.md --json bench.json
 pchi-bench --list | --print-show | --only move-cue,stop-lasers | --timeout 120 | --pass-mark 0.8
+pchi-bench --agent-cmd bench/agents/claude.sh --repeat 5 --evidence runs/a   # a real agent: repeats, cost, sealed evidence
+pchi-bench --verify runs/a/index.json
 ```
 
 Runs each scenario against a real runtime and a twin, gives the agent its task, and grades the outcome and the conduct from the runtime and a trace of every request. Exit 1 if any scenario fails. See [bench.md](bench.md).

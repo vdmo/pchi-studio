@@ -74,12 +74,43 @@ A benchmark that cannot fail is worthless, so four built-in agents check it:
 | `PCHI_TASK` | the task, in words |
 | `PCHI_AGENT_NAME` | the name to give as `X-Pchi-Actor: agent:<name>` |
 | `PCHI_SCENARIO` | the scenario id |
+| `PCHI_USAGE_FILE` | a file to leave what the run cost in (below) |
 
 Its standard output is kept as what it told the person (and is shown in `--json`). It must send `X-Pchi-Actor: agent:<name>` on every request, as `pchi-mcp` does; `--timeout` (default 120 s) stops one that never finishes, which is a critical failure.
 
 For an MCP-capable agent the command starts the agent with `pchi-mcp --runtime "$PCHI_RUNTIME" --name "$PCHI_AGENT_NAME"` configured as its MCP server and `$PCHI_TASK` as its prompt. How to do that depends on the agent product; write the small script once and pass it as `--agent-cmd`. Each run costs whatever the agent costs: run `--only` a scenario while you iterate.
 
 [coding.sh](https://github.com/jackulau/coding.sh), or any tracer that can wrap a command, can record the agent's side of the same runs (prompts, model calls, tokens, cost) next to this benchmark's view of what it did to the show. Nothing here depends on it.
+
+### Claude Code: `bench/agents/claude.sh`
+
+```bash
+pchi-bench --agent-cmd bench/agents/claude.sh --only move-cue                  # one scenario, by hand, first
+pchi-bench --agent-cmd bench/agents/claude.sh --repeat 5 --evidence runs/sonnet-a
+```
+
+The script starts one headless Claude Code session per run, with `pchi-mcp` as its **only** tool server (`--strict-mcp-config`), its built-in tools disallowed, and a throwaway working folder, so the agent can touch the show through the PCHI tools and nothing else. It leaves Claude Code's JSON result (cost, tokens, turns, and the final answer) in `PCHI_USAGE_FILE`. Settings: `PCHI_CLAUDE_BIN`, `PCHI_MCP_BIN`, `PCHI_MODEL`, `PCHI_MAX_TURNS`, `PCHI_CLAUDE_EXTRA`, and `PCHI_PROMPT_FILE` (text appended to the system prompt: **the thing to vary** when you compare prompts).
+
+**It is not verified against a real Claude Code.** It was written from the flags Claude Code documents, without a copy to try them on. Its plumbing (settings, the MCP config it writes, the usage file, repeats, evidence) is tested against a stand-in `claude` command that behaves like a careful agent; nothing in the tests involves a model. Run `claude --help`, run one scenario by hand, and read the trace in `--json` to confirm the agent called the PCHI tools through the proxy before trusting a number.
+
+For any other agent, write the same kind of script: start it on `$PCHI_TASK` with `pchi-mcp --runtime "$PCHI_RUNTIME" --name "$PCHI_AGENT_NAME"` as its MCP server, and leave cost JSON in `$PCHI_USAGE_FILE`, either as `{"cost_usd","tokens_in","tokens_out","turns","model"}` or Claude Code's own result shape.
+
+## Repeats, cost and time
+
+A language-model agent gives a different run each time, so one run is one sample. `--repeat N` runs every scenario N times (all of the first pass, then the second, and so on). With repeats the report shows, per scenario, the **pass rate**, the number of runs with a **critical failure**, the mean score, mean time and cost. Three runs cannot tell 60 % from 90 %; a critical failure in *any* run is the number to watch.
+
+Exit code 1 if any run had a critical failure, or any scenario's pass rate is under `--min-pass-rate` (default 1.0, so a clean sweep; lower it for a noisy agent once you know its baseline). Cost, tokens and turns come from the usage file when the agent leaves one; the time is how long the agent itself took.
+
+## Evidence
+
+```bash
+pchi-bench --agent-cmd bench/agents/claude.sh --repeat 5 --evidence runs/sonnet-a   # a NEW folder
+pchi-bench --verify runs/sonnet-a/index.json                                       # later: still what was written?
+```
+
+One file per run (`<agent>__<scenario>__<NN>.json`) and an `index.json`, in the manner of a verifier's evidence package. Each holds the case id (`PCHI-BENCH-<scenario>`), the run number, the task, whether it is a **negative test** (the right behaviour is to refrain: decline, abstain, not propose), every request the agent made, each check and its result, the answer, and how the run was made: the date, the **bench binary's SHA-256**, hashes of the scenarios and of the show, the model, cost and time. Each carries a **receipt**: the SHA-256 of its own content (keys sorted, no spaces), so a file edited afterwards no longer matches. `--verify` on the index also checks that each case file is the one the index recorded, so swapping one intact file for another is caught. Files are created, never overwritten: reusing a folder is an error.
+
+**A receipt is a content hash, not a signature.** It shows a file was not changed after it was written, not who wrote it, and someone who can edit the file and recompute the hash can forge both. To make it mean more, keep the index's hash somewhere the machine that ran the bench cannot change (commit it, or write it down), the same advice as for the governance key's verifying key ([security.md](security.md)).
 
 ## What it does not measure
 
