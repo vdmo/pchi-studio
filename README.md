@@ -83,4 +83,8 @@ See `PRICING.md` for what's free (all of the above, unrestricted,
 self-hosted) versus what's a real paid service, and `docs/LIMITATIONS.md`
 for what this does and doesn't yet prove.
 
-For full details, please open `docs/index.html` or check the individual `README.md` files in each sub-directory.
+## PCHI Studio documentation
+
+The manual for Studio, the runtime and the tools starts at [`docs/README.md`](docs/README.md): [overview](docs/overview.md), [getting started](docs/getting-started.md), [Studio guide](docs/studio-guide.md), [runtime reference](docs/runtime-reference.md), [command-line tools](docs/tools-reference.md), [show-day handbook](docs/show-day-handbook.md), [security](docs/security.md), [troubleshooting](docs/troubleshooting.md) and [glossary](docs/glossary.md).
+
+For the protocol website, open `docs/index.html`; each sub-directory has its own `README.md`.
