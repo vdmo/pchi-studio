@@ -8,5 +8,6 @@ members = [
     "crates/pchi-cli",
     "crates/pchi-eventbus",
     "crates/pchi-eventstore",
+    "crates/pchi-memory",
     "crates/pchi-studio-api",
 ]

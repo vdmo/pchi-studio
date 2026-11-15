@@ -53,6 +53,7 @@ pub mod inputs;
 pub mod mcp;
 pub mod midi;
 pub mod links;
+pub mod memory_api;
 pub mod obs;
 pub mod ltc;
 pub mod output;
@@ -178,6 +179,8 @@ pub struct Show {
     paused: Mutex<Option<Value>>,
     /// How this runtime sees the witness: shown in `/role`.
     witness_view: Mutex<Option<Value>>,
+    /// Agent memory (`--memory FILE`), if on. Never consulted by a cue, a timer or a takeover.
+    memory: Mutex<Option<std::sync::Arc<pchi_memory::Memory>>>,
     /// The address other machines should use to reach this runtime (`--advertise`), told to the witness and to `GET /primary`.
     advertise: Mutex<Option<String>>,
     failover_key: Mutex<Option<String>>,
@@ -242,6 +245,7 @@ impl Show {
             fenced: Mutex::new(None),
             paused: Mutex::new(None),
             witness_view: Mutex::new(None),
+            memory: Mutex::new(None),
             advertise: Mutex::new(None),
             failover_key: Mutex::new(None),
             vote_buf: Mutex::new(Vec::new()),
@@ -1700,6 +1704,19 @@ impl Show {
         self.fenced.lock().unwrap().is_some()
     }
 
+    pub fn set_memory(&self, m: Option<std::sync::Arc<pchi_memory::Memory>>) {
+        *self.memory.lock().unwrap() = m;
+    }
+
+    pub fn memory(&self) -> Option<std::sync::Arc<pchi_memory::Memory>> {
+        self.memory.lock().unwrap().clone()
+    }
+
+    /// The show's id, which memory files its notes under.
+    pub fn show_id(&self) -> String {
+        self.inner.lock().unwrap().engine.chart.id.clone().unwrap_or_else(|| "show".into())
+    }
+
     pub fn set_advertise(&self, addr: Option<String>) {
         *self.advertise.lock().unwrap() = addr.filter(|a| !a.is_empty());
     }
@@ -2069,6 +2086,12 @@ pub fn router_with_token(show: Arc<Show>, token: Option<String>) -> Router {
         .route("/input", post(post_input))
         .route("/recording", get(get_recording))
         .route("/run-report", get(get_run_report))
+        .route("/memory", get(memory_api::get_memory).post(memory_api::post_memory))
+        .route("/memory/list", get(memory_api::get_memory_list))
+        .route("/memory/derive", post(memory_api::post_memory_derive))
+        .route("/memory/:id/verify", post(memory_api::post_memory_verify))
+        .route("/memory/:id/supersede", post(memory_api::post_memory_supersede))
+        .route("/memory/:id/settle", post(memory_api::post_memory_settle))
         .route("/replay", get(get_replay).post(post_replay).layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024)))
         .route("/role", get(get_role))
         .route("/primary", get(get_primary))

@@ -5,7 +5,7 @@
 //! API, **as an agent**: it sends `X-Pchi-Actor: agent:<name>`, and the runtime holds it to what an agent may do.
 //!
 //! What an agent can do here: read the show and the run, run the Doors check, **rehearse** an edit against what already happened,
-//! **propose** an edit (it waits for a person to approve it), and hit STOP LASERS (the safe direction).
+//! **propose** an edit (it waits for a person to approve it), hit STOP LASERS (the safe direction), and use the show's **memory**: ask it (it says when it does not know) and write drafts to it (a person verifies).
 //!
 //! What is not offered, and would be refused if it were asked anyway: pressing GO, arming a laser, trying or test-firing a device,
 //! approving a proposal, undoing a send, running a poll, editing directly. The runtime enforces that, not this file: leaving a tool
@@ -97,6 +97,8 @@ pub fn tools() -> Value {
             "said": {"type": "string", "description": "Why, in words. Kept in the record."}, "dry_run": {"type": "boolean"}}), &["scene", "lane", "cue", "said"])},
         {"name": "pchi_proposals", "description": "Every proposal so far and where each stands (pending, approved, rejected, superseded). Read-only.", "inputSchema": schema(json!({}), &[])},
         {"name": "pchi_report", "description": "How the run has gone: cues fired and how late, deliveries that failed, edits made, and who did what. Read-only.", "inputSchema": schema(json!({}), &[])},
+        {"name": "pchi_memory_recall", "description": "Ask the show's memory what is known: past incidents, venue facts, conventions, decisions people made and why. It answers from notes with who vouched for each (trust: verified or draft), and it SAYS WHEN IT DOES NOT KNOW (answer: false, with the reason): never fill that gap with a guess. Read-only.", "inputSchema": schema(json!({"question": {"type": "string", "description": "What you want to know, in a sentence."}, "kind": {"type": "string", "description": "Optional: convention, venue, incident, decision, preference or task."}}), &["question"])},
+        {"name": "pchi_memory_remember", "description": "Write down one thing worth remembering: a short statement of a decision or a piece of evidence, not a conversation. It is stored as a DRAFT under your name and is weighted lower until a person verifies it; you cannot verify, replace or delete memory. If it contradicts something remembered it is marked in conflict and nobody is overwritten.", "inputSchema": schema(json!({"text": {"type": "string", "description": "The statement."}, "kind": {"type": "string", "description": "convention, venue, incident, decision, preference or task."}, "key": {"type": "string", "description": "Optional topic, such as house-desk-ip: a different statement under the same key is a conflict a person must settle."}}), &["text"])},
         {"name": "pchi_stop_lasers", "description": "The hard stop: disarm every laser and send each tool's safe 'go dark' message. The one thing an agent may do to the live show, because it only makes things safer. A person must arm a laser again.", "inputSchema": schema(json!({}), &[])},
     ])
 }
@@ -175,6 +177,21 @@ impl Client {
             "pchi_report" => {
                 let r = self.ok("GET", "/report", None).await?;
                 Ok(pretty(&json!({"summary": r["summary"], "problems": r["problems"], "edits": r["edits"], "who_did_what": r["decisions"]})))
+            }
+            "pchi_memory_recall" => {
+                let q = args["question"].as_str().unwrap_or("").trim();
+                if q.is_empty() {
+                    return Err("ask a question".into());
+                }
+                let mut path = format!("/memory?q={}", enc(q));
+                if let Some(k) = args["kind"].as_str() {
+                    path += &format!("&kind={}", enc(k));
+                }
+                Ok(pretty(&self.ok("GET", &path, None).await?))
+            }
+            "pchi_memory_remember" => {
+                let body = json!({"text": args["text"], "kind": args["kind"], "key": args["key"]});
+                Ok(pretty(&self.ok("POST", "/memory", Some(&body.to_string())).await?))
             }
             "pchi_stop_lasers" => Ok(pretty(&self.ok("POST", "/laser/stop", None).await?)),
             other => Err(format!("there is no tool '{other}'. This server can only read, rehearse, propose and stop lasers; it cannot press GO, arm, approve or edit directly.")),

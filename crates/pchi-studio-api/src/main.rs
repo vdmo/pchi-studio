@@ -112,6 +112,9 @@ struct Cli {
     /// Standby only: the primary's --token, if different from this runtime's own.
     #[arg(long, env = "PCHI_PRIMARY_TOKEN")]
     primary_token: Option<String>,
+    /// Agent memory, a SQLite file: what went wrong and what was decided, kept as typed notes that fade, with who vouched for each. An agent may write drafts and ask; a person verifies. Never in the show's path. A standby has its own file: run POST /memory/derive after a takeover. See docs/memory.md.
+    #[arg(long, value_name = "FILE", env = "PCHI_MEMORY")]
+    memory: Option<String>,
     /// HOST:PORT of a witness (pchi-witness): sending becomes a lease it grants. This runtime sends only while it holds the lease and pauses when it cannot prove it does; a standby takes over only when granted it. Needs --failover-key (the witness has the same). See docs/failover.md.
     #[arg(long, value_name = "HOST:PORT", env = "PCHI_WITNESS", requires = "failover_key")]
     witness: Option<String>,
@@ -371,6 +374,9 @@ fn configure(show: &std::sync::Arc<Show>, cli: &Cli, how: &str) -> anyhow::Resul
         show.receipt("show.start", "ALLOW", &pchi_studio_api::governance::Actor::Person(None), &format!("runtime {how}{}", if cli.send { " with sending ON" } else { " (dry-run)" }));
     }
     show.set_failover_key(cli.failover_key.clone());
+    if let Some(p) = &cli.memory {
+        show.set_memory(Some(std::sync::Arc::new(pchi_memory::Memory::open(p).map_err(|e| anyhow::anyhow!("opening memory {p}: {e}"))?)));
+    }
     Ok(())
 }
 
