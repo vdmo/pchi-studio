@@ -15,7 +15,7 @@ PCHI runtime ──────────────────────�
 | | |
 |---|---|
 | **Watch** | Shows PCHI's current scene, how long it has been held, what waits for a person, and the next event that would fire. In the script panel, and in a **text source** you name, so it can sit on the multiview as a confidence monitor. |
-| **Check** | Reads every OBS scene name the show's cues will ask for, compares them with the scenes this OBS has, and tells PCHI whether the department is **READY**. A missing scene is named in the note ("missing in OBS: Slides"). A cue to a scene that does not exist is found before doors, not at the cue. |
+| **Check** | Reads every OBS scene name the show's cues will ask for, compares them with the scenes this OBS has, and tells PCHI whether the department is **READY**. A missing scene is named in the note ("missing in OBS: SLIDES"). A cue to a scene that does not exist is found before doors, not at the cue. |
 | **GO hotkey** | Optional, off by default: one OBS hotkey, "PCHI: send the next event". It is a *person's* action, like the GO button in Studio; the runtime decides (edit key, GO gate). |
 
 It never switches the program scene itself. PCHI does that through the rig, so there is one place that cuts the picture and one record of it.
@@ -24,7 +24,7 @@ It identifies itself as `person:obs`. It does not claim to be an agent, and it d
 
 ## Run the demo
 
-1. **OBS:** make three scenes named `Starting Soon`, `Host`, `Slides`. In *Tools → WebSocket Server Settings* enable the server and note the port (usually 4455) and the password. Optionally add a text source called `PCHI status` to any scene.
+1. **OBS:** make three scenes named `STARTING_SOON`, `HOST`, `SLIDES`. In *Tools → WebSocket Server Settings* enable the server and note the port (usually 4455) and the password. Optionally add a text source called `PCHI status` to any scene.
 2. **Runtime:** edit the `obs-1` node in `tools/obs-pchi/demo/obs-demo.pchi` if your port is not 4455, set the password with the environment variable (not the file), and start it sending:
 
    ```bash
@@ -34,8 +34,8 @@ It identifies itself as `person:obs`. It does not claim to be an agent, and it d
 
 3. **Studio:** open it (`npm run dev` in `pchi-studio-react`) and look at the Rig tab: `OBS (stream)` should show as linked.
 4. **Plugin:** OBS *Tools → Scripts → +* and choose `tools/obs-pchi/pchi_obs.py`. (OBS needs a Python install set under the *Python Settings* tab.) Fill in the runtime address `127.0.0.1:3100` and the text source name.
-5. **Watch it check:** rename the `Slides` scene in OBS. Within a couple of seconds the Live tab shows the `visual` department **not ready** with the note `missing in OBS: Slides`; rename it back and it turns ready.
-6. **Run it:** press GO for `LIVE` in Studio (or the OBS hotkey, if you ticked it). OBS cuts to `Host`; `SLIDES` cuts to `Slides`; the text source follows each step.
+5. **Watch it check:** rename the `SLIDES` scene in OBS. Within a couple of seconds the Live tab shows the `visual` department **not ready** with the note `missing in OBS: SLIDES`; rename it back and it turns ready.
+6. **Run it:** press GO for `LIVE` in Studio (or the OBS hotkey, if you ticked it). OBS cuts to `HOST`; `SLIDES` cuts to `SLIDES`; the text source follows each step.
 
 ## Tests
 

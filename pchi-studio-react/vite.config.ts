@@ -18,7 +18,8 @@ export default defineConfig({
     proxy: {
       // pchi-studio-api: live show state feed
       '/api': {
-        target: 'http://127.0.0.1:3100',
+        // the runtime Studio's Live tab follows: PCHI_RUNTIME=127.0.0.1:3101 npm run dev to use another
+        target: `http://${process.env.PCHI_RUNTIME || '127.0.0.1:3100'}`,
         ws: true,
         rewrite: (p) => p.replace(/^\/api/, ''),
       },

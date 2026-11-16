@@ -183,11 +183,13 @@ def _scene_names():
 
 
 def _worker():
-    link = Link(Pchi(_cfg["addr"], _cfg["token"], _cfg["key"]))
-    scenes = []
+    link, made_for = None, None
     while not _stop.is_set():
         with _lock:
             scenes = list(_state.get("scenes", []))
+        want = (_cfg["addr"], _cfg["token"], _cfg["key"])
+        if want != made_for:  # the settings were changed in the panel: talk to the new address from now on
+            link, made_for = Link(Pchi(*want)), want
         out = link.round(scenes)
         with _lock:
             _state.update(text=out["text"], report=out["report"], describe=out["describe"])

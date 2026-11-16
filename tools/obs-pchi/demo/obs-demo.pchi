@@ -11,24 +11,24 @@
   "showchart": {
     "id": "obs-demo",
     "name": "OBS demo",
-    "initial": "WAITING",
+    "initial": "STARTING_SOON",
     "states": [
-      { "id": "WAITING", "label": "Starting soon", "timeline": { "duration_ms": 3000, "lanes": [
+      { "id": "STARTING_SOON", "label": "Starting soon", "timeline": { "duration_ms": 3000, "lanes": [
         { "id": "visual", "name": "OBS", "dept": "visual", "cues": [
-          { "id": "v0", "at_ms": 0, "num": 1, "action": { "kind": "scene.activate", "payload": { "scene": "Starting Soon" } } } ] }
+          { "id": "v0", "at_ms": 0, "num": 1, "action": { "kind": "scene.activate", "payload": { "scene": "STARTING_SOON" } } } ] }
       ] } },
       { "id": "HOST", "label": "Host on camera", "timeline": { "duration_ms": 6000, "lanes": [
         { "id": "visual", "name": "OBS", "dept": "visual", "cues": [
-          { "id": "v1", "at_ms": 0, "num": 2, "action": { "kind": "scene.activate", "payload": { "scene": "Host" } } } ] }
+          { "id": "v1", "at_ms": 0, "num": 2, "action": { "kind": "scene.activate", "payload": { "scene": "HOST" } } } ] }
       ] } },
-      { "id": "SLIDES", "label": "Slides", "timeline": { "duration_ms": 6000, "lanes": [
+      { "id": "SLIDES", "label": "SLIDES", "timeline": { "duration_ms": 6000, "lanes": [
         { "id": "visual", "name": "OBS", "dept": "visual", "cues": [
-          { "id": "v2", "at_ms": 0, "num": 3, "action": { "kind": "scene.activate", "payload": { "scene": "Slides" } } } ] }
+          { "id": "v2", "at_ms": 0, "num": 3, "action": { "kind": "scene.activate", "payload": { "scene": "SLIDES" } } } ] }
       ] } },
       { "id": "END", "label": "Thanks for watching" }
     ],
     "transitions": [
-      { "source": "WAITING", "target": "HOST", "event": "LIVE" },
+      { "source": "STARTING_SOON", "target": "HOST", "event": "LIVE" },
       { "source": "HOST", "target": "SLIDES", "event": "SLIDES" },
       { "source": "SLIDES", "target": "HOST", "event": "BACK" },
       { "source": "HOST", "target": "END", "event": "END" },

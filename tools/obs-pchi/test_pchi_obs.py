@@ -12,7 +12,7 @@ import pchi_obs as p
 
 SHOW = json.load(open(os.path.join(os.path.dirname(__file__), "demo", "obs-demo.pchi")))
 DESCRIBE = {"rig": [{"id": "obs-1", "type": "obs", "dept": "visual"}, {"id": "x", "type": "x32", "dept": "audio"}],
-            "now": {"scene": "WAITING", "held_for_ms": 0, "ways_out": [{"event": "LIVE", "would_fire_now": True}]}, "waiting_for_a_person": []}
+            "now": {"scene": "STARTING_SOON", "held_for_ms": 0, "ways_out": [{"event": "LIVE", "would_fire_now": True}]}, "waiting_for_a_person": []}
 
 
 class Fake(http.server.BaseHTTPRequestHandler):
@@ -53,32 +53,32 @@ class Base(unittest.TestCase):
 class T(Base):
 
     def test_reads_the_scenes_the_show_asks_for_in_order(self):
-        self.assertEqual(p.scenes_the_show_asks_for({"definition": SHOW["showchart"]}, "visual"), ["Starting Soon", "Host", "Slides"])
+        self.assertEqual(p.scenes_the_show_asks_for({"definition": SHOW["showchart"]}, "visual"), ["STARTING_SOON", "HOST", "SLIDES"])
         self.assertEqual(p.scenes_the_show_asks_for({"definition": SHOW["showchart"]}, "audio"), [], "another department's lane is not OBS's business")
 
     def test_ready_only_if_every_scene_exists_and_the_missing_one_is_named(self):
         self.assertEqual(p.check_scenes(["A", "B"], ["A", "B", "C"])[0], True)
-        ok, note = p.check_scenes(["A", "Slides"], ["A"])
+        ok, note = p.check_scenes(["A", "SLIDES"], ["A"])
         self.assertFalse(ok)
-        self.assertIn("Slides", note)
+        self.assertIn("SLIDES", note)
         self.assertTrue(p.check_scenes([], [])[0])
 
     def test_status_and_next_event(self):
-        self.assertIn("WAITING", p.status_line(DESCRIBE))
+        self.assertIn("STARTING_SOON", p.status_line(DESCRIBE))
         self.assertIn("next: LIVE", p.status_line(DESCRIBE))
         self.assertEqual(p.next_event(DESCRIBE), "LIVE")
         self.assertIsNone(p.next_event({"now": {"ways_out": [{"event": "X", "would_fire_now": False}]}}))
 
     def test_a_round_reports_not_ready_for_a_missing_scene_then_ready_once_it_exists(self):
         link = p.Link(p.Pchi(self.addr))
-        out = link.round(["Starting Soon", "Host"])
+        out = link.round(["STARTING_SOON", "HOST"])
         self.assertTrue(out["ok"])
         self.assertIn("NOT READY", out["report"])
         posts = [c for c in Fake.calls if c[0] == "POST"]
-        self.assertEqual(posts[-1][1:], ("/ready/visual", {"ready": False, "note": "missing in OBS: Slides"}))
-        link.round(["Starting Soon", "Host"])
+        self.assertEqual(posts[-1][1:], ("/ready/visual", {"ready": False, "note": "missing in OBS: SLIDES"}))
+        link.round(["STARTING_SOON", "HOST"])
         self.assertEqual(len([c for c in Fake.calls if c[0] == "POST"]), 1, "an unchanged answer is not sent again straight away")
-        out = link.round(["Starting Soon", "Host", "Slides"])
+        out = link.round(["STARTING_SOON", "HOST", "SLIDES"])
         self.assertIn("READY", out["report"])
         self.assertEqual([c for c in Fake.calls if c[0] == "POST"][-1][2]["ready"], True)
 
@@ -108,7 +108,7 @@ class FakeObs:
     def obs_data_array_release(self, *a): pass
     def timer_add(self, fn, ms): self.timers.append(fn)
     def timer_remove(self, fn): self.timers.remove(fn)
-    def obs_frontend_get_scene_names(self): return ["Starting Soon", "Host", "Slides"]
+    def obs_frontend_get_scene_names(self): return ["STARTING_SOON", "HOST", "SLIDES"]
     def obs_get_source_by_name(self, n): return self if n == "PCHI status" else None
     def obs_data_create(self): return {}
     def obs_data_set_string(self, d, k, v): d[k] = v
@@ -137,7 +137,7 @@ class Glue(Base):
                     break
                 threading.Event().wait(0.1)
             p._tick()
-            self.assertIn("WAITING", fo.text or "")
+            self.assertIn("STARTING_SOON", fo.text or "")
             self.assertTrue([c for c in Fake.calls if c[0] == "POST" and c[1] == "/ready/visual" and c[2]["ready"]])
             p._on_hotkey(True)
             threading.Event().wait(0.5)
@@ -158,16 +158,16 @@ class Live(unittest.TestCase):
     def test_against_the_real_runtime(self):
         addr = os.environ["LIVE"]
         link = p.Link(p.Pchi(addr))
-        bad = link.round(["Starting Soon", "Host"])
+        bad = link.round(["STARTING_SOON", "HOST"])
         self.assertTrue(bad["ok"], bad)
         self.assertIn("NOT READY", bad["report"])
         self.assertEqual(p.Pchi(addr).describe()["readiness"]["visual"]["ready"], False)
-        good = link.round(["Starting Soon", "Host", "Slides"])
+        good = link.round(["STARTING_SOON", "HOST", "SLIDES"])
         self.assertIn("READY", good["report"])
         r = p.Pchi(addr).describe()["readiness"]["visual"]
         self.assertTrue(r["ready"] and r["source"] == "http", r)
         self.assertEqual(p.next_event(p.Pchi(addr).describe()), "LIVE")
-        self.assertIn("WAITING", good["text"])
+        self.assertIn("STARTING_SOON", good["text"])
 
 
 if __name__ == "__main__":
