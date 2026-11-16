@@ -1,0 +1,33 @@
+{
+  "version": "1.0",
+  "project": "TiXL demo",
+  "name": "tixl-demo",
+  "nodes": [
+    { "id": "tixl-1", "type": "tixl", "label": "TiXL (visuals)", "position": { "x": 0, "y": 0 }, "dept": "visual", "params": { "host": "127.0.0.1", "port": 9000 } }
+  ],
+  "edges": [],
+  "timeline": [],
+  "assets": [],
+  "showchart": {
+    "id": "tixl-demo",
+    "name": "TiXL demo",
+    "initial": "INTRO",
+    "states": [
+      { "id": "INTRO", "label": "Intro", "timeline": { "duration_ms": 4000, "lanes": [
+        { "id": "visual", "name": "TiXL", "dept": "visual", "cues": [
+          { "id": "v1", "at_ms": 0, "num": 1, "action": { "kind": "scene.activate", "payload": { "scene": "1" } } },
+          { "id": "v1n", "at_ms": 500, "num": 2, "action": { "kind": "scene.activate", "payload": { "scene": "INTRO" } } } ] }
+      ] } },
+      { "id": "DROP", "label": "The drop", "timeline": { "duration_ms": 4000, "lanes": [
+        { "id": "visual", "name": "TiXL", "dept": "visual", "cues": [
+          { "id": "v2", "at_ms": 0, "num": 3, "action": { "kind": "scene.activate", "payload": { "scene": "2" } } },
+          { "id": "v2n", "at_ms": 500, "num": 4, "action": { "kind": "scene.activate", "payload": { "scene": "DROP" } } } ] }
+      ] } },
+      { "id": "OUTRO", "label": "Outro" }
+    ],
+    "transitions": [
+      { "source": "INTRO", "target": "DROP", "event": "DROP" },
+      { "source": "DROP", "target": "OUTRO", "event": "OUTRO" }
+    ]
+  }
+}

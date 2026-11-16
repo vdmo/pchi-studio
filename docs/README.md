@@ -50,6 +50,7 @@ This is the map. Start with the first section that fits you.
 - [bench.md](bench.md): the agent benchmark
 - [twin.md](twin.md): the rig twin, stand-in devices that can fail
 - [obs-plugin.md](obs-plugin.md): an OBS script that shows PCHI's state in OBS and reports whether the scenes the show needs exist
+- [../tools/tixl/README.md](../tools/tixl/README.md): TiXL as a rig device (OSC profile, demo show, a stand-in listener); not yet run against TiXL
 
 **After the show**
 - [replay.md](replay.md): recordings and replay

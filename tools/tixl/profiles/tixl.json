@@ -1,0 +1,13 @@
+{
+  "id": "tixl",
+  "name": "TiXL",
+  "dept": "visual",
+  "kinds": ["scene.activate"],
+  "hint": "a scene number (3), a scene name (INTRO), or an OSC address in full (/pchi/anything)",
+  "rules": [
+    {"match": "/[A-Za-z0-9/_.-]{1,199}", "send": "{0}", "args": [{"float": 1}], "basis": "memory", "source": "TiXL's OscInput collects any address it is sent; a value of 1.0 is a trigger in a graph. Not yet run against TiXL: see tools/tixl/README.md"},
+    {"match": "\\d{1,4}", "send": "/pchi/scene", "args": [{"float": "{0}"}], "basis": "memory", "source": "one address carrying the scene number as a float, to feed a Switch in the graph (OscInput's outputs are float). Not yet run against TiXL"},
+    {"match": "[A-Za-z][A-Za-z0-9_-]{0,31}", "send": "/pchi/scene/{0}", "args": [{"float": 1}], "basis": "memory", "source": "one address per scene name, value 1.0, so a graph can look at the one address it cares about. Not yet run against TiXL"}
+  ],
+  "notes": "TiXL has no fixed control addresses: you build the graph that reads them. The port is the one set on the OscInput operator."
+}
