@@ -49,6 +49,7 @@ This is the map. Start with the first section that fits you.
 - [narration.md](narration.md): what a proposed edit says in words
 - [bench.md](bench.md): the agent benchmark
 - [twin.md](twin.md): the rig twin, stand-in devices that can fail
+- [obs-plugin.md](obs-plugin.md): an OBS script that shows PCHI's state in OBS and reports whether the scenes the show needs exist
 
 **After the show**
 - [replay.md](replay.md): recordings and replay

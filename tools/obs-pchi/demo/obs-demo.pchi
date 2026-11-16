@@ -1,0 +1,38 @@
+{
+  "version": "1.0",
+  "project": "OBS demo",
+  "name": "obs-demo",
+  "nodes": [
+    { "id": "obs-1", "type": "obs", "label": "OBS (stream)", "position": { "x": 0, "y": 0 }, "dept": "visual", "params": { "host": "127.0.0.1", "port": 4455 } }
+  ],
+  "edges": [],
+  "timeline": [],
+  "assets": [],
+  "showchart": {
+    "id": "obs-demo",
+    "name": "OBS demo",
+    "initial": "WAITING",
+    "states": [
+      { "id": "WAITING", "label": "Starting soon", "timeline": { "duration_ms": 3000, "lanes": [
+        { "id": "visual", "name": "OBS", "dept": "visual", "cues": [
+          { "id": "v0", "at_ms": 0, "num": 1, "action": { "kind": "scene.activate", "payload": { "scene": "Starting Soon" } } } ] }
+      ] } },
+      { "id": "HOST", "label": "Host on camera", "timeline": { "duration_ms": 6000, "lanes": [
+        { "id": "visual", "name": "OBS", "dept": "visual", "cues": [
+          { "id": "v1", "at_ms": 0, "num": 2, "action": { "kind": "scene.activate", "payload": { "scene": "Host" } } } ] }
+      ] } },
+      { "id": "SLIDES", "label": "Slides", "timeline": { "duration_ms": 6000, "lanes": [
+        { "id": "visual", "name": "OBS", "dept": "visual", "cues": [
+          { "id": "v2", "at_ms": 0, "num": 3, "action": { "kind": "scene.activate", "payload": { "scene": "Slides" } } } ] }
+      ] } },
+      { "id": "END", "label": "Thanks for watching" }
+    ],
+    "transitions": [
+      { "source": "WAITING", "target": "HOST", "event": "LIVE" },
+      { "source": "HOST", "target": "SLIDES", "event": "SLIDES" },
+      { "source": "SLIDES", "target": "HOST", "event": "BACK" },
+      { "source": "HOST", "target": "END", "event": "END" },
+      { "source": "SLIDES", "target": "END", "event": "END" }
+    ]
+  }
+}
