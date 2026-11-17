@@ -113,6 +113,26 @@ export default function App() {
     window.addEventListener('keydown', h)
     return () => window.removeEventListener('keydown', h)
   }, [])
+  // Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y on the Cue sheet. The Show and Timeline tabs bind these keys themselves (binding them here too would
+  // undo twice), the Rig is not part of undo, and the Live tab has none. Typing in a field keeps the field's own undo, and an open
+  // dialog is not the moment to change the show underneath it.
+  const undoRef = useRef({ undo: history.undo, redo: history.redo })
+  undoRef.current = { undo: history.undo, redo: history.redo }
+  const blocked = mode !== 'cues' || lib !== null || help
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement | null
+      if (blocked || e.altKey || !(e.ctrlKey || e.metaKey)) return
+      if (el && (/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || el.isContentEditable)) return
+      const k = e.key.toLowerCase()
+      if (k === 'z' && !e.shiftKey) undoRef.current.undo()
+      else if ((k === 'z' && e.shiftKey) || k === 'y') undoRef.current.redo()
+      else return
+      e.preventDefault()
+    }
+    window.addEventListener('keydown', h)
+    return () => window.removeEventListener('keydown', h)
+  }, [blocked])
   const seq = useRef(1)
 
   const pushLog = useCallback((dir: LogEntry['dir'], event: PchiEvent) => {
