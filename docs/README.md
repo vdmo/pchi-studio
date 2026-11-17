@@ -9,6 +9,7 @@ This is the map. Start with the first section that fits you.
 | If you are... | Read |
 |---|---|
 | New, want to know what this is | [overview.md](overview.md) |
+| Asking how it differs from QLab, Medialon and the rest | [positioning.md](positioning.md) |
 | Installing and running it for the first time | [getting-started.md](getting-started.md) |
 | Building a show in the Studio editor | [studio-guide.md](studio-guide.md), [command-bar.md](command-bar.md) |
 | Running a show on the night | [show-day-handbook.md](show-day-handbook.md) |
