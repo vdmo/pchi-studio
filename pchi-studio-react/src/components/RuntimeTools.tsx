@@ -396,12 +396,12 @@ export async function tryCue(id: string, value: string): Promise<{ ok: boolean; 
   return { ok: true, status: String(r.body?.status), sentAs: sent.map((m) => `${m.address}${m.args.length ? ' ' + m.args.map((a) => JSON.stringify(a)).join(' ') : ''}`).join(', '), error: r.body?.error as string | undefined }
 }
 
-/** Arm or disarm a laser. Arming needs the operator key when the runtime has one; it is asked for once per tab. */
-export async function armLaser(id: string, armed: boolean): Promise<{ ok: boolean; error?: string }> {
+/** Arm or disarm a laser or a motion device (`what` is for the key prompt). Arming needs a key when the runtime has one; it is asked for once per tab. */
+export async function armLaser(id: string, armed: boolean, what = 'a laser'): Promise<{ ok: boolean; error?: string }> {
   const go = () => api(`/devices/${encodeURIComponent(id)}/arm?armed=${armed ? 1 : 0}`, { method: 'POST' }).catch(() => null)
   let r = await go()
   if (r?.status === 403 && r.body?.locked) {
-    const k = window.prompt('This runtime needs your key to arm a laser:')
+    const k = window.prompt(`This runtime needs your key to arm ${what}:`)
     if (!k) return { ok: false, error: 'Not armed: the operator key is needed.' }
     setEditKey(k.trim())
     r = await go()
@@ -418,6 +418,16 @@ export async function armLaser(id: string, armed: boolean): Promise<{ ok: boolea
 export async function stopLasers(): Promise<{ ok: boolean; notes: string[]; error?: string }> {
   const r = await api('/laser/stop', { method: 'POST' }).catch(() => null)
   if (!r?.ok) return { ok: false, notes: [], error: 'The runtime did not answer: use the laser software\'s own stop NOW.' }
+  return { ok: true, notes: (r.body?.notes as string[]) ?? [] }
+}
+
+/**
+ * The motion stop: disarm every motion device and send each tool's stop message. No key needed.
+ * It is a software request over a network, NOT an emergency stop: the machine's own emergency stop is the one to use for any danger.
+ */
+export async function stopMotion(): Promise<{ ok: boolean; notes: string[]; error?: string }> {
+  const r = await api('/motion/stop', { method: 'POST' }).catch(() => null)
+  if (!r?.ok) return { ok: false, notes: [], error: "The runtime did not answer: use the machine's own emergency stop NOW." }
   return { ok: true, notes: (r.body?.notes as string[]) ?? [] }
 }
 

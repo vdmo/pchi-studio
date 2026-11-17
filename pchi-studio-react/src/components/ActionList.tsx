@@ -12,6 +12,7 @@ export const ACTION_KINDS: Record<string, string> = {
   'scene.deactivate': 'scene',
   'lighting.look': 'look',
   'laser.cue': 'cue',
+  'motion.run': 'program',
   'audio.scene': 'scene',
   'audio.snapshot': 'snapshot',
   'playlist.play': 'playlist',

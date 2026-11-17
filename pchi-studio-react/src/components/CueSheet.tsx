@@ -16,6 +16,7 @@ const KIND_NAME: Record<string, string> = {
   'renderer.activate': 'Renderer',
   'lighting.look': 'Look',
   'laser.cue': 'Laser cue',
+  'motion.run': 'Motion: run program',
   'audio.snapshot': 'Snapshot',
   'audio.scene': 'Audio scene',
   'cue.trigger': 'Cue',

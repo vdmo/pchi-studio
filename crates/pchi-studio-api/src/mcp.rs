@@ -100,6 +100,7 @@ pub fn tools() -> Value {
         {"name": "pchi_report", "description": "How the run has gone: cues fired and how late, deliveries that failed, edits made, and who did what. Read-only.", "inputSchema": schema(json!({}), &[])},
         {"name": "pchi_memory_recall", "description": "Ask the show's memory what is known: past incidents, venue facts, conventions, decisions people made and why. It answers from notes with who vouched for each (trust: verified or draft), and it SAYS WHEN IT DOES NOT KNOW (answer: false, with the reason): never fill that gap with a guess. Read-only.", "inputSchema": schema(json!({"question": {"type": "string", "description": "What you want to know, in a sentence."}, "kind": {"type": "string", "description": "Optional: convention, venue, incident, decision, preference or task."}}), &["question"])},
         {"name": "pchi_memory_remember", "description": "Write down one thing worth remembering: a short statement of a decision or a piece of evidence, not a conversation. It is stored as a DRAFT under your name and is weighted lower until a person verifies it; you cannot verify, replace or delete memory. If it contradicts something remembered it is marked in conflict and nobody is overwritten.", "inputSchema": schema(json!({"text": {"type": "string", "description": "The statement."}, "kind": {"type": "string", "description": "convention, venue, incident, decision, preference or task."}, "key": {"type": "string", "description": "Optional topic, such as house-desk-ip: a different statement under the same key is a conflict a person must settle."}}), &["text"])},
+        {"name": "pchi_stop_motion", "description": "Disarm every motion device (robots, moving rigs) and send each tool's stop message. Always allowed, because it only makes things safer. It is a software request over a network and NOT an emergency stop: if anyone may be near a moving machine, say so and tell a person to use the machine's own emergency stop. A person must arm motion again.", "inputSchema": schema(json!({}), &[])},
         {"name": "pchi_stop_lasers", "description": "The hard stop: disarm every laser and send each tool's safe 'go dark' message. The one thing an agent may do to the live show, because it only makes things safer. A person must arm a laser again.", "inputSchema": schema(json!({}), &[])},
     ])
 }
@@ -196,7 +197,8 @@ impl Client {
                 Ok(pretty(&self.ok("POST", "/memory", Some(&body.to_string())).await?))
             }
             "pchi_stop_lasers" => Ok(pretty(&self.ok("POST", "/laser/stop", None).await?)),
-            other => Err(format!("there is no tool '{other}'. This server can only read, rehearse, propose and stop lasers; it cannot press GO, arm, approve or edit directly.")),
+            "pchi_stop_motion" => Ok(pretty(&self.ok("POST", "/motion/stop", None).await?)),
+            other => Err(format!("there is no tool '{other}'. This server can only read, rehearse, propose and stop lasers and motion; it cannot press GO, arm, approve or edit directly.")),
         }
     }
 

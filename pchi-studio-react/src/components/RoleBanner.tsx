@@ -85,7 +85,7 @@ export default function RoleBanner() {
     if (r.role === 'paused') {
       return (
         <p className="role-banner fenced" role="alert">
-          <b>This runtime is paused.</b> It does not hold the witness's lease, so it sends nothing, streams no lighting and ignores inputs until it does: {r.paused?.why ?? 'the witness has not granted it'}. It goes on by itself when the lease is held again; its lasers stay disarmed.
+          <b>This runtime is paused.</b> It does not hold the witness's lease, so it sends nothing, streams no lighting and ignores inputs until it does: {r.paused?.why ?? 'the witness has not granted it'}. It goes on by itself when the lease is held again; its lasers and motion devices stay disarmed.
         </p>
       )
     }
@@ -104,7 +104,7 @@ export default function RoleBanner() {
     if ((r.epoch ?? 0) > 0) {
       return (
         <p className="role-banner took" role="status">
-          <b>Running as takeover {r.epoch}.</b> This runtime took over from another; lasers were left disarmed and departments need to report READY again.
+          <b>Running as takeover {r.epoch}.</b> This runtime took over from another; lasers and motion devices were left disarmed and departments need to report READY again.
         </p>
       )
     }

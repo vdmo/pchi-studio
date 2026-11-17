@@ -46,7 +46,7 @@ export type NodeType =
   // distribution
   | 'ndi' | 'osc' | 'webrtc' | 'rtsp'
   // venue
-  | 'ghost-arcade' | 'projector' | 'led-wall' | 'audio-zone' | 'laser' | 'lighting-desk' | 'audio-console'
+  | 'ghost-arcade' | 'projector' | 'led-wall' | 'audio-zone' | 'laser' | 'lighting-desk' | 'audio-console' | 'motion'
   // tool profiles (the exact OSC dialect of a popular tool)
   | 'resolume' | 'grandma3' | 'eos' | 'x32' | 'beyond' | 'qlab' | 'magicq' | 'artnet' | 'sacn' | 'obs'
   // intelligence
@@ -100,6 +100,7 @@ export const NODE_CATALOG: NodeSpec[] = [
   spec('venue', 'led-wall', 'LED Wall', {}),
   spec('venue', 'audio-zone', 'Audio Zone', {}),
   spec('venue', 'laser', 'Laser', { host: '127.0.0.1', port: 8000 }),
+  spec('venue', 'motion', 'Motion (robot, generic OSC)', { host: '127.0.0.1', port: 9100 }),
   spec('venue', 'lighting-desk', 'Lighting Desk', { host: '127.0.0.1', port: 7700 }),
   spec('venue', 'audio-console', 'Audio Console', { host: '127.0.0.1', port: 10023 }),
   // Ports are the tools' usual ones or placeholders: set them to match the tool's own OSC settings.
@@ -143,7 +144,7 @@ export interface PchiNode {
   label: string
   position: { x: number; y: number }
   params: Record<string, ParamValue>
-  /** Department this device serves ('visual' | 'lighting' | 'laser' | 'audio'); inferred from the type when unset. See rig.ts. */
+  /** Department this device serves ('visual' | 'lighting' | 'laser' | 'audio' | 'motion'); inferred from the type when unset. See rig.ts. */
   dept?: string
   /** Only meaningful when type === 'scene'. */
   sceneGraph?: SceneItem[]
@@ -332,7 +333,7 @@ export interface ShowCue {
 export interface ShowLane {
   id: string
   name?: string
-  /** 'visual' | 'lighting' | 'laser' | 'audio' | 'other' (see DEPTS) */
+  /** 'visual' | 'lighting' | 'laser' | 'audio' | 'motion' | 'other' (see DEPTS) */
   dept?: string
   /** Id of the rig device (a PchiNode) that handles this lane. See rig.ts. */
   device?: string
@@ -631,10 +632,11 @@ export const DEPTS = [
   { id: 'lighting', label: 'Lighting', color: '#f59e0b', kind: 'lighting.look', field: 'look' },
   { id: 'laser', label: 'Lasers', color: '#ef4444', kind: 'laser.cue', field: 'cue' },
   { id: 'audio', label: 'Audio', color: '#10b981', kind: 'audio.snapshot', field: 'snapshot' },
+  { id: 'motion', label: 'Motion', color: '#06b6d4', kind: 'motion.run', field: 'program' },
   { id: 'other', label: 'Other', color: '#7a7f92', kind: 'cue.trigger', field: 'cue' },
 ] as const
 
-export const deptOf = (id?: string) => DEPTS.find((d) => d.id === id) ?? DEPTS[4]
+export const deptOf = (id?: string) => DEPTS.find((d) => d.id === id) ?? DEPTS[DEPTS.length - 1]
 
 /** The standard set of lanes a new timeline starts with. */
 export const standardLanes = (): ShowLane[] =>

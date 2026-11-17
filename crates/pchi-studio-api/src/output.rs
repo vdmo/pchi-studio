@@ -31,7 +31,7 @@ const SEND_TIMEOUT: Duration = Duration::from_millis(1500);
 pub struct Output {
     devices: Vec<Device>,
     send: std::sync::atomic::AtomicBool,
-    /// Laser devices the operator has armed. A laser gets nothing from the show until it is armed,
+    /// Laser and motion devices a person has armed. Such a device gets nothing from the show until it is armed,
     /// and every runtime start begins disarmed.
     armed: Mutex<BTreeSet<String>>,
     /// Open sockets to the devices, shared across live edits so listening never stops.
@@ -104,16 +104,16 @@ impl Output {
 
     /// The same output with a new device list (after a live edit), keeping the armed state of lasers that are still there.
     pub fn with_devices(&self, devices: Vec<Device>) -> Self {
-        let keep: BTreeSet<String> = self.armed.lock().unwrap().iter().filter(|id| devices.iter().any(|d| &d.id == *id && d.dept == "laser")).cloned().collect();
+        let keep: BTreeSet<String> = self.armed.lock().unwrap().iter().filter(|id| devices.iter().any(|d| &d.id == *id && crate::rig::is_armable(&d.dept))).cloned().collect();
         Self { devices, send: std::sync::atomic::AtomicBool::new(self.sending()), armed: Mutex::new(keep), links: Arc::clone(&self.links), probe_every: self.probe_every, link_timeout: self.link_timeout, dmx: Arc::clone(&self.dmx), obs: Arc::clone(&self.obs) }
     }
 
     pub fn is_armed(&self, id: &str) -> bool {
         self.armed.lock().unwrap().contains(id)
     }
-    /// Arm or disarm a laser device. Returns false if there is no such laser in the rig.
+    /// Arm or disarm a laser or motion device. Returns false if there is no such device in the rig.
     pub fn set_armed(&self, id: &str, armed: bool) -> bool {
-        if !self.devices.iter().any(|d| d.id == id && d.dept == "laser") {
+        if !self.devices.iter().any(|d| d.id == id && crate::rig::is_armable(&d.dept)) {
             return false;
         }
         let mut a = self.armed.lock().unwrap();
@@ -126,6 +126,14 @@ impl Output {
     }
     pub fn lasers(&self) -> Vec<Device> {
         self.devices.iter().filter(|d| d.dept == "laser").cloned().collect()
+    }
+    /// The devices of one department.
+    pub fn of_dept(&self, dept: &str) -> Vec<Device> {
+        self.devices.iter().filter(|d| d.dept == dept).cloned().collect()
+    }
+    /// Every device that must be armed first (lasers and motion).
+    pub fn armables(&self) -> Vec<Device> {
+        self.devices.iter().filter(|d| crate::rig::is_armable(&d.dept)).cloned().collect()
     }
     pub fn devices(&self) -> &[Device] {
         &self.devices

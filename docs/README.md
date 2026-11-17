@@ -36,6 +36,9 @@ This is the map. Start with the first section that fits you.
 - [osc-input.md](osc-input.md): Stream Deck, tablets and button boxes that press GO
 - [capture.md](capture.md): capture what a tool sends
 - [industry-tools.md](industry-tools.md): where PCHI sits next to other tools
+- [motion.md](motion.md): the motion department: robots and moving rigs, armed like lasers, with their own stop (step 1 of the robotics plan; no real robot driver yet)
+- [robotics-kuka-ur.md](robotics-kuka-ur.md): the design for KUKA and Universal Robots (not built)
+- [robotics-plan.md](robotics-plan.md): a plan (not built) for controlling robots and motion rigs: what exists, the safety rule, and the order to build in
 
 **Before the doors**
 - [rehearse.md](rehearse.md): try an edit against what already happened

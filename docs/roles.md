@@ -38,7 +38,7 @@ A roster with keys in clear holds the keys themselves: protect it like the show 
 
 ## Limit a person to a department
 
-An operator, editor or lighting-safety entry may carry `"depts": ["lighting"]` (any of `visual`, `lighting`, `laser`, `audio`), or be made with `--new-roster-entry Sam:editor:lighting`. Their powers then apply to those departments only:
+An operator, editor, lso or mso entry may carry `"depts": ["lighting"]` (any of `visual`, `lighting`, `laser`, `motion`, `audio`), or be made with `--new-roster-entry Sam:editor:lighting`. Their powers then apply to those departments only:
 
 - **try, test-fire, arm**: only a device of their department.
 - **send an edit, undo a send, approve or reject a proposal**: only if every change is a cue of their department, a lane's device in it, or a rig device of it. Scenes, transitions, scene minimums and the timecode lock belong to the whole show, so an edit that touches any of them is refused for a limited person.
@@ -53,11 +53,12 @@ An operator, editor or lighting-safety entry may carry `"depts": ["lighting"]` (
 |---|---|---|
 | **operator** | everything: GO, send edits, approve or reject proposals, undo, arm lasers, try cues, test-fire | |
 | **editor** | send edits, approve or reject proposals, undo, try cues, test-fire | GO, arm lasers |
-| **lso** (laser safety officer) | arm lasers; try and test-fire **lasers only** | GO, edits, anything on other devices |
+| **lso** (laser safety officer) | arm lasers; try and test-fire **lasers only** | GO, edits, anything on other devices (including arming a robot) |
+| **mso** (motion safety officer) | arm robots and moving rigs; try and test **motion devices only** | GO, edits, anything on other devices (including arming a laser) |
 | **guest** | look: state, run report, doors check, rehearse | everything else |
 | **agent** | a named agent: its edits become proposals; rehearse | everything else |
 
-Everyone, signed in or not, may **disarm a laser, press STOP LASERS, rehearse an edit and read**. The safe direction is never
+Everyone, signed in or not, may **disarm a laser or motion device, press STOP LASERS or STOP MOTION, rehearse an edit and read**. The safe direction is never
 locked behind a role.
 
 ## How it fits with the rest

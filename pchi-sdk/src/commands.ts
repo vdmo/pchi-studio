@@ -780,7 +780,7 @@ function findLane(tl: ShowTimeline, spec: LaneSpec): ShowLane | undefined {
 }
 
 function makeLane(tl: ShowTimeline, spec: LaneSpec): ShowLane {
-  const d = DEPTS.find((x) => x.id === (spec.dept ?? 'other')) ?? DEPTS[4]
+  const d = DEPTS.find((x) => x.id === (spec.dept ?? 'other')) ?? DEPTS[DEPTS.length - 1]
   const name = spec.name ?? d.label
   const base = spec.dept && spec.dept !== 'other' && !spec.name ? spec.dept : norm(name).toLowerCase() || 'lane'
   let id = base
@@ -882,7 +882,7 @@ function applyTimeline(chart: Showchart, cmd: TimelineCommand): { chart: Showcha
 
 /** Default action for a department when only a value was given ("a lighting cue ... blue"). */
 function deptAction(dept: string, value: string): ShowAction {
-  const d = DEPTS.find((x) => x.id === dept) ?? DEPTS[4]
+  const d = DEPTS.find((x) => x.id === dept) ?? DEPTS[DEPTS.length - 1]
   // "a lighting cue ... look blue" / "a laser cue ... cue l3": drop the noun the department already implies
   const bare = value.replace(/^(?:(?:set|to|with|look|cue|preset|scene|snapshot|stem)\s+)+/i, '')
   return { kind: d.kind, payload: { [d.field]: bare ? val(bare) : '' } }

@@ -1,0 +1,14 @@
+{
+  "id": "motion",
+  "name": "PCHI motion (generic)",
+  "dept": "motion",
+  "kinds": ["motion.run", "motion.pause", "motion.stop"],
+  "hint": "a program name (letters, digits, _ . -, up to 64)",
+  "rules": [
+    {"kinds": ["motion.run"], "match": "[A-Za-z0-9_.-]{1,64}", "send": "/pchi/motion/run", "args": [{"string": "{0}"}], "basis": "memory", "source": "PCHI's own generic message: for the twin and for a bridge written to receive it. Not any vendor's"},
+    {"kinds": ["motion.pause"], "ignore_value": true, "send": "/pchi/motion/pause", "basis": "memory", "source": "PCHI's own generic message"},
+    {"kinds": ["motion.stop"], "ignore_value": true, "send": "/pchi/motion/stop", "basis": "memory", "source": "PCHI's own generic message"}
+  ],
+  "stop": [{"address": "/pchi/motion/stop"}],
+  "notes": "A stand-in for the real thing: PCHI's own OSC messages for 'run this named program', 'pause' and 'stop'. Used with the twin and with a bridge that turns them into a robot's own commands. STOP MOTION sends /pchi/motion/stop. It is a software request, not an emergency stop: it depends on the network and on the receiver being alive."
+}

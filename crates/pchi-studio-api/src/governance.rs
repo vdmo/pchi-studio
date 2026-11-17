@@ -162,15 +162,15 @@ pub enum Perm {
 
 pub const ALL_PERMS: [(Perm, &str); 7] = [(Perm::Go, "go"), (Perm::Edit, "edit"), (Perm::Approve, "approve"), (Perm::Undo, "undo"), (Perm::Arm, "arm"), (Perm::Try, "try"), (Perm::Test, "test")];
 
-/// The roles a roster may give. An "lso" (laser safety officer) may only try or test lasers.
+/// The roles a roster may give. An "lso" (laser safety officer) may only arm, try or test lasers; an "mso" (motion safety officer) only motion devices.
 /// "button" may only press (GO and the show's own events): a Stream Deck or button box, also what every OSC input acts as.
-pub const ROLES: [&str; 6] = ["operator", "editor", "lso", "guest", "agent", "button"];
+pub const ROLES: [&str; 7] = ["operator", "editor", "lso", "mso", "guest", "agent", "button"];
 
 pub fn role_allows(role: &str, perm: Perm) -> bool {
     match role {
         "operator" => true,
         "editor" => matches!(perm, Perm::Edit | Perm::Approve | Perm::Undo | Perm::Try | Perm::Test),
-        "lso" => matches!(perm, Perm::Arm | Perm::Try | Perm::Test),
+        "lso" | "mso" => matches!(perm, Perm::Arm | Perm::Try | Perm::Test),
         "button" => perm == Perm::Go,
         _ => false, // guest, and agent (which proposes instead)
     }
@@ -285,7 +285,7 @@ fn heavy<T>(f: impl FnOnce() -> T) -> T {
 }
 
 /// The departments a roster entry may be limited to.
-pub const DEPTS: [&str; 4] = ["visual", "lighting", "laser", "audio"];
+pub const DEPTS: [&str; 5] = ["visual", "lighting", "laser", "motion", "audio"];
 
 /// `"depts": ["lighting"]` on a roster entry: this person's powers apply to those departments only. Only for roles that have powers to limit.
 fn parse_depts(v: &Value, role: &str) -> Result<Vec<String>, String> {
@@ -293,8 +293,8 @@ fn parse_depts(v: &Value, role: &str) -> Result<Vec<String>, String> {
         return Ok(Vec::new());
     }
     let list = v.as_array().ok_or("depts must be a list such as [\"lighting\"]")?;
-    if !matches!(role, "operator" | "editor" | "lso") {
-        return Err(format!("a {role} has no powers to limit: depts is for operator, editor and lso"));
+    if !matches!(role, "operator" | "editor" | "lso" | "mso") {
+        return Err(format!("a {role} has no powers to limit: depts is for operator, editor, lso and mso"));
     }
     let mut out: Vec<String> = Vec::new();
     for d in list {

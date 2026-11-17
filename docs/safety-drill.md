@@ -16,11 +16,12 @@ The exit code is 1 on a NO GO, so a script can stop on it.
 |---|---|---|
 | **Doors check** | the whole show against the rig | nothing will fail |
 | **Lasers stay held** | cues to a disarmed laser, arming, STOP LASERS | held until armed, passed while armed, held again after STOP LASERS |
-| **Keys, roles and agents** | no key, an agent holding the key, a guest, the laser safety officer | each may do only what its role allows |
+| **Motion stays held** | cues to a disarmed robot or moving rig, arming, STOP MOTION | held until armed, passed while armed, held again after STOP MOTION, and a motion stop leaves lasers armed ([motion.md](motion.md)) |
+| **Keys, roles and agents** | no key, an agent holding the key, a guest, the laser and motion safety officers | each may do only what its role allows, and a safety officer only for their own kind of device |
 | **Agents propose** | an agent sends an edit | it waits as a proposal, and changes the show only when a person approves |
 | **A press that comes too early** | GO straight after entering a scene with a minimum | it is held |
 | **A device goes away** | a device whose address cannot be reached | its delivery is reported failed and the show carries on |
-| **A restart in the middle** | the runtime stops and is started again with `--resume` | it comes back in the same scene, and lasers are disarmed |
+| **A restart in the middle** | the runtime stops and is started again with `--resume` | it comes back in the same scene, and lasers and motion devices are disarmed |
 | **Undo a send** | an edit sent to the running show, then undo | the show is exactly as before |
 | **Timecode stops and jumps** | timecode that plays, stops, then locates a minute ahead | the stop is noticed, the Doors check warns, the jump fires nothing |
 
@@ -28,7 +29,7 @@ A drill that does not apply to the show (no laser, no minimum, no timecode) is *
 
 ## What only people can say
 
-The questions depend on what the show contains: a laser means a laser safety officer and a live STOP LASERS test; audio means the PA muted;
+The questions depend on what the show contains: a laser means a laser safety officer and a live STOP LASERS test; a robot or moving rig means a person at the machine's own emergency stop, which has been pressed; audio means the PA muted;
 timecode means seeing it run on the Live tab; DMX means seeing the right fixtures light. With `--interactive` each is asked (y or n);
 without it they are listed as **not asked**. **A single "no" makes it a NO GO.**
 

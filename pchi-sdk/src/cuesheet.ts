@@ -92,6 +92,7 @@ function deptFor(kind: string): string {
   if (/^(scene|renderer|visual)/.test(kind)) return 'visual'
   if (/^lighting/.test(kind)) return 'lighting'
   if (/^laser/.test(kind)) return 'laser'
+  if (/^motion/.test(kind)) return 'motion'
   if (/^audio/.test(kind)) return 'audio'
   return 'other'
 }

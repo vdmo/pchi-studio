@@ -67,8 +67,18 @@ pub fn dept_of_type(t: &str) -> Option<&'static str> {
         "lighting" | "lighting-desk" | "grandma3" | "eos" | "magicq" | "artnet" | "sacn" => "lighting",
         "laser" | "beyond" => "laser",
         "audio-zone" | "audio-console" | "audio-agent" | "x32" | "qlab" => "audio",
+        "motion" => "motion",
         _ => return None,
     })
+}
+
+/// Departments whose devices get nothing from the show until a person arms them: a laser's beam, a robot's or a rig's movement.
+/// They start disarmed (every runtime start, restart, takeover and lost lease), cues to them are held while disarmed, and
+/// disarming is always allowed. Everything that must hold for lasers holds for each of these.
+pub const ARMABLE: [&str; 2] = ["laser", "motion"];
+
+pub fn is_armable(dept: &str) -> bool {
+    ARMABLE.contains(&dept)
 }
 
 /// The department an action kind belongs to (same as the cue sheet's `deptFor`).
@@ -79,6 +89,8 @@ pub fn dept_of_kind(kind: &str) -> &'static str {
         "lighting"
     } else if kind.starts_with("laser") {
         "laser"
+    } else if kind.starts_with("motion") {
+        "motion"
     } else if kind.starts_with("audio") {
         "audio"
     } else {

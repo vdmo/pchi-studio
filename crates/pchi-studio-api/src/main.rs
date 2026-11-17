@@ -31,7 +31,7 @@ struct Cli {
     /// Carry on the run recorded in --db instead of starting a new one: the scene the show was in, its context and the cues still ahead. Cues that came due while the runtime was down are skipped (and listed), lasers start disarmed, and departments report READY again.
     #[arg(long, requires = "db")]
     resume: bool,
-    /// Named people and their roles, a JSON list of {"name", "role", "key"}: operator (everything), editor (edit, approve, undo, try, test), lso (arm lasers; try and test lasers only), guest (look only), agent (a named agent: proposes only). Each person signs in with their own key (Studio's Sign in). The file holds the keys: protect it. See docs/roles.md.
+    /// Named people and their roles, a JSON list of {"name", "role", "key"}: operator (everything), editor (edit, approve, undo, try, test), lso (arm lasers; try and test lasers only), mso (arm robots and moving rigs; try and test motion devices only), guest (look only), agent (a named agent: proposes only). Each person signs in with their own key (Studio's Sign in). The file holds the keys: protect it. See docs/roles.md.
     #[arg(long, value_name = "FILE", env = "PCHI_ROSTER")]
     roster: Option<String>,
     /// OSC inputs, a JSON file: a Stream Deck, tablet or button box that presses GO, sets a context value or hits STOP LASERS (never arms or edits). Listening beyond this machine needs an allow list of sender addresses. See docs/osc-input.md.

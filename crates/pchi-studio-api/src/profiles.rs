@@ -30,7 +30,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 /// The built-in profiles' ids.
 pub const PROFILES: [&str; 7] = ["resolume", "grandma3", "eos", "x32", "beyond", "qlab", "magicq"];
 
-const BUILT_IN: [&str; 7] = [
+const BUILT_IN: [&str; 8] = [
     include_str!("../profiles/resolume.json"),
     include_str!("../profiles/grandma3.json"),
     include_str!("../profiles/eos.json"),
@@ -38,6 +38,7 @@ const BUILT_IN: [&str; 7] = [
     include_str!("../profiles/beyond.json"),
     include_str!("../profiles/qlab.json"),
     include_str!("../profiles/magicq.json"),
+    include_str!("../profiles/motion.json"),
 ];
 
 fn pack(addr: &str, args: Vec<OscType>) -> Result<Vec<u8>, String> {
@@ -278,8 +279,8 @@ impl Profile {
             return Err(format!("id '{id}' must be 1 to 32 characters: a to z, 0 to 9 and -"));
         }
         let dept = raw.dept.clone().unwrap_or_default();
-        if !["visual", "lighting", "laser", "audio"].contains(&dept.as_str()) {
-            return Err(format!("{id}: dept must be visual, lighting, laser or audio"));
+        if !["visual", "lighting", "laser", "motion", "audio"].contains(&dept.as_str()) {
+            return Err(format!("{id}: dept must be visual, lighting, laser, motion or audio"));
         }
         if raw.kinds.is_empty() {
             return Err(format!("{id}: kinds is empty: list the action kinds this tool handles, for example [\"lighting.look\"]"));

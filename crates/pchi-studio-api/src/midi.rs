@@ -99,8 +99,8 @@ pub fn check(specs: &[MidiSpec]) -> Result<(), String> {
                 return Err(format!("{name}: a context value needs a controller (cc): notes and programs are presses"));
             }
             if let Some(a) = &b.action {
-                if a != "laser.stop" {
-                    return Err(format!("{name}: action '{a}' is not allowed: only laser.stop"));
+                if a != "laser.stop" && a != "motion.stop" {
+                    return Err(format!("{name}: action '{a}' is not allowed: only laser.stop or motion.stop"));
                 }
             }
         }
@@ -259,8 +259,9 @@ pub fn handle(show: &Arc<Show>, input: &MidiInput, bytes: &[u8]) {
             return;
         }
         input.pressed.fetch_add(1, Ordering::Relaxed);
-        let v = show.laser_stop();
-        show.receipt("laser.stop", "ALLOW", &actor, &format!("hard stop from MIDI {what}: disarmed {} laser(s)", v["stopped"].as_array().map_or(0, |s| s.len())));
+        let motion = b.action.as_deref() == Some("motion.stop");
+        let v = if motion { show.motion_stop() } else { show.laser_stop() };
+        show.receipt(if motion { "motion.stop" } else { "laser.stop" }, "ALLOW", &actor, &format!("hard stop from MIDI {what}: disarmed {} {} device(s)", v["stopped"].as_array().map_or(0, |s| s.len()), if motion { "motion" } else { "laser" }));
         return;
     }
     if !show.allow(&actor, Perm::Go, None) {

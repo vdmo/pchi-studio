@@ -36,12 +36,14 @@ const ACTS: &[Act] = &[
     Act { id: "write_memory", method: "POST", path: "/memory", perm: None, what: "note something worth remembering", agent: Some("stored as a draft under your name until a person verifies it") },
     Act { id: "report_ready", method: "POST", path: "/ready/:dept", perm: None, what: "say a department is standing by or on hold", agent: None },
     Act { id: "stop_lasers", method: "POST", path: "/laser/stop", perm: None, what: "disarm every laser and send each tool's safe message", agent: None },
+    Act { id: "stop_motion", method: "POST", path: "/motion/stop", perm: None, what: "disarm every motion device and send each tool's stop message (a software request: not an emergency stop)", agent: None },
     Act { id: "propose_edit", method: "POST", path: "/show", perm: Some(Perm::Edit), what: "send an edited show", agent: Some("becomes a proposal that waits for a person; nothing changes until they approve it") },
     Act { id: "press_go", method: "POST", path: "/input", perm: Some(Perm::Go), what: "send an event (GO, NEXT, ...) to the show", agent: None },
     Act { id: "approve_proposal", method: "POST", path: "/proposals/:id/approve", perm: Some(Perm::Approve), what: "apply a waiting proposal", agent: None },
     Act { id: "reject_proposal", method: "POST", path: "/proposals/:id/reject", perm: Some(Perm::Approve), what: "turn a waiting proposal down", agent: None },
     Act { id: "undo_send", method: "POST", path: "/show/undo", perm: Some(Perm::Undo), what: "put the show back as it was before the last send", agent: None },
     Act { id: "arm_laser", method: "POST", path: "/devices/:id/arm?armed=1", perm: Some(Perm::Arm), what: "arm a laser so the show may send to it", agent: None },
+    Act { id: "arm_motion", method: "POST", path: "/devices/:id/arm?armed=1", perm: Some(Perm::Arm), what: "arm a robot or other motion device so the show may move it", agent: None },
     Act { id: "try_cue", method: "POST", path: "/devices/:id/try", perm: Some(Perm::Try), what: "send one cue to one device now", agent: None },
     Act { id: "test_fire", method: "POST", path: "/devices/:id/test", perm: Some(Perm::Test), what: "test-fire a device", agent: None },
 ];
@@ -53,8 +55,9 @@ pub const RULES: &[&str] = &[
     "Say why in every proposal, in words. The reason is kept in the signed record next to what you proposed.",
     "You propose; a person approves. A proposal changes nothing until they do. Do not retry a proposal the person rejected without changing it and saying why.",
     "A refusal is final. If the runtime refuses an action, do not try it again, do not look for another route to the same effect, and do not ask for the operator key. Tell the person.",
-    "You cannot press GO, arm a laser, approve, undo, try or test-fire. If the task needs one of those, say so and stop: that is a person's call.",
+    "You cannot press GO, arm a laser or a motion device, approve, undo, try or test-fire. If the task needs one of those, say so and stop: that is a person's call.",
     "STOP LASERS is always yours to use, and only makes things safer. If someone may be in a beam path, use it first and explain after.",
+    "STOP MOTION is also always yours to use, and says what it is: a software request, not an emergency stop. If anyone may be near a moving machine, tell a person to use the machine's own emergency stop, and use STOP MOTION as well.",
     "When memory says it does not know, or that two notes disagree, say that. Do not fill the gap with a guess and do not write your guess down as fact: anything you write to memory is a draft.",
     "Nothing you send reaches a device unless the runtime is sending (output: live) and this runtime is the active one. Check both before telling anyone that a cue went out.",
     "UDP has no acknowledgement. 'sent' means a packet left the runtime, not that the tool did anything.",
@@ -63,7 +66,7 @@ pub const RULES: &[&str] = &[
 fn allowed(show: &Show, actor: &Actor, perm: Perm) -> bool {
     // the same test whoami uses: for a caller limited to departments, any of theirs counts
     let depts = show.depts_of(actor);
-    let probe: Vec<String> = if depts.is_empty() { vec!["laser".to_string()] } else { depts };
+    let probe: Vec<String> = if depts.is_empty() { vec!["laser".to_string(), "motion".to_string()] } else { depts };
     probe.iter().any(|d| show.allow(actor, perm, Some(d)))
 }
 

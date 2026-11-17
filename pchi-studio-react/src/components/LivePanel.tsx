@@ -7,7 +7,7 @@ import TimelineStrip, { useStripLayout } from './TimelineStrip'
 import { sceneInfo } from './sceneInfo'
 import LiveCallSheet from './LiveCallSheet'
 import RoleBanner from './RoleBanner'
-import RuntimeTools, { armLaser, decideProposal, getInputs, pollAction, signIn, signOut, stopLasers, testFire, tryCue, whoami, type OscInput, type Poll, type WhoAmI } from './RuntimeTools'
+import RuntimeTools, { armLaser, decideProposal, getInputs, pollAction, signIn, signOut, stopLasers, stopMotion, testFire, tryCue, whoami, type OscInput, type Poll, type WhoAmI } from './RuntimeTools'
 import { STALE_MS, feedUrl, useRuntimeWhich, type Ready } from './liveFeed'
 import { fmt } from './TimelineStrip'
 import {
@@ -107,6 +107,7 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile, onAddCa
   const [testing, setTesting] = useState<string | null>(null)
   const [heard, setHeard] = useState<Feedback[]>([])
   const [laserNote, setLaserNote] = useState('')
+  const [motionNote, setMotionNote] = useState('')
   const [tryDev, setTryDev] = useState('')
   const [tryVal, setTryVal] = useState('')
   const [tryOut, setTryOut] = useState('')
@@ -491,7 +492,7 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile, onAddCa
                 <i style={{ background: d.color }} aria-hidden />
                 <span>
                   {label}
-                  {device && <small className="dev">{d.label}{device.dept === 'laser' ? (device.armed ? ' · ARMED' : ' · disarmed') : ''}{linkText(device.link, beat)}{dv ? ` · ${dv.status === 'failed' ? '⚠ failed' : dv.status}` : ''}</small>}
+                  {device && <small className="dev">{d.label}{device.dept === 'laser' || device.dept === 'motion' ? (device.armed ? ' · ARMED' : ' · disarmed') : ''}{linkText(device.link, beat)}{dv ? ` · ${dv.status === 'failed' ? '⚠ failed' : dv.status}` : ''}</small>}
                   {nodev && <small className="dev">⚠ no device</small>}
                   {needed.has(key) && nextScene && <small className="dev need">needed in {nextScene}</small>}
                 </span>
@@ -555,6 +556,39 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile, onAddCa
             {laserNote && <span className="muted" role="status">{laserNote}</span>}
           </div>
         )}
+        {devices.some((x) => x.dept === 'motion') && (
+          <div className="laser-bar" role="group" aria-label="Motion safety">
+            <button
+              className="stop-lasers stop-motion"
+              onClick={async () => {
+                const r = await stopMotion()
+                setMotionNote(r.ok ? `Motion stopped and disarmed. This was a software request: use the machine's own emergency stop for any danger.${r.notes.length ? ' ' + r.notes.join(' ') : ''}` : r.error ?? 'Stop failed')
+              }}
+              title="Disarm every motion device and send its stop message. A software request over the network: NOT an emergency stop."
+            >
+              STOP MOTION
+            </button>
+            {devices.filter((x) => x.dept === 'motion').map((x) => (
+              <button
+                key={x.id}
+                className={`dev-arm ${x.armed ? 'on' : ''}`}
+                onClick={async () => {
+                  if (x.armed) {
+                    const r = await armLaser(x.id, false, 'a motion device')
+                    setMotionNote(r.ok ? `${x.label} disarmed.` : r.error ?? 'Failed')
+                    return
+                  }
+                  if (!confirm(`Arm ${x.label}?\n\nCues in the show will MOVE this machine.\nAnyone in its reach must be clear, and its own emergency stop must be within reach of a person. STOP MOTION here is not an emergency stop.`)) return
+                  const r = await armLaser(x.id, true, 'a motion device')
+                  setMotionNote(r.ok ? `${x.label} armed.` : r.error ?? 'Failed')
+                }}
+              >
+                {x.armed ? `Disarm ${x.label}` : `Arm ${x.label}`}
+              </button>
+            ))}
+            {motionNote && <span className="muted" role="status">{motionNote}</span>}
+          </div>
+        )}
         {devices.length > 0 && (
           <div className="dev-tests">
             {devices.map((x) => (
@@ -564,7 +598,7 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile, onAddCa
                 disabled={testing === x.id}
                 title={output === 'live' ? 'Send one /pchi/test message to this device' : 'Dry run: reports where the test would go'}
                 onClick={async () => {
-                  if (output === 'live' && !confirm(`Send a test message to ${x.label}?${x.dept === 'laser' ? ' This is a laser: make sure the area is clear and the safety shutter is in your control.' : ''}`)) return
+                  if (output === 'live' && !confirm(`Send a test message to ${x.label}?${x.dept === 'laser' ? ' This is a laser: make sure the area is clear and the safety shutter is in your control.' : x.dept === 'motion' ? ' This may move a machine: make sure its area is clear and its emergency stop is in reach.' : ''}`)) return
                   setTesting(x.id)
                   const r = await testFire(x.id)
                   setTesting(null)
@@ -584,7 +618,7 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile, onAddCa
               const id = tryDev || devices[0].id
               if (!tryVal.trim()) return
               const dev = devices.find((x) => x.id === id)
-              if (output === 'live' && !confirm(`Send "${tryVal.trim()}" to ${dev?.label} now?${dev?.dept === 'laser' ? ' It is a laser: check the area is clear.' : ''}`)) return
+              if (output === 'live' && !confirm(`Send "${tryVal.trim()}" to ${dev?.label} now?${dev?.dept === 'laser' ? ' It is a laser: check the area is clear.' : dev?.dept === 'motion' ? ' It may move a machine: check its area is clear.' : ''}`)) return
               setTryOut('sending…')
               const r = await tryCue(id, tryVal.trim())
               setTryOut(r.ok ? `→ ${r.sentAs} (${r.status}${r.error ? ': ' + r.error : ''})` : `✗ ${r.error}`)

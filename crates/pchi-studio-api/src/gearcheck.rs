@@ -96,6 +96,7 @@ fn what_for(dev: &Device) -> (&'static str, &'static str, &'static str) {
         "visual" => ("scene.activate", "scene", "column (3) or layer/clip (2/5)"),
         "lighting" => ("lighting.look", "look", "cue or executor number"),
         "laser" => ("laser.cue", "cue", "cue name"),
+        "motion" => ("motion.run", "program", "program name (one the robot's programmer wrote and validated)"),
         _ => ("audio.snapshot", "snapshot", "scene or snapshot number"),
     }
 }
@@ -131,6 +132,13 @@ async fn check_device(c: &mut dyn Console, out: &Output, dev: &Device, o: &Optio
             c.say("This is a LASER. The beam must be safe: output off or blocked at the laser software, nobody in the beam path.");
             if c.ask("Type LASER SAFE to go on, or press Enter to skip this device:").trim() != "LASER SAFE" {
                 return r.skip("laser safety not confirmed");
+            }
+        }
+        "motion" => {
+            c.say("This is a MACHINE that can move: a robot or a moving rig. The send below will ask it to run a program.");
+            c.say("Its area must be clear of people, its own emergency stop must be within reach of a person, and the program must be one its programmer wrote and validated. A PCHI stop is a software request, not an emergency stop.");
+            if c.ask("Type AREA CLEAR to go on, or press Enter to skip this device:").trim() != "AREA CLEAR" {
+                return r.skip("motion area not confirmed clear");
             }
         }
         "audio" => {
@@ -170,7 +178,7 @@ async fn check_device(c: &mut dyn Console, out: &Output, dev: &Device, o: &Optio
     if !c.ask("Send it now? (y/n):").trim().eq_ignore_ascii_case("y") {
         return r.skip("not sent");
     }
-    if dev.dept == "laser" {
+    if crate::rig::is_armable(&dev.dept) {
         out.set_armed(&dev.id, true); // only inside this check: the real runtime always starts disarmed
     }
     match if dev.is_direct() { out.deliver(dev, &action).await } else { out.send_packets(dev, packets).await } {
@@ -180,9 +188,13 @@ async fn check_device(c: &mut dyn Console, out: &Output, dev: &Device, o: &Optio
             r.send_error = Some(e);
         }
     }
-    if dev.dept == "laser" {
+    if crate::rig::is_armable(&dev.dept) {
         out.set_armed(&dev.id, false);
-        c.say("Disarmed again. If the laser software's output is on, use its own stop.");
+        if dev.dept == "motion" {
+            c.say("Disarmed again. If the machine is still moving, use its own stop: PCHI's is a software request.");
+        } else {
+            c.say("Disarmed again. If the laser software's output is on, use its own stop.");
+        }
     }
     if r.send_error.is_none() {
         let a = c.ask("Did the tool react as expected? (y = yes, n = no, ? = not sure):").trim().to_ascii_lowercase();
@@ -542,6 +554,25 @@ mod tests {
         let res = run(&mut c, &out, &["b1".into()], &fast()).await;
         assert_eq!(res[0].why, "not sent");
         assert!(!out.is_armed("b1"));
+    }
+
+    #[tokio::test]
+    async fn a_motion_device_is_skipped_unless_the_area_is_confirmed_clear_and_is_disarmed_again_after() {
+        let up = Arc::new(AtomicBool::new(true));
+        let (port, got) = fake_x32(up).await;
+        let out = Output::new(vec![dev("m1", "motion", port)], true);
+        let mut c = Script::new(&["", ""]);
+        let res = run(&mut c, &out, &[], &fast()).await;
+        assert_eq!((res[0].verdict.as_str(), res[0].why.as_str()), ("skipped", "motion area not confirmed clear"));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(got.lock().unwrap().is_empty(), "nothing reached the machine without AREA CLEAR");
+        assert!(!out.is_armed("m1"));
+        // confirmed, but the operator declines to send: still disarmed
+        let mut c = Script::new(&["AREA CLEAR", "OPEN_ARM", "n"]);
+        let res = run(&mut c, &out, &["m1".into()], &fast()).await;
+        assert_eq!(res[0].why, "not sent");
+        assert!(!out.is_armed("m1"));
+        assert!(c.said.iter().any(|l| l.contains("emergency stop")), "the person is told what a PCHI stop is not");
     }
 
     #[tokio::test]

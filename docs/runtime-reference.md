@@ -112,6 +112,7 @@ Every route needs the token if `--token` is set, except where noted. Anything th
 | `/ready/:dept` | POST | `{"ready":true,"note":"..."}` |
 | `/devices/:id/arm` | POST | arm or disarm a laser (operator; disarm is always allowed) |
 | `/laser/stop` | POST | STOP LASERS: disarm all and send each tool's safe message |
+| `/motion/stop` | POST | STOP MOTION: disarm every motion device and send each tool's stop message. A software request, **not an emergency stop** ([motion.md](motion.md)) |
 | `/devices/:id/try`, `/devices/:id/test` | POST | try a cue or test-fire a device |
 
 ### Editing the running show

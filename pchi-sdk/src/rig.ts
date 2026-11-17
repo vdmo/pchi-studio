@@ -3,14 +3,14 @@
 // Pure functions; the Studio only decides how to show the results.
 import type { PchiNode, Showchart } from './index'
 
-/** The four departments a rig device can serve (cue lanes use the same ids). */
-export const RIG_DEPTS = ['visual', 'lighting', 'laser', 'audio'] as const
+/** The departments a rig device can serve (cue lanes use the same ids). Laser and motion devices must be armed by a person before the show may send to them. */
+export const RIG_DEPTS = ['visual', 'lighting', 'laser', 'audio', 'motion'] as const
 
 const TYPE_DEPT: Record<string, string> = {
   vork: 'visual', unreal: 'visual', touchdesigner: 'visual', notch: 'visual',
   projector: 'visual', 'led-wall': 'visual',
   lighting: 'lighting', 'lighting-desk': 'lighting',
-  laser: 'laser',
+  laser: 'laser', motion: 'motion',
   resolume: 'visual', grandma3: 'lighting', eos: 'lighting', x32: 'audio', beyond: 'laser', qlab: 'audio', magicq: 'lighting', artnet: 'lighting', sacn: 'lighting', obs: 'visual',  'audio-zone': 'audio', 'audio-console': 'audio', 'audio-agent': 'audio',
 }
 

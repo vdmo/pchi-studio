@@ -175,6 +175,47 @@ async fn lasers_held(chart: &Showchart, devices: &[Device]) -> R {
     R::Done(r)
 }
 
+fn motion_of(devices: &[Device]) -> Option<&Device> {
+    devices.iter().find(|d| d.dept == "motion")
+}
+
+/// The same promise for a robot or moving rig: held until a person arms it, passes cues while armed, held again after the motion stop,
+/// and a motion stop does not touch a laser (nor a laser stop a robot). It proves the software's gate, not the machine's safety.
+async fn motion_held(chart: &Showchart, devices: &[Device]) -> R {
+    let Some(m) = motion_of(devices) else { return R::Skip("this show has no motion device".into()) };
+    let r = async {
+        let show = fresh(chart, devices, false, None)?;
+        let status = |v: Result<Value, String>| v.map(|m| m["status"].as_str().unwrap_or("?").to_string());
+        let s1 = status(show.test_fire(&m.id).await)?;
+        if s1 != "held" {
+            return Err(format!("a disarmed motion device was not held: its test came back '{s1}'"));
+        }
+        show.set_armed(&m.id, true)?;
+        let laser_armed = laser_of(devices).map(|l| show.set_armed(&l.id, true)).transpose()?.is_some();
+        let s2 = status(show.test_fire(&m.id).await)?;
+        if s2 == "held" {
+            return Err("an armed motion device was still held".to_string());
+        }
+        let stopped = show.motion_stop();
+        if !stopped["stopped"].as_array().is_some_and(|a| a.iter().any(|x| x == &json!(m.id))) {
+            return Err(format!("STOP MOTION did not stop {}: {stopped}", m.label));
+        }
+        let s3 = status(show.test_fire(&m.id).await)?;
+        if s3 != "held" {
+            return Err(format!("after STOP MOTION the device was not held again: '{s3}'"));
+        }
+        if laser_armed {
+            let l = laser_of(devices).ok_or("laser")?;
+            if !show.snapshot()["devices"].as_array().is_some_and(|d| d.iter().any(|x| x["id"] == json!(l.id) && x["armed"] == json!(true))) {
+                return Err("STOP MOTION disarmed a laser: the two stops must be separate".into());
+            }
+        }
+        Ok(format!("{} was held until armed, passed cues while armed, and was held again after STOP MOTION (a software request, not an emergency stop)", m.label))
+    }
+    .await;
+    R::Done(r)
+}
+
 fn who_may(_: &Show) {}
 
 fn people_and_agents(chart: &Showchart, devices: &[Device]) -> R {
@@ -200,7 +241,8 @@ fn people_and_agents(chart: &Showchart, devices: &[Device]) -> R {
             }
         }
         // roles: a guest looks, the laser safety officer arms lasers and nothing else
-        show.set_roster(Roster::parse(r#"[{"name":"G","role":"guest","key":"guest-key-1"},{"name":"S","role":"lso","key":"lso-key-123"}]"#)?);
+        show.set_roster(Roster::parse(r#"[{"name":"G","role":"guest","key":"guest-key-1"},{"name":"S","role":"lso","key":"lso-key-123"},{"name":"M","role":"mso","key":"mso-key-123"}]"#)?);
+        let mso = show.identify(Some("mso-key-123"), Actor::Person(None));
         let guest = show.identify(Some("guest-key-1"), Actor::Person(None));
         let lso = show.identify(Some("lso-key-123"), Actor::Person(None));
         for (who, label, perm, dept, want) in [
@@ -209,12 +251,16 @@ fn people_and_agents(chart: &Showchart, devices: &[Device]) -> R {
             (&lso, "the laser safety officer", Perm::Arm, None, true),
             (&lso, "the laser safety officer", Perm::Edit, None, false),
             (&lso, "the laser safety officer", Perm::Try, Some("lighting"), false),
+            (&lso, "the laser safety officer", Perm::Arm, Some("motion"), false),
+            (&mso, "the motion safety officer", Perm::Arm, Some("motion"), true),
+            (&mso, "the motion safety officer", Perm::Arm, Some("laser"), false),
+            (&mso, "the motion safety officer", Perm::Edit, None, false),
         ] {
             if show.allow(who, perm, dept) != want {
                 bad.push(format!("{label} {} {perm:?}", if want { "could not" } else { "could" }));
             }
         }
-        if bad.is_empty() { Ok("no key, an agent and a guest were refused what only an operator may do; the key holder and the laser safety officer were allowed theirs".to_string()) } else { Err(bad.join("; ")) }
+        if bad.is_empty() { Ok("no key, an agent and a guest were refused what only an operator may do; the key holder and the safety officers were allowed theirs, each only for their own kind of device".to_string()) } else { Err(bad.join("; ")) }
     })();
     R::Done(r)
 }
@@ -297,6 +343,10 @@ fn restart_resumes(chart: &Showchart, devices: &[Device]) -> R {
         if let Some(l) = laser {
             show.set_armed(&l.id, true)?;
         }
+        let motion = motion_of(devices);
+        if let Some(m) = motion {
+            show.set_armed(&m.id, true)?;
+        }
         let state = show.snapshot()["state"].clone();
         let store2 = EventStore::open(path.to_str().ok_or("temp path")?).map_err(|e| e.to_string())?;
         let out = (!devices.is_empty()).then(|| Output::new(devices.to_vec(), false));
@@ -309,10 +359,15 @@ fn restart_resumes(chart: &Showchart, devices: &[Device]) -> R {
                 return Err(format!("{} was armed again after a restart", l.label));
             }
         }
+        if let Some(m) = motion {
+            if again.snapshot()["devices"].as_array().is_some_and(|d| d.iter().any(|x| x["id"] == json!(m.id) && x["armed"] == json!(true))) {
+                return Err(format!("{} was armed again after a restart", m.label));
+            }
+        }
         if !again.was_resumed() {
             return Err("the restarted runtime did not say it had resumed".into());
         }
-        Ok(format!("after a restart the show came back in {state} ({} cue(s) that came due while it was down skipped){}", info["skipped_cues"].as_array().map_or(0, |a| a.len()), if laser.is_some() { ", and the laser was disarmed" } else { "" }))
+        Ok(format!("after a restart the show came back in {state} ({} cue(s) that came due while it was down skipped){}", info["skipped_cues"].as_array().map_or(0, |a| a.len()), if laser.is_some() { ", and the laser was disarmed" } else { "" }) + if motion.is_some() { ", and the motion device was disarmed" } else { "" })
     })();
     let _ = std::fs::remove_file(&path);
     R::Done(r)
@@ -396,6 +451,10 @@ fn human_items(chart: &Showchart, devices: &[Device]) -> Vec<String> {
     if devices.iter().any(|d| d.dept == "laser") {
         v.push("A laser safety officer is present. The beam path is clear, and STOP LASERS has been pressed with the laser live and the laser software's own output went dark.".into());
     }
+    if devices.iter().any(|d| d.dept == "motion") {
+        v.push("A person who is trained on the machine is within reach of its OWN emergency stop, and has pressed it and seen the machine stop. PCHI's STOP MOTION is a software request over a network: it is not an emergency stop, and the show must never rely on it as one.".into());
+        v.push("The area around every moving machine is clear of people, and each program a cue runs is one its programmer wrote and validated for this venue (speeds, zones, limits are in the robot's own safety configuration, not in PCHI).".into());
+    }
     if devices.iter().any(|d| d.dept == "audio") {
         v.push("The PA is muted for tests, and a scene or snapshot recall has been tried on the real desk.".into());
     }
@@ -417,11 +476,12 @@ pub async fn run(chart: &Showchart, devices: &[Device], date: &str, console: Opt
     };
     push("Doors check", "nothing in the show will fail against the rig as it stands", doors(chart, devices));
     push("Lasers stay held", "a laser gets nothing until armed, and STOP LASERS makes it held again", lasers_held(chart, devices).await);
+    push("Motion stays held", "a robot or moving rig gets nothing until a person arms it, and STOP MOTION makes it held again (a software gate, not an emergency stop)", motion_held(chart, devices).await);
     push("Keys, roles and agents", "no key, an agent or a guest cannot do what only an operator may", people_and_agents(chart, devices));
     push("Agents propose", "an agent's edit waits for a person and changes the show only when approved", agent_proposals(chart, devices));
     push("A press that comes too early", "a scene's minimum run time holds a press that would leave it", minimum_holds(chart, devices));
     push("A device goes away", "an unreachable device is reported failed and the show carries on", device_down(chart, devices).await);
-    push("A restart in the middle", "the show resumes in the same scene and lasers come back disarmed", restart_resumes(chart, devices));
+    push("A restart in the middle", "the show resumes in the same scene and lasers and motion come back disarmed", restart_resumes(chart, devices));
     push("Undo a send", "an edit sent to the running show can be taken back exactly", undo_restores(chart, devices));
     push("Timecode stops and jumps", "stopped timecode is noticed, and a locate fires nothing", timecode_stops(chart, devices).await);
     let items = human_items(chart, devices);
@@ -527,6 +587,27 @@ mod tests {
         assert_eq!(by(&r, "A press that comes too early").outcome, "skipped");
         assert_eq!(by(&r, "Timecode stops and jumps").outcome, "skipped");
         assert!(by(&r, "A restart in the middle").detail.contains("the laser was disarmed"));
+    }
+
+    #[tokio::test]
+    async fn a_motion_device_gets_its_own_drills_and_its_own_human_questions() {
+        let mut devices = rig();
+        devices.push(dev("arm", "motion", Some("127.0.0.1")));
+        let r = run(&show_chart(), &devices, "2026-11-17", None).await;
+        for d in &r.drills {
+            assert_ne!(d.outcome, "failed", "{}: {}", d.name, d.detail);
+        }
+        let m = by(&r, "Motion stays held");
+        assert_eq!(m.outcome, "held", "{}", m.detail);
+        assert!(m.detail.contains("not an emergency stop"), "{}", m.detail);
+        assert!(by(&r, "A restart in the middle").detail.contains("the motion device was disarmed"));
+        let roles = by(&r, "Keys, roles and agents");
+        assert_eq!(roles.outcome, "held", "{}", roles.detail);
+        let items = human_items(&show_chart(), &devices);
+        assert!(items.iter().any(|i| i.contains("OWN emergency stop") && i.contains("not an emergency stop")), "{items:?}");
+        // a show with no motion device skips it and says why
+        let plain = run(&show_chart(), &rig(), "2026-11-17", None).await;
+        assert_eq!(by(&plain, "Motion stays held").outcome, "skipped");
     }
 
     #[tokio::test]

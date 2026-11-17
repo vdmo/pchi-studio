@@ -147,8 +147,8 @@ fn parse_list(list: Value) -> Result<Vec<InputSpec>, String> {
                 }
             }
             if let Some(a) = &b.action {
-                if a != "laser.stop" {
-                    return Err(format!("{name}: action '{a}' is not allowed: an input may only press an event, set a context value, or laser.stop"));
+                if a != "laser.stop" && a != "motion.stop" {
+                    return Err(format!("{name}: action '{a}' is not allowed: an input may only press an event, set a context value, or laser.stop or motion.stop"));
                 }
             }
         }
@@ -265,8 +265,9 @@ pub fn handle(show: &Arc<Show>, input: &Input, bytes: &[u8]) {
                 continue;
             }
             input.stats.pressed.fetch_add(1, Ordering::Relaxed);
-            let v = show.laser_stop();
-            show.receipt("laser.stop", "ALLOW", &actor, &format!("hard stop from {address}: disarmed {} laser(s)", v["stopped"].as_array().map_or(0, |s| s.len())));
+            let motion = b.action.as_deref() == Some("motion.stop");
+            let v = if motion { show.motion_stop() } else { show.laser_stop() };
+            show.receipt(if motion { "motion.stop" } else { "laser.stop" }, "ALLOW", &actor, &format!("hard stop from {address}: disarmed {} {} device(s)", v["stopped"].as_array().map_or(0, |s| s.len()), if motion { "motion" } else { "laser" }));
             continue;
         }
         if !show.allow(&actor, Perm::Go, None) {

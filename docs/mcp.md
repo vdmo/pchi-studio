@@ -25,6 +25,7 @@ It talks to a runtime that is already running (`pchi-studio-api show.pchi ...`).
 | `pchi_proposals` | every proposal and where it stands |
 | `pchi_report` | cues and timing, failed deliveries, edits, and who did what |
 | `pchi_stop_lasers` | the hard stop: disarm every laser and send each tool's safe message. Allowed because it only makes things safer |
+| `pchi_stop_motion` | disarm every motion device and send its stop message. Allowed because it only makes things safer, and it says what it is: a software request, not an emergency stop |
 
 An agent has to say **why** (`said`) with every proposal. The reason is kept with the proposal and in the signed record, and the person approving sees
 it next to what would change and how it would have played (`narration.md`).

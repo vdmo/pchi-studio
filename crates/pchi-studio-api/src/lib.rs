@@ -693,7 +693,15 @@ impl Show {
         match actor {
             Actor::Agent(_) => false,
             Actor::Member { name, role } => {
-                if !governance::role_allows(role, perm) || (role == "lso" && matches!(perm, Perm::Try | Perm::Test) && device_dept != Some("laser")) {
+                // a safety officer's powers are for their own kind of device only: the laser safety officer's for lasers, the motion safety officer's for motion
+                let own = match role.as_str() {
+                    "lso" => Some("laser"),
+                    "mso" => Some("motion"),
+                    _ => None,
+                };
+                // Try and Test have always needed the device named; Arm is refused only when a device of another kind is named (with none named, the question is "may this person arm at all?")
+                let wrong_kind = own.is_some() && ((matches!(perm, Perm::Try | Perm::Test) && device_dept != own) || (perm == Perm::Arm && device_dept.is_some() && device_dept != own));
+                if !governance::role_allows(role, perm) || wrong_kind {
                     return false;
                 }
                 // a person limited to some departments: GO moves every department's scene, so it is not theirs; a cue, a test or an arm must be on a device of theirs;
@@ -804,7 +812,7 @@ impl Show {
     fn devices_json(out: &Output) -> Value {
         json!(out.devices().iter().map(|d| {
             let mut v = json!(d);
-            if d.dept == "laser" {
+            if rig::is_armable(&d.dept) {
                 v["armed"] = json!(out.is_armed(&d.id));
             }
             if let Some(l) = out.link_state(d) {
@@ -1121,7 +1129,7 @@ impl Show {
         let dev = out.devices().iter().find(|d| d.id == id).cloned().ok_or_else(|| format!("no device '{id}' in the rig"))?;
         let mut m = json!({"type": "delivery", "ts": now_ms(), "kind": "test", "lane": null, "cue": null,
                            "device": dev.id, "label": dev.label, "dept": dev.dept, "target": dev.address()});
-        if dev.dept == "laser" && !out.is_armed(&dev.id) {
+        if rig::is_armable(&dev.dept) && !out.is_armed(&dev.id) {
             m["status"] = json!("held");
             m["error"] = json!(format!("{} is not armed: arm it first", dev.label));
         } else if !out.sending() {
@@ -1146,7 +1154,7 @@ impl Show {
     pub fn set_armed(&self, id: &str, armed: bool) -> Result<(), String> {
         let out = self.output.lock().unwrap().clone().ok_or("this show has no rig")?;
         if !out.set_armed(id, armed) {
-            return Err(format!("no laser device '{id}' in the rig"));
+            return Err(format!("no laser or motion device '{id}' in the rig"));
         }
         self.publish(json!({"type": "arming", "ts": now_ms(), "device": id, "armed": armed}));
         Ok(())
@@ -1155,22 +1163,32 @@ impl Show {
     /// The hard stop: disarm every laser (so nothing more is sent) and, for tools with a known safe
     /// message (BEYOND: blackout and disable output), tell them to go dark. Anyone with the feed token may use it.
     pub fn laser_stop(self: &Arc<Self>) -> Value {
+        self.hard_stop("laser", "laser.stop", "send blackout and disable output")
+    }
+
+    /// The same for motion: disarm every motion device (so nothing more is sent) and send each tool's stop message, if its profile has one.
+    /// This is a software request over a network: it is NOT an emergency stop, and says so wherever it is shown.
+    pub fn motion_stop(self: &Arc<Self>) -> Value {
+        self.hard_stop("motion", "motion.stop", "send the tool's stop message")
+    }
+
+    fn hard_stop(self: &Arc<Self>, dept: &str, kind: &str, what: &str) -> Value {
         let Some(out) = self.output.lock().unwrap().clone() else { return json!({"stopped": [], "notes": ["this show has no rig"]}) };
         let ts = now_ms();
         let mut stopped = Vec::new();
         let mut notes = Vec::new();
-        for dev in out.lasers() {
+        for dev in out.of_dept(dept) {
             out.set_armed(&dev.id, false);
             self.publish(json!({"type": "arming", "ts": ts, "device": dev.id, "armed": false}));
             stopped.push(dev.id.clone());
             let msgs = profiles::stop_messages(dev.profile_key());
-            let base = json!({"type": "delivery", "ts": ts, "kind": "laser.stop", "lane": null, "cue": null, "device": dev.id, "label": dev.label, "dept": dev.dept, "target": dev.address()});
+            let base = json!({"type": "delivery", "ts": ts, "kind": kind, "lane": null, "cue": null, "device": dev.id, "label": dev.label, "dept": dev.dept, "target": dev.address()});
             if msgs.is_empty() {
                 notes.push(format!("{}: disarmed here, but no stop message is known for this tool: use its own stop", dev.label));
             } else if !out.sending() {
                 let mut m = base;
                 m["status"] = json!("dry-run");
-                m["note"] = json!("hard stop: would send blackout and disable output");
+                m["note"] = json!(format!("hard stop: would {what}"));
                 self.report(m);
             } else {
                 let show = Arc::clone(self);
@@ -1229,13 +1247,14 @@ impl Show {
             "visual" => ("scene.activate", "scene"),
             "lighting" => ("lighting.look", "look"),
             "laser" => ("laser.cue", "cue"),
+            "motion" => ("motion.run", "program"),
             _ => ("audio.snapshot", "snapshot"),
         };
         let action = Action::new(kind, json!({ field: value }));
         let sent_as: Vec<Value> = output::wire_lines(&dev, &action)?.into_iter().map(|(a, args)| json!({"address": a, "args": args})).collect();
         let packets = if dev.is_direct() { Vec::new() } else { output::packets_for(&dev, &action)? };
         let mut m = json!({"type": "delivery", "ts": now_ms(), "kind": kind, "lane": null, "cue": null, "device": dev.id, "label": dev.label, "dept": dev.dept, "target": dev.address(), "sent_as": sent_as, "manual": true});
-        if dev.dept == "laser" && !out.is_armed(&dev.id) {
+        if rig::is_armable(&dev.dept) && !out.is_armed(&dev.id) {
             m["status"] = json!("held");
             m["error"] = json!(format!("{} is not armed: arm it first", dev.label));
         } else if !out.sending() {
@@ -1545,7 +1564,7 @@ impl Show {
     /// Hash of the show as it is now (scene, definition, which lasers are armed): what a receipt is decided against.
     fn state_hash(&self) -> String {
         let out = self.output.lock().unwrap().clone();
-        let armed: Vec<String> = out.map(|o| o.lasers().into_iter().filter(|d| o.is_armed(&d.id)).map(|d| d.id).collect()).unwrap_or_default();
+        let armed: Vec<String> = out.map(|o| o.armables().into_iter().filter(|d| o.is_armed(&d.id)).map(|d| d.id).collect()).unwrap_or_default();
         let g = self.inner.lock().unwrap();
         primeswarm_pchi::governance::hash_state(&json!({"scene": g.engine.current_state, "show": primeswarm_pchi::governance::hash_state(&json!(g.engine.chart)), "armed": armed}))
     }
@@ -1761,7 +1780,7 @@ impl Show {
         }
         let out = self.output.lock().unwrap().clone();
         if let Some(out) = out {
-            for l in out.lasers() {
+            for l in out.armables() {
                 out.set_armed(&l.id, false);
             }
             tokio::spawn(async move { out.silence().await });
@@ -1836,7 +1855,7 @@ impl Show {
         self.set_epoch(epoch);
         let out = self.output.lock().unwrap().clone();
         if let Some(out) = out {
-            for l in out.lasers() {
+            for l in out.armables() {
                 out.set_armed(&l.id, false);
             }
             tokio::spawn(async move { out.silence().await });
@@ -1958,7 +1977,7 @@ impl Show {
             Plan::NoDevice { dept, reason } => self.report(with(&base, json!({"status": "no-device", "dept": dept, "error": reason}))),
             Plan::To(dev) => {
                 let ident = json!({"device": dev.id, "label": dev.label, "dept": dev.dept, "target": dev.address()});
-                if dev.dept == "laser" && !out.is_armed(&dev.id) {
+                if rig::is_armable(&dev.dept) && !out.is_armed(&dev.id) {
                     let mut m = ident;
                     m["status"] = json!("held");
                     m["error"] = json!(format!("{} is not armed: arm it on the Live tab to let cues through", dev.label));
@@ -2097,6 +2116,7 @@ pub fn router_with_token(show: Arc<Show>, token: Option<String>) -> Router {
         .route("/governance/export", get(get_governance))
         .route("/devices/:id/try", post(post_try))
         .route("/laser/stop", post(post_laser_stop))
+        .route("/motion/stop", post(post_motion_stop))
         .route("/devices/:id/arm", post(post_arm))
         .route("/devices/:id/test", post(post_test))
         .route("/ready/:dept", post(post_ready))
@@ -2201,7 +2221,7 @@ async fn get_whoami(State(a): State<App>, q: Query<HashMap<String, String>>, h: 
     }
     let actor = who(&a, &q, &h);
     let depts = a.show.depts_of(&actor);
-    let probe: Vec<&str> = if depts.is_empty() { vec!["laser"] } else { depts.iter().map(String::as_str).collect() };
+    let probe: Vec<&str> = if depts.is_empty() { vec!["laser", "motion"] } else { depts.iter().map(String::as_str).collect() };
     let can: Vec<&str> = governance::ALL_PERMS.iter().filter(|(p, _)| probe.iter().any(|d| a.show.allow(&actor, *p, Some(d)))).map(|(_, n)| *n).collect();
     (StatusCode::OK, Json(json!({"name": actor.name(), "role": actor.role(), "signed_in": !matches!(actor, Actor::Anonymous), "locked": a.show.is_locked(), "can": can, "depts": a.show.depts_of(&actor)})))
 }
@@ -2551,21 +2571,36 @@ async fn post_laser_stop(State(a): State<App>, q: Query<HashMap<String, String>>
     (StatusCode::OK, Json(v))
 }
 
-/// `POST /devices/<id>/arm?armed=1|0`: arming needs the right (an operator, or the laser safety officer); disarming never does.
+/// `POST /motion/stop`: the same for motion devices: disarm them all and send each tool's stop message. Needs the feed token (if any) but no key and no role.
+/// It is a software request over a network, NOT an emergency stop: the robot's own safety system is the emergency stop.
+async fn post_motion_stop(State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap) -> impl IntoResponse {
+    if !authorized(&a.token, &q, &h) {
+        return unauthorized();
+    }
+    let actor = who(&a, &q, &h);
+    let mut v = a.show.motion_stop();
+    v["note"] = json!("this is a software stop request, not an emergency stop: use the robot's own emergency stop for any danger");
+    a.show.receipt("motion.stop", "ALLOW", &actor, &format!("motion stop: disarmed {} motion device(s)", v["stopped"].as_array().map_or(0, |s| s.len())));
+    (StatusCode::OK, Json(v))
+}
+
+/// `POST /devices/<id>/arm?armed=1|0`: arming needs the right (an operator, or the safety officer of that kind of device); disarming never does.
 async fn post_arm(State(a): State<App>, Path(id): Path<String>, q: Query<HashMap<String, String>>, h: HeaderMap) -> impl IntoResponse {
     if !authorized(&a.token, &q, &h) {
         return unauthorized();
     }
     let actor = who(&a, &q, &h);
     let armed = q.get("armed").is_some_and(|v| v == "1" || v == "true");
+    let motion = a.show.device_dept(&id).as_deref() == Some("motion");
+    let (what, arm_rule, disarm_rule) = if motion { ("arm a motion device", "motion.arm", "motion.disarm") } else { ("arm a laser", "laser.arm", "laser.disarm") };
     if armed {
-        if let Err(r) = gate(&a, &actor, Perm::Arm, "laser.arm", "arm a laser", Some(&id)) {
+        if let Err(r) = gate(&a, &actor, Perm::Arm, arm_rule, what, Some(&id)) {
             return r;
         }
     }
     match a.show.set_armed(&id, armed) {
         Ok(()) => {
-            a.show.receipt(if armed { "laser.arm" } else { "laser.disarm" }, "ALLOW", &actor, &format!("{} {id}", if armed { "armed" } else { "disarmed" }));
+            a.show.receipt(if armed { arm_rule } else { disarm_rule }, "ALLOW", &actor, &format!("{} {id}", if armed { "armed" } else { "disarmed" }));
             (StatusCode::OK, Json(json!({"ok": true, "armed": armed})))
         }
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e}))),
@@ -3441,6 +3476,144 @@ mod tests {
         assert_eq!((st, v["stopped"].clone()), (200, json!(["b1"])));
         assert_eq!(show.snapshot()["devices"][0]["armed"], false);
         assert_eq!(http(addr, "POST", "/devices/zz/arm?armed=1", "", "X-Pchi-Edit-Key: k\r\n").await.0, 404);
+    }
+
+    // ---- motion: armed like lasers, with its own safety officer and its own stop ----
+
+    /// The timelines example with its laser lane made a motion lane: "run OPEN_ARM" at 0.8 s in INTRO.
+    fn motion_quick() -> Showchart {
+        let text = include_str!("../../pchi-showchart/examples/timelines.pchi.json")
+            .replace(r#""id": "laser", "name": "Lasers", "dept": "laser""#, r#""id": "motion", "name": "Motion", "dept": "motion""#)
+            .replace(r#""kind": "laser.cue", "payload": { "cue": "l_intro" }"#, r#""kind": "motion.run", "payload": { "program": "OPEN_ARM" }"#);
+        let mut c = Showchart::from_json(&text).unwrap();
+        move_cue(&mut c, "INTRO", "visual", 0);
+        move_cue(&mut c, "INTRO", "lighting", 400);
+        move_cue(&mut c, "INTRO", "motion", 800);
+        c
+    }
+
+    #[tokio::test]
+    async fn motion_gets_nothing_until_armed_and_the_motion_stop_goes_out() {
+        let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = sock.local_addr().unwrap().port();
+        let out = Output::new(vec![device("m1", "motion", port)], true);
+        let show = Show::start_with(motion_quick(), EventStore::open_in_memory().unwrap(), Some(out)).unwrap();
+        let mut rx = show.subscribe();
+        let dev = |show: &Arc<Show>| show.snapshot()["devices"][0].clone();
+        assert_eq!(dev(&show)["armed"], false, "a motion device starts disarmed");
+
+        // the scene's motion cue (0.8 s) is held, not sent
+        show.apply("studio", "START");
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        let held: Vec<Value> = deliveries(&mut rx).into_iter().filter(|d| d["kind"] == "motion.run").collect();
+        assert_eq!(held[0]["status"], "held", "{held:?}");
+        assert!(held[0]["error"].as_str().unwrap().contains("not armed"));
+        assert!(tokio::time::timeout(Duration::from_millis(200), recv_osc(&sock)).await.is_err(), "nothing reached the robot");
+        assert_eq!(show.test_fire("m1").await.unwrap()["status"], "held");
+        assert_eq!(show.try_cue("m1", "OPEN_ARM").await.unwrap()["status"], "held", "a hand-sent cue is held too");
+
+        // armed: a message goes through, and a cue says what it asked for
+        show.set_armed("m1", true).unwrap();
+        assert_eq!(dev(&show)["armed"], true);
+        assert_eq!(show.try_cue("m1", "OPEN_ARM").await.unwrap()["status"], "sent");
+        assert_eq!(recv_osc(&sock).await, "/pchi/motion/run");
+
+        // the motion stop: disarmed, and the tool is sent its stop message
+        let r = show.motion_stop();
+        assert_eq!(r["stopped"], json!(["m1"]));
+        assert_eq!(recv_osc(&sock).await, "/pchi/motion/stop");
+        assert_eq!(dev(&show)["armed"], false);
+        assert_eq!(show.test_fire("m1").await.unwrap()["status"], "held");
+    }
+
+    #[tokio::test]
+    async fn a_motion_stop_leaves_lasers_alone_and_a_laser_stop_leaves_motion_alone() {
+        let out = Output::new(vec![device("b1", "beyond", 9), device("m1", "motion", 9)], false);
+        let show = Show::start_with(motion_quick(), EventStore::open_in_memory().unwrap(), Some(out)).unwrap();
+        show.set_armed("b1", true).unwrap();
+        show.set_armed("m1", true).unwrap();
+        assert_eq!(show.motion_stop()["stopped"], json!(["m1"]));
+        assert_eq!(show.snapshot()["devices"][0]["armed"], true, "the laser is still armed: a motion stop is not a laser stop");
+        assert_eq!(show.snapshot()["devices"][1]["armed"], false);
+        show.set_armed("m1", true).unwrap();
+        assert_eq!(show.laser_stop()["stopped"], json!(["b1"]));
+        assert_eq!(show.snapshot()["devices"][1]["armed"], true, "the robot is still armed: a laser stop is not a motion stop");
+    }
+
+    #[tokio::test]
+    async fn motion_arming_survives_a_live_edit_but_not_a_lost_lease_or_a_takeover() {
+        let mk = || Show::start_with(motion_quick(), EventStore::open_in_memory().unwrap(), Some(Output::new(vec![device("m1", "motion", 9)], false))).unwrap();
+        let show = mk();
+        show.set_armed("m1", true).unwrap();
+        let mut edited = motion_quick();
+        move_cue(&mut edited, "INTRO", "lighting", 500);
+        show.replace(edited, Some(vec![device("m1", "motion", 9)]), true).unwrap();
+        assert_eq!(show.snapshot()["devices"][0]["armed"], true, "a send must not quietly disarm or arm anything");
+
+        show.pause_lease("the witness is out of reach");
+        assert_eq!(show.snapshot()["devices"][0]["armed"], false, "a runtime that lost its lease disarms motion");
+        show.resume_lease();
+        assert_eq!(show.snapshot()["devices"][0]["armed"], false, "and does not re-arm it by itself");
+
+        let other = mk();
+        other.set_armed("m1", true).unwrap();
+        other.fence(2, "the standby");
+        assert_eq!(other.snapshot()["devices"][0]["armed"], false, "a runtime that was taken over disarms motion");
+    }
+
+    #[tokio::test]
+    async fn the_safety_officers_arm_only_their_own_kind_of_device() {
+        let show = Show::start(quick(), EventStore::open_in_memory().unwrap()).unwrap();
+        show.set_roster(governance::Roster::parse(r#"[{"name":"L","role":"lso","key":"lso-key-123"},{"name":"M","role":"mso","key":"mso-key-123"},{"name":"E","role":"editor","key":"edit-key-12"},{"name":"O","role":"operator","key":"oper-key-12"}]"#).unwrap());
+        let who = |k: &str| show.identify(Some(k), Actor::Person(None));
+        let (l, m, e, o) = (who("lso-key-123"), who("mso-key-123"), who("edit-key-12"), who("oper-key-12"));
+        assert!(show.allow(&l, Perm::Arm, Some("laser")) && !show.allow(&l, Perm::Arm, Some("motion")), "the laser officer may not arm a robot");
+        assert!(show.allow(&m, Perm::Arm, Some("motion")) && !show.allow(&m, Perm::Arm, Some("laser")), "the motion officer may not arm a laser");
+        assert!(show.allow(&m, Perm::Try, Some("motion")) && !show.allow(&m, Perm::Try, Some("laser")) && !show.allow(&m, Perm::Try, Some("lighting")));
+        assert!(!show.allow(&m, Perm::Edit, None) && !show.allow(&m, Perm::Go, None), "an officer arms and tries their own kind: nothing else");
+        assert!(show.allow(&o, Perm::Arm, Some("motion")) && show.allow(&o, Perm::Arm, Some("laser")), "an operator may arm either");
+        assert!(!show.allow(&e, Perm::Arm, Some("motion")), "an editor may not arm");
+        // "may this person arm at all?" (no device named) is still yes for both officers: it is what the drill and whoami ask
+        assert!(show.allow(&l, Perm::Arm, None) && show.allow(&m, Perm::Arm, None));
+    }
+
+    #[tokio::test]
+    async fn over_http_arming_motion_needs_the_motion_officer_or_an_operator_and_the_stop_needs_nobody() {
+        let out = Output::new(vec![device("m1", "motion", 9), device("b1", "beyond", 9)], false);
+        let show = Show::start_with(motion_quick(), EventStore::open_in_memory().unwrap(), Some(out)).unwrap();
+        show.set_roster(governance::Roster::parse(r#"[{"name":"L","role":"lso","key":"lso-key-123"},{"name":"M","role":"mso","key":"mso-key-123"}]"#).unwrap());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = router_with_token(Arc::clone(&show), None);
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let key = |k: &str| format!("X-Pchi-Edit-Key: {k}\r\n");
+        assert_eq!(http(addr, "POST", "/devices/m1/arm?armed=1", "", "").await.0, 403, "nobody");
+        assert_eq!(http(addr, "POST", "/devices/m1/arm?armed=1", "", &key("lso-key-123")).await.0, 403, "the laser officer");
+        assert_eq!(http(addr, "POST", "/devices/b1/arm?armed=1", "", &key("mso-key-123")).await.0, 403, "the motion officer, on a laser");
+        assert_eq!(http(addr, "POST", "/devices/m1/arm?armed=1", "", &key("mso-key-123")).await.0, 200, "the motion officer, on motion");
+        assert_eq!(show.snapshot()["devices"][0]["armed"], true);
+        // disarming never needs a right; the stop needs no key and no role, and says what it is not
+        assert_eq!(http(addr, "POST", "/devices/m1/arm?armed=0", "", "").await.0, 200);
+        show.set_armed("m1", true).unwrap();
+        let (st, v) = http(addr, "POST", "/motion/stop", "", "").await;
+        assert_eq!((st, v["stopped"].clone()), (200, json!(["m1"])));
+        assert!(v["note"].as_str().unwrap().contains("not an emergency stop"), "{v}");
+        assert_eq!(show.snapshot()["devices"][0]["armed"], false);
+        // what a person is told they may do
+        let (_, w) = http(addr, "GET", "/whoami", "", &key("mso-key-123")).await;
+        assert!(w["can"].as_array().unwrap().iter().any(|c| c == "arm"), "{w}");
+    }
+
+    #[tokio::test]
+    async fn the_doors_check_says_whether_a_motion_device_is_armed() {
+        let out = Output::new(vec![device("m1", "motion", 9)], false);
+        let show = Show::start_with(motion_quick(), EventStore::open_in_memory().unwrap(), Some(out)).unwrap();
+        let said = |show: &Arc<Show>| show.preflight()["checks"].as_array().unwrap().iter().filter(|c| c["area"] == "motion").map(|c| (c["level"].as_str().unwrap().to_string(), c["text"].as_str().unwrap().to_string())).collect::<Vec<_>>();
+        let before = said(&show);
+        assert!(before.iter().any(|(l, t)| l == "ok" && t.contains("disarmed") && t.contains("not an emergency stop")), "{before:?}");
+        show.set_armed("m1", true).unwrap();
+        let after = said(&show);
+        assert!(after.iter().any(|(l, t)| l == "warn" && t.contains("ARMED") && t.contains("emergency stop")), "{after:?}");
     }
 
     fn osc_bytes(addr: &str) -> Vec<u8> {

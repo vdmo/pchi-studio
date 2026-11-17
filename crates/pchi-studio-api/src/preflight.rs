@@ -96,6 +96,13 @@ pub fn run(chart: &Showchart, output: Option<&Output>, readiness: &BTreeMap<Stri
                 dev("ok", "laser", format!("{} is disarmed (arm it on the Live tab when the area is clear).", d.label));
             }
         }
+        if d.dept == "motion" {
+            if o.is_armed(&d.id) {
+                dev("warn", "motion", format!("{} is ARMED: cues will move it. Anyone in its reach must be clear, and its own emergency stop must be within reach of a person.", d.label));
+            } else {
+                dev("ok", "motion", format!("{} is disarmed (arm it on the Live tab when its area is clear). A PCHI stop is a software request, not an emergency stop.", d.label));
+            }
+        }
         match readiness.get(&d.id).or_else(|| readiness.get(&d.dept)) {
             Some(w) if w["ready"] == true => dev("ok", "ready", format!("{} reports READY.", d.label)),
             Some(_) => dev("warn", "ready", format!("{} is on hold.", d.label)),
