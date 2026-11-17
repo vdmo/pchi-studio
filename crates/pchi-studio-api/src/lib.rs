@@ -52,6 +52,7 @@ pub mod governance;
 pub mod inputs;
 pub mod mcp;
 pub mod midi;
+pub mod library;
 pub mod links;
 pub mod memory_api;
 pub mod obs;
@@ -194,6 +195,8 @@ pub struct Show {
     /// time (a long calculation, a loaded machine) shows here, and a standby reads it to tell slow from dead.
     lag: Mutex<std::collections::VecDeque<(i64, u64)>>,
     lag_watch: std::sync::atomic::AtomicBool,
+    /// The server-side show library (`--library DIR`), if on: saved and planned shows. Separate from the show that is running.
+    library: Mutex<Option<Arc<library::Library>>>,
 }
 
 /// How long a department page may stay silent before it counts as not linked (mirrors the Studio).
@@ -255,6 +258,7 @@ impl Show {
             vote_flush: std::sync::atomic::AtomicBool::new(false),
             lag: Mutex::new(std::collections::VecDeque::new()),
             lag_watch: std::sync::atomic::AtomicBool::new(false),
+            library: Mutex::new(None),
         })
     }
 
@@ -493,6 +497,12 @@ impl Show {
     /// (GO, inputs) needs the right too, and the operator key still works as an operator.
     pub fn set_roster(&self, roster: governance::Roster) {
         *self.roster.lock().unwrap() = roster;
+    }
+
+    /// Turn the show library on, kept in `dir` (created if missing).
+    pub fn set_library(&self, dir: &str) -> Result<(), String> {
+        *self.library.lock().unwrap() = Some(Arc::new(library::Library::open(dir)?));
+        Ok(())
     }
 
     /// How long a signed-in session lasts (default 8 hours).
@@ -2020,7 +2030,7 @@ pub fn with_cors(app: Router, origins: Vec<String>) -> Router {
                 h.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, o);
                 h.insert(header::VARY, HeaderValue::from_static("Origin"));
                 h.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("authorization, content-type, x-pchi-edit-key, x-pchi-session, x-pchi-actor"));
-                h.insert(header::ACCESS_CONTROL_ALLOW_METHODS, HeaderValue::from_static("GET, POST, OPTIONS"));
+                h.insert(header::ACCESS_CONTROL_ALLOW_METHODS, HeaderValue::from_static("GET, POST, PUT, DELETE, OPTIONS"));
                 h.insert(header::ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static("600"));
             }
             resp
@@ -2048,6 +2058,9 @@ pub fn router_with_token(show: Arc<Show>, token: Option<String>) -> Router {
         }))
         .route("/show", post(post_show))
         .route("/show/undo", post(post_undo))
+        .route("/library", get(get_library).post(post_library).layer(axum::extract::DefaultBodyLimit::max(library::MAX_SHOW_BYTES + 64 * 1024)))
+        .route("/library/:id", get(get_library_show).put(put_library).delete(delete_library).layer(axum::extract::DefaultBodyLimit::max(library::MAX_SHOW_BYTES + 64 * 1024)))
+        .route("/library/:id/copy", post(post_library_copy))
         .route("/preflight", get(|State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap| async move {
             if !authorized(&a.token, &q, &h) { return (StatusCode::UNAUTHORIZED, Json(json!({"error": "token required"}))); }
             (StatusCode::OK, Json(a.show.preflight()))
@@ -2241,6 +2254,235 @@ async fn post_show(State(a): State<App>, q: Query<HashMap<String, String>>, h: H
         Ok(v) if v["proposed"] == json!(true) => (StatusCode::ACCEPTED, Json(v)),
         Ok(v) => (StatusCode::OK, Json(v)),
         Err((code, v)) => (StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST), Json(v)),
+    }
+}
+
+// ---- the show library: saved and planned shows kept on the server (see `library`) ----
+// Who may do what: a person sees their own shows and every show marked "team"; an operator sees all. A person changes or archives their own
+// shows; an operator any. Saving needs the right to edit (guests and button boxes may look, not save). Agents have no access: an agent
+// proposes edits to the running show, it does not reach into people's drafts.
+
+fn library_of(a: &App) -> Result<Arc<library::Library>, Reply> {
+    a.show.library.lock().unwrap().clone().ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "this runtime has no show library: start it with --library <folder>"}))))
+}
+
+fn library_owner(actor: &Actor) -> String {
+    match actor {
+        Actor::Member { name, .. } => name.clone(),
+        Actor::Person(Some(n)) => n.clone(),
+        Actor::Person(None) => "operator".into(),
+        Actor::Agent(n) => format!("agent:{n}"),
+        Actor::Anonymous => "unidentified".into(),
+    }
+}
+
+fn library_is_admin(actor: &Actor) -> bool {
+    matches!(actor, Actor::Person(_)) || matches!(actor, Actor::Member { role, .. } if role == "operator")
+}
+
+fn library_can_read(actor: &Actor, meta: &Value) -> bool {
+    !matches!(actor, Actor::Anonymous | Actor::Agent(_)) && (meta["visibility"] == "team" || meta["owner"].as_str() == Some(library_owner(actor).as_str()) || library_is_admin(actor))
+}
+
+fn library_can_save(a: &App, actor: &Actor) -> bool {
+    !matches!(actor, Actor::Anonymous | Actor::Agent(_)) && a.show.allow(actor, Perm::Edit, None)
+}
+
+fn library_can_change(a: &App, actor: &Actor, meta: &Value) -> bool {
+    library_can_save(a, actor) && (meta["owner"].as_str() == Some(library_owner(actor).as_str()) || library_is_admin(actor))
+}
+
+fn library_denied(a: &App, actor: &Actor, what: &str) -> Reply {
+    match actor {
+        Actor::Anonymous => refuse(&a.show, actor, "library.access", what),
+        Actor::Agent(_) => (StatusCode::FORBIDDEN, Json(json!({"error": "agents have no access to the show library", "denied": true, "agent": true}))),
+        _ => refuse(&a.show, actor, "library.access", what),
+    }
+}
+
+fn library_err(e: library::LibErr) -> Reply {
+    use library::LibErr::*;
+    match e {
+        NotFound => (StatusCode::NOT_FOUND, Json(json!({"error": "no such show"}))),
+        Bad(m) => (StatusCode::BAD_REQUEST, Json(json!({"error": m}))),
+        Io(m) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("the library could not write: {m}")}))),
+        Conflict(c) => {
+            let who = c["updated_by"].as_str().unwrap_or("someone");
+            (StatusCode::CONFLICT, Json(json!({"error": format!("{who} saved version {} since you opened it: open the latest, or save yours as a copy", c["version"]), "conflict": c})))
+        }
+    }
+}
+
+/// The show text out of a request body (`show` may be the file as an object, or as a string), checked and with device passwords taken out.
+fn library_text(body: &Value) -> Result<Option<(String, Vec<String>)>, Reply> {
+    let raw = match body.get("show") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::String(s)) => s.clone(),
+        Some(v) => serde_json::to_string(v).unwrap_or_default(),
+    };
+    if let Err(e) = rig::load(&raw) {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({"error": format!("that is not a show file the runtime can read: {e}")}))));
+    }
+    Ok(Some(library::strip_secrets(&raw)))
+}
+
+fn library_meta_out(a: &App, actor: &Actor, mut meta: Value) -> Value {
+    meta["mine"] = json!(meta["owner"].as_str() == Some(library_owner(actor).as_str()));
+    meta["can_edit"] = json!(library_can_change(a, actor, &meta));
+    meta
+}
+
+/// `GET /library`: the shows this person may see, newest change first.
+async fn get_library(State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap) -> impl IntoResponse {
+    if !authorized(&a.token, &q, &h) {
+        return unauthorized();
+    }
+    let lib = match library_of(&a) {
+        Ok(l) => l,
+        Err(r) => return r,
+    };
+    let actor = who(&a, &q, &h);
+    if matches!(actor, Actor::Anonymous | Actor::Agent(_)) {
+        return library_denied(&a, &actor, "open the show library");
+    }
+    let shows: Vec<Value> = lib.list().into_iter().filter(|m| library_can_read(&actor, m)).map(|m| library_meta_out(&a, &actor, m)).collect();
+    (StatusCode::OK, Json(json!({"shows": shows, "me": library_owner(&actor), "can_save": library_can_save(&a, &actor), "open": !a.show.is_locked()})))
+}
+
+/// `GET /library/<id>` (`?v=N` for an older version): the show file and its details.
+async fn get_library_show(State(a): State<App>, Path(id): Path<String>, q: Query<HashMap<String, String>>, h: HeaderMap) -> impl IntoResponse {
+    if !authorized(&a.token, &q, &h) {
+        return unauthorized();
+    }
+    let lib = match library_of(&a) {
+        Ok(l) => l,
+        Err(r) => return r,
+    };
+    let actor = who(&a, &q, &h);
+    let version = q.get("v").and_then(|v| v.parse::<u32>().ok());
+    // a show a person may not see is "no such show": its existence is not theirs to know
+    match lib.get(&id, version) {
+        Ok((meta, text)) if library_can_read(&actor, &meta) => {
+            let show: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+            let versions = lib.versions(&id).unwrap_or_default();
+            (StatusCode::OK, Json(json!({"meta": library_meta_out(&a, &actor, meta), "versions": versions, "show": show})))
+        }
+        Ok(_) => library_err(library::LibErr::NotFound),
+        Err(e) => library_err(e),
+    }
+}
+
+/// `POST /library` {"name", "show", "planned_for", "venue", "status", "notes", "visibility"}: keep a new show.
+async fn post_library(State(a): State<App>, q: Query<HashMap<String, String>>, h: HeaderMap, Json(body): Json<Value>) -> impl IntoResponse {
+    if !authorized(&a.token, &q, &h) {
+        return unauthorized();
+    }
+    let lib = match library_of(&a) {
+        Ok(l) => l,
+        Err(r) => return r,
+    };
+    let actor = who(&a, &q, &h);
+    if !library_can_save(&a, &actor) {
+        return library_denied(&a, &actor, "save a show to the library");
+    }
+    let (text, removed) = match library_text(&body) {
+        Ok(Some(t)) => t,
+        Ok(None) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "send the show file as \"show\""}))),
+        Err(r) => return r,
+    };
+    match lib.create(&library_owner(&actor), now_ms(), &body, &text) {
+        Ok(meta) => {
+            a.show.receipt("library.save", "ALLOW", &actor, &format!("saved '{}' to the library as {}", meta["name"].as_str().unwrap_or("?"), meta["id"].as_str().unwrap_or("?")));
+            (StatusCode::CREATED, Json(json!({"meta": library_meta_out(&a, &actor, meta), "removed_passwords": removed})))
+        }
+        Err(e) => library_err(e),
+    }
+}
+
+/// `PUT /library/<id>` {"base_version": N, "show": ..., and any of name, planned_for, venue, status, notes, visibility}: a new version, and/or new details.
+async fn put_library(State(a): State<App>, Path(id): Path<String>, q: Query<HashMap<String, String>>, h: HeaderMap, Json(body): Json<Value>) -> impl IntoResponse {
+    if !authorized(&a.token, &q, &h) {
+        return unauthorized();
+    }
+    let lib = match library_of(&a) {
+        Ok(l) => l,
+        Err(r) => return r,
+    };
+    let actor = who(&a, &q, &h);
+    let meta = match lib.meta(&id) {
+        Ok(m) if library_can_read(&actor, &m) => m,
+        Ok(_) => return library_err(library::LibErr::NotFound),
+        Err(e) => return library_err(e),
+    };
+    if !library_can_change(&a, &actor, &meta) {
+        return library_denied(&a, &actor, "change someone else's show (save a copy of it instead)");
+    }
+    let (text, removed) = match library_text(&body) {
+        Ok(t) => t.map_or((None, Vec::new()), |(t, r)| (Some(t), r)),
+        Err(r) => return r,
+    };
+    let base = body["base_version"].as_u64().map(|v| v as u32);
+    match lib.save(&id, &library_owner(&actor), now_ms(), &body, text.as_deref(), base) {
+        Ok(m) => {
+            a.show.receipt("library.save", "ALLOW", &actor, &format!("saved '{}' ({}) as version {}", m["name"].as_str().unwrap_or("?"), id, m["version"]));
+            (StatusCode::OK, Json(json!({"meta": library_meta_out(&a, &actor, m), "removed_passwords": removed})))
+        }
+        Err(e) => library_err(e),
+    }
+}
+
+/// `DELETE /library/<id>`: take a show out of the library (kept in the folder's `_archive`).
+async fn delete_library(State(a): State<App>, Path(id): Path<String>, q: Query<HashMap<String, String>>, h: HeaderMap) -> impl IntoResponse {
+    if !authorized(&a.token, &q, &h) {
+        return unauthorized();
+    }
+    let lib = match library_of(&a) {
+        Ok(l) => l,
+        Err(r) => return r,
+    };
+    let actor = who(&a, &q, &h);
+    let meta = match lib.meta(&id) {
+        Ok(m) if library_can_read(&actor, &m) => m,
+        Ok(_) => return library_err(library::LibErr::NotFound),
+        Err(e) => return library_err(e),
+    };
+    if !library_can_change(&a, &actor, &meta) {
+        return library_denied(&a, &actor, "remove someone else's show");
+    }
+    match lib.archive(&id, now_ms()) {
+        Ok(()) => {
+            a.show.receipt("library.archive", "ALLOW", &actor, &format!("removed '{}' ({}) from the library (kept in _archive)", meta["name"].as_str().unwrap_or("?"), id));
+            (StatusCode::OK, Json(json!({"archived": true})))
+        }
+        Err(e) => library_err(e),
+    }
+}
+
+/// `POST /library/<id>/copy` {"name"?}: a private copy of a show you may see, owned by you.
+async fn post_library_copy(State(a): State<App>, Path(id): Path<String>, q: Query<HashMap<String, String>>, h: HeaderMap, body: Option<Json<Value>>) -> impl IntoResponse {
+    if !authorized(&a.token, &q, &h) {
+        return unauthorized();
+    }
+    let lib = match library_of(&a) {
+        Ok(l) => l,
+        Err(r) => return r,
+    };
+    let actor = who(&a, &q, &h);
+    if !library_can_save(&a, &actor) {
+        return library_denied(&a, &actor, "save a show to the library");
+    }
+    match lib.meta(&id) {
+        Ok(m) if library_can_read(&actor, &m) => {}
+        Ok(_) => return library_err(library::LibErr::NotFound),
+        Err(e) => return library_err(e),
+    }
+    let name = body.as_ref().and_then(|b| b["name"].as_str().map(str::to_string));
+    match lib.copy(&id, &library_owner(&actor), now_ms(), name.as_deref()) {
+        Ok(m) => {
+            a.show.receipt("library.save", "ALLOW", &actor, &format!("copied {id} as '{}'", m["name"].as_str().unwrap_or("?")));
+            (StatusCode::CREATED, Json(json!({"meta": library_meta_out(&a, &actor, m)})))
+        }
+        Err(e) => library_err(e),
     }
 }
 

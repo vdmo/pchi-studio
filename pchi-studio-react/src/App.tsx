@@ -9,6 +9,7 @@ import EventConsole, { type LogEntry } from './components/EventConsole'
 import { useHistory } from './components/useHistory'
 import Logo from './components/Logo'
 import ShortcutsDialog from './components/ShortcutsDialog'
+import LibraryDialog, { type ServerRef } from './components/LibraryDialog'
 
 const AUTOSAVE = 'pchi.autosave'
 interface Autosave {
@@ -65,6 +66,9 @@ export default function App() {
   const history = useHistory(showchart, setChart)
   const rigIssues = useMemo(() => rigCheck(showchart, rig.nodes), [showchart, rig.nodes])
   const [help, setHelp] = useState(false)
+  // the show library on the server: which saved show (and version) this one was opened from or last saved as
+  const [lib, setLib] = useState<'open' | 'save' | null>(null)
+  const [serverRef, setServerRef] = useState<ServerRef | null>(null)
   const [pending, setPending] = useState<Autosave | null>(readAutosave) // unsaved work from an earlier visit
 
   // what is on disk (or the starting point): anything different is unsaved
@@ -127,17 +131,22 @@ export default function App() {
     writeAutosave(null)
   }
 
+  // put a show file into the editor (from disk or from the server)
+  const apply = (s: PchiShowFile, from: ServerRef | null) => {
+    const m = { project: s.project ?? 'Untitled Project', name: s.name ?? 'untitled-show' }
+    setMeta(m)
+    setRig({ nodes: s.nodes ?? [], edges: s.edges ?? [] })
+    const chart = ensureCueNumbers(s.showchart ?? newShowchart())
+    setShowchart(chart)
+    history.reset()
+    setScene(null)
+    setBaseline(JSON.stringify([m, { nodes: s.nodes ?? [], edges: s.edges ?? [] }, chart]))
+    setServerRef(from)
+    writeAutosave(null)
+  }
   const load = async (f: File) => {
     try {
-      const s = JSON.parse(await f.text()) as PchiShowFile
-      setMeta({ project: s.project ?? 'Untitled Project', name: s.name ?? 'untitled-show' })
-      setRig({ nodes: s.nodes ?? [], edges: s.edges ?? [] })
-      const chart = ensureCueNumbers(s.showchart ?? newShowchart())
-      setShowchart(chart)
-      history.reset()
-      setScene(null)
-      setBaseline(JSON.stringify([{ project: s.project ?? 'Untitled Project', name: s.name ?? 'untitled-show' }, { nodes: s.nodes ?? [], edges: s.edges ?? [] }, chart]))
-      writeAutosave(null)
+      apply(JSON.parse(await f.text()) as PchiShowFile, null)
     } catch {
       alert('That file could not be read as a .pchi show.')
     }
@@ -163,7 +172,9 @@ export default function App() {
           </span>
         )}
         <button className="icon-btn" onClick={() => setHelp(true)} aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)">?</button>
-        <button onClick={save}>Save</button>
+        {serverRef && <span className="pill online" title={`Opened from, and saved to, the server library as “${serverRef.name}”`}>server v{serverRef.version}</span>}
+        <button onClick={() => setLib('open')} title="Shows saved on the server: open, plan and share them">Library</button>
+        <button onClick={save} title="Download a .pchi file">Save</button>
         <label className="btn">
           Open
           <input type="file" accept=".pchi,.json" hidden onChange={(e) => e.target.files?.[0] && load(e.target.files[0])} />
@@ -199,6 +210,22 @@ export default function App() {
         </div>
       )}
       {help && <ShortcutsDialog onClose={() => setHelp(false)} />}
+      {lib && (
+        <LibraryDialog
+          start={lib}
+          current={{ name: meta.name, ref: serverRef }}
+          getFile={(name) => ({ ...buildFile(), name })}
+          dirty={dirty}
+          onOpen={(s, ref) => apply(s, ref)}
+          onSaved={(ref) => {
+            setServerRef(ref)
+            setMeta((m) => ({ ...m, name: ref.name }))
+            setBaseline(JSON.stringify([{ ...meta, name: ref.name }, rig, showchart]))
+            writeAutosave(null)
+          }}
+          onClose={() => setLib(null)}
+        />
+      )}
 
       {mode === 'show' && <ShowchartPanel chart={showchart} history={history} note={note} scene={scene} onScene={setScene} onOpenTimeline={() => setMode('timeline')} rig={rig} onRig={setRig} />}
       {mode === 'timeline' && <TimelinePanel chart={showchart} history={history} note={note} scene={scene} onScene={setScene} nodes={rig.nodes} rig={rig} onRig={setRig} />}

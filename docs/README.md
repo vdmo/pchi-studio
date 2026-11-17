@@ -21,6 +21,7 @@ This is the map. Start with the first section that fits you.
 ## Every document, by subject
 
 **Building a show**
+- [library.md](library.md): save and plan shows on the server, share them with a team
 - [command-bar.md](command-bar.md): build and edit by typing or speaking
 - [scene-minimum.md](scene-minimum.md): a scene that must run before it can be moved on
 - [fixtures.md](fixtures.md): DMX fixture files, so a cue can say `wash1=blue`
@@ -29,6 +30,7 @@ This is the map. Start with the first section that fits you.
 
 **Connecting the rig**
 - [connecting-systems.md](connecting-systems.md): how departments and devices take part
+- [remote-setup.md](remote-setup.md): one venue computer, reached from a distance over Tailscale, with a roster and a startup script
 - [profiles.md](profiles.md): how an action becomes the OSC a tool understands (Resolume, grandMA3, Eos, X32, BEYOND, QLab, MagicQ)
 - [artnet-sacn.md](artnet-sacn.md): DMX over the network
 - [osc-input.md](osc-input.md): Stream Deck, tablets and button boxes that press GO

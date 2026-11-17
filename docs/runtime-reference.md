@@ -43,6 +43,7 @@ Every option with an environment variable can be set that way. A flag wins.
 | `--new-roster-entry NAME:ROLE[:DEPTS]` | | Make a roster entry with a fresh random key, print the key once and the entry, exit. Roles: operator, editor, lso, guest, agent, button |
 | `--session-hours N` | | Sign-in lifetime, 1 to 168. Default 8 |
 | `--sessions FILE` | `PCHI_SESSIONS` | Keep sessions across restarts (token hashes only) |
+| `--library DIR` | `PCHI_LIBRARY` | Keep a library of saved and planned shows on the server: see [library.md](library.md) |
 | `--governance DIR` | `PCHI_GOVERNANCE` | Signed, hash-chained receipt for every decision ([governance.md](governance.md)) |
 | `--governance-key FILE` | `PCHI_GOVERNANCE_KEY` | Where the receipt-signing key lives (default: in the `--governance` folder) |
 | `--audience-token TOKEN` | `PCHI_AUDIENCE_TOKEN` | Opens `POST /vote` and nothing else for an audience gateway. Must differ from `--token` |

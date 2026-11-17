@@ -1,0 +1,20 @@
+# Copy to venue.conf (next to start-venue.sh) and edit. venue.conf is read by start-venue.sh and add-person.sh.
+
+# The show to start with.
+SHOW="$HOME/shows/main.pchi"
+
+# Where everything is kept: roster, library, memory, receipts, run log. Back this folder up.
+DATA="$HOME/pchi-venue"
+
+# The runtime binary: a name on PATH, or a full path.
+BIN="pchi-studio-api"
+
+# Extra device profiles (for example TiXL): a folder of *.json files. Leave empty for none.
+PROFILES=""
+
+# 0 = dry run (cues are reported, nothing is sent). 1 = really send cues to the rig.
+SEND=0
+
+# Ports. The runtime listens on 127.0.0.1:PORT only. The web door listens on the Tailscale address:WEB_PORT.
+PORT=3100
+WEB_PORT=8080

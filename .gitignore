@@ -1,3 +1,6 @@
 /target
 __pycache__/
 *.pyc
+
+# venue computer settings (paths, may hold local details)
+tools/venue/venue.conf

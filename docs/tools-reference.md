@@ -147,6 +147,7 @@ MCP over stdin and stdout, so an agent can look at the show, rehearse and propos
 ## Not binaries, but tools
 
 - `tools/obs-pchi/pchi_obs.py`: an OBS script (Tools > Scripts) for the **runtime**: shows PCHI's state, reports READY or the missing OBS scenes, optional GO hotkey. See [obs-plugin.md](obs-plugin.md).
+- `tools/venue/`: `start-venue.sh` (the venue computer: runtime with roster, library, memory, receipts and resume, plus a Tailscale-only web door) and `add-person.sh` (a roster entry with its own key). See [remote-setup.md](remote-setup.md).
 - `tools/tixl/`: a `tixl` device profile (scene cues to TiXL over OSC), demo show and a stand-in OSC listener. Use with `--profiles tools/tixl/profiles`. See its README.
 - `tools/resolume-pchi-bridge`, `touchdesigner-pchi-chop`, `ableton-pchi-max`, `strobe-pchi-bridge`, `tixl-pchi-bridge`, `cables-pchi-relay`, `pchi-show`: bridges for the **PCHI protocol** (the PrimeSwarm conductor), documented in their own folders and in the root `README.md`.
 - `demos/`: `multi-tool-live-show` and `strobe-show`, scripted end-to-end demos of that protocol layer.

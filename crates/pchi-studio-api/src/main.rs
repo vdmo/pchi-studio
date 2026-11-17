@@ -61,6 +61,9 @@ struct Cli {
     /// Keep signed-in sessions in this file so a restart does not sign everyone out. Only a hash of each session token is written (reading the file lets nobody in); it is owner-only on Linux and macOS. A session is dropped if it has expired or its person has left the roster or changed role. See docs/tls.md.
     #[arg(long, value_name = "FILE", env = "PCHI_SESSIONS")]
     sessions: Option<String>,
+    /// Keep a library of saved and planned shows in this folder, so people can save a show to the server, plan it (date, venue, status, notes) and open it from any machine. Each show is a folder of numbered versions; a person sees their own and the shows marked "team". Pair it with --roster so the library knows who is who. See docs/library.md.
+    #[arg(long, value_name = "DIR", env = "PCHI_LIBRARY")]
+    library: Option<String>,
     /// Say that HTTPS is provided in front of this runtime (a reverse proxy such as Caddy or nginx), so the warning about keys crossing the network in clear is not printed. It changes nothing else. See docs/tls.md.
     #[arg(long)]
     behind_tls: bool,
@@ -326,6 +329,13 @@ fn open_network_warning(cli: &Cli) {
 fn configure(show: &std::sync::Arc<Show>, cli: &Cli, how: &str) -> anyhow::Result<()> {
     show.set_edit_key(cli.edit_key.clone());
     show.set_session_hours(cli.session_hours);
+    if let Some(dir) = cli.library.as_deref().filter(|d| !d.is_empty()) {
+        show.set_library(dir).map_err(anyhow::Error::msg)?;
+        println!("library: saved shows are kept in {dir}");
+        if cli.roster.is_none() {
+            eprintln!("warning: --library without --roster: everyone is the same person, so every show is everyone's. Add a roster (docs/roles.md) to give each person their own shows.");
+        }
+    }
     if let Some(t) = cli.audience_token.as_deref().filter(|t| !t.is_empty()) {
         if cli.token.as_deref() == Some(t) || cli.edit_key.as_deref() == Some(t) {
             anyhow::bail!("--audience-token must differ from --token and --edit-key: it is handed to an outside gateway and must open nothing but voting");
