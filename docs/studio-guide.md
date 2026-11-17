@@ -45,10 +45,12 @@ Select a scene on the Show tab and its timeline shows under the canvas (drag its
 - **Move a cue** by dragging it; **change its length** by dragging its right edge. Both snap to the **Snap** grid (0.1, 0.25, 0.5 or 1 s, or none; the default is 0.25 s, remembered in this browser). Hold **Alt** to place freely. The exact time follows the pointer while you drag.
 - **Type an exact time:** click the cue and type in its **Time** field (`12.5` or `0:12.5`), then Enter. Esc cancels, and anything that is not a time is marked and refused, never applied. **Length** works the same way (empty means none).
 - **Nudge** the focused cue with ← and → (to the next grid line, so an off-grid cue lands on the grid) or Shift + ← → (one second).
-- **Add** a cue by double-clicking a lane; **remove** the focused cue with Delete (or Remove). Every change is one step of the normal undo.
+- **Say what a cue does** in its **Value** box (it is named for the department: Scene, Look, Cue, Snapshot, Program). On a robot lane it offers the programs that device allows. Whether the tool accepts the value is the Checks panel's job: a program the robot does not allow is flagged the moment you press Enter.
+- **Add** a cue by double-clicking a lane: it appears on the grid with its Value box focused, so **double-click, type, Enter** makes a complete cue. **Remove** the focused cue with Delete (or Remove). Every change is one step of the normal undo.
+- **Dense lanes:** cue boxes are only as wide as they need to be; when one is too narrow for its time the time moves to the tooltip, and the selected cue is always wide enough to read.
 - **Zoom:** Ctrl + scroll or the − / + buttons; **Fit** shows the whole scene. Zoomed in, the ruler shows finer marks (down to tenths of a second) and the strip scrolls sideways.
 
-What it does not do: moving a cue to another lane, and choosing what a cue does (its value) are still done on the Timeline tab or the Cue sheet; a cue added here starts with no value, and the Checks panel says so. On the **Live** tab the strip has the ruler, readout and zoom but is read-only.
+What it does not do: moving a cue to another lane, a cue's note and number, and which device a lane uses are still done on the Timeline tab or the Cue sheet. On the **Live** tab the strip has the ruler, readout and zoom but is read-only.
 
 ## Timeline tab: cues inside a scene
 

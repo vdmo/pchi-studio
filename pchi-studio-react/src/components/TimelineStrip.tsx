@@ -1,11 +1,11 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as RKeyboardEvent, type MouseEvent as RMouseEvent, type PointerEvent as RPointerEvent } from 'react'
-import { deptOf, fmtTick, fmtTime, nudgeMs, parseTime, rulerTicks, snapMs, timelineEnd, type ShowCue, type ShowTimeline } from '@pchi/sdk'
+import { allowedPrograms, cueValueField, cueValueOf, deptOf, fmtTick, fmtTime, laneDevice, nudgeMs, parseTime, rulerTicks, snapMs, timelineEnd, withCueValue, type PchiNode, type ShowCue, type ShowTimeline } from '@pchi/sdk'
 
 /** A time as m:ss.s with exactly the decimals it needs (see fmtTime): what is shown is what is stored. */
 export const fmt = fmtTime
 
 /** Height the strip needs: the container reserves this much under the canvas (a ruler row and the lanes). */
-export const stripHeight = (lanes: number) => (lanes > 0 ? Math.min(380, 124 + lanes * 36) : 64)
+export const stripHeight = (lanes: number) => (lanes > 0 ? Math.max(MIN_H, Math.min(380, 124 + lanes * 36, Math.round(window.innerHeight * 0.42))) : 64) // never more than ~40% of the window: the canvas needs room too
 
 const COLLAPSED = 34
 const MIN_H = 90
@@ -121,6 +121,8 @@ interface Props {
   onOpen?: () => void
   /** Editing view: hand back the changed timeline. With it the strip edits in place; without it (Live) it only shows. */
   onChange?: (next: ShowTimeline, key?: string) => void
+  /** The rig, so a robot lane can suggest the programs its device allows. */
+  nodes?: PchiNode[]
   layout: StripLayout
 }
 
@@ -130,7 +132,7 @@ interface Props {
  * Where `onChange` is given (the Show tab) cues can be edited right here: drag to move, drag the right edge to resize, click and
  * type an exact time, arrow keys to nudge, double-click a lane to add one. Live is read-only.
  */
-export default function TimelineStrip({ state, tl, elapsed, fired, exit, onOpen, onChange, layout }: Props) {
+export default function TimelineStrip({ state, tl, elapsed, fired, exit, onOpen, onChange, nodes, layout }: Props) {
   const lanes = tl?.lanes ?? []
   const total = Math.max(timelineEnd(tl) + 1000, 5000, tl?.duration_ms ?? 0, exit ? exit.ms + 500 : 0)
   const live = elapsed !== undefined
@@ -216,6 +218,7 @@ export default function TimelineStrip({ state, tl, elapsed, fired, exit, onOpen,
     }
   }
   const [sel, setSel] = useState<string | null>(null)
+  const [justAdded, setJustAdded] = useState<string | null>(null)
   const [drag, setDrag] = useState<Drag | null>(null)
   const origin = useRef<{ x: number; at: number; length: number | undefined; w: number } | null>(null)
   // forget the selection when the scene changes or the cue is gone
@@ -228,6 +231,10 @@ export default function TimelineStrip({ state, tl, elapsed, fired, exit, onOpen,
   const patchCue = (cueId: string, patch: Partial<ShowCue>, key?: string) => {
     if (!tl || !onChange) return
     onChange({ ...tl, lanes: tl.lanes.map((l) => ({ ...l, cues: l.cues.map((c) => (c.id === cueId ? { ...c, ...patch } : c)) })) }, key)
+  }
+  const setValue = (cueId: string, value: string) => {
+    if (!tl || !onChange) return
+    onChange({ ...tl, lanes: tl.lanes.map((l) => ({ ...l, cues: l.cues.map((c) => (c.id === cueId ? withCueValue(c, l.dept, value) : c)) })) })
   }
   const removeCue = (cueId: string) => {
     if (!tl || !onChange) return
@@ -293,6 +300,7 @@ export default function TimelineStrip({ state, tl, elapsed, fired, exit, onOpen,
     const cue: ShowCue = { id: newId('c'), at_ms: snapped(((e.clientX - r.left) / r.width) * total, e.altKey), length_ms: 2000, action: { kind: d.kind, payload: { [d.field]: '' } } }
     onChange!({ ...tl, lanes: tl.lanes.map((l) => (l.id === laneId ? { ...l, cues: [...l.cues, cue] } : l)) })
     setSel(cue.id)
+    setJustAdded(cue.id) // its Value field takes focus, so the next thing typed is what the cue does
   }
 
   // drag the top edge to make the strip taller or shorter; double-click it to go back to automatic height
@@ -352,7 +360,22 @@ export default function TimelineStrip({ state, tl, elapsed, fired, exit, onOpen,
         )}
         {onOpen && <button onClick={onOpen} title="Edit this scene's timeline">{lanes.length ? 'Edit timeline' : 'Add a timeline'}</button>}
       </header>
-      {editable && found && !layout.collapsed && <CueEditor key={found.c.id} cue={found.c} laneName={found.l.name || found.l.id} total={total} onTime={(ms) => patchCue(found.c.id, { at_ms: ms })} onLength={(ms) => patchCue(found.c.id, { length_ms: ms })} onDelete={() => removeCue(found.c.id)} />}
+      {editable && found && !layout.collapsed && (
+        <CueEditor
+          key={found.c.id}
+          cue={found.c}
+          dept={found.l.dept}
+          laneName={found.l.name || found.l.id}
+          total={total}
+          suggestions={found.l.dept === 'motion' && nodes ? (() => { const d = laneDevice(nodes, found.l); return d ? allowedPrograms(d) : [] })() : []}
+          autoFocusValue={justAdded === found.c.id}
+          onValueBlur={() => setJustAdded(null)}
+          onTime={(ms) => patchCue(found.c.id, { at_ms: ms })}
+          onLength={(ms) => patchCue(found.c.id, { length_ms: ms })}
+          onValue={(v) => setValue(found.c.id, v)}
+          onDelete={() => removeCue(found.c.id)}
+        />
+      )}
       {layout.collapsed ? null : lanes.length === 0 ? (
         <p className="muted tl-none">{state} has no timeline yet: nothing fires while the show is in it.</p>
       ) : (
@@ -386,10 +409,12 @@ export default function TimelineStrip({ state, tl, elapsed, fired, exit, onOpen,
                       const text = `${c.num !== undefined ? `Q${c.num} ` : ''}${c.label ?? `${c.action.kind}${first !== undefined && first !== '' ? ` · ${String(first)}` : ''}`}`
                       const cls = !live ? 'upcoming' : done ? 'fired' : elapsed < c.at_ms ? 'upcoming' : 'due'
                       const isSel = editable && sel === c.id
+                      // a box too narrow for its label and its time shows only the label (the time is in the tooltip and the editor)
+                      const compact = px(len ?? 0) < 118
                       return (
                         <div
                           key={c.id}
-                          className={`lcue ${cls} ${editable ? 'edit' : ''} ${isSel ? 'sel' : ''} ${live1?.moved ? 'moving' : ''}`}
+                          className={`lcue ${cls} ${editable ? 'edit' : ''} ${isSel ? 'sel' : ''} ${live1?.moved ? 'moving' : ''} ${compact ? 'compact' : ''}`}
                           style={{ left: pct(at), width: pct(len ?? 0), background: `${d.color}${done ? '55' : '22'}`, borderColor: d.color }}
                           title={`${text} at ${fmt(at)}${len ? `, ${fmt(len)} long` : ''}${done ? ' (fired)' : ''}`}
                           {...(editable
@@ -438,17 +463,87 @@ export default function TimelineStrip({ state, tl, elapsed, fired, exit, onOpen,
   )
 }
 
-/** The selected cue's exact time and length, typed: `12.5`, `0:12.5`. Enter or leaving the box applies it; Esc puts the old value back. */
-function CueEditor({ cue, laneName, total, onTime, onLength, onDelete }: { cue: ShowCue; laneName: string; total: number; onTime: (ms: number) => void; onLength: (ms: number | undefined) => void; onDelete: () => void }) {
+interface EditorProps {
+  cue: ShowCue
+  dept?: string
+  laneName: string
+  total: number
+  /** Values worth offering for this cue (a robot's allowed programs). */
+  suggestions: string[]
+  autoFocusValue: boolean
+  onValueBlur: () => void
+  onTime: (ms: number) => void
+  onLength: (ms: number | undefined) => void
+  onValue: (value: string) => void
+  onDelete: () => void
+}
+
+/**
+ * The selected cue, typed: what it does (Value), its exact time and its length. `12.5` or `0:12.5` for times.
+ * Enter or leaving a box applies it; Esc puts the old value back.
+ */
+function CueEditor({ cue, dept, laneName, total, suggestions, autoFocusValue, onValueBlur, onTime, onLength, onValue, onDelete }: EditorProps) {
   return (
     <div className="strip-edit" role="group" aria-label="Selected cue">
       <b>{cue.num !== undefined ? `Q${cue.num}` : 'Cue'}</b>
       <span className="muted">{laneName}</span>
+      <ValueField cue={cue} dept={dept} suggestions={suggestions} autoFocus={autoFocusValue} onBlurDone={onValueBlur} onCommit={onValue} />
       <TimeField label="Time" ms={cue.at_ms} max={total} onCommit={(ms) => ms !== null && onTime(ms)} />
       <TimeField label="Length" ms={cue.length_ms} onCommit={(ms) => onLength(ms === null || ms === 0 ? undefined : ms)} blankOk />
       <span className="spacer" />
       <button onClick={onDelete} title="Remove this cue (Delete)">Remove</button>
     </div>
+  )
+}
+
+const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1)
+
+/** What the cue does: the scene, look, cue or program, by the department's own word. Whether it is a value the tool accepts is the Checks panel's job. */
+function ValueField({ cue, dept, suggestions, autoFocus, onBlurDone, onCommit }: { cue: ShowCue; dept?: string; suggestions: string[]; autoFocus: boolean; onBlurDone: () => void; onCommit: (v: string) => void }) {
+  const field = cueValueField(cue, dept)
+  const shown = cueValueOf(cue, dept)
+  const [text, setText] = useState(shown)
+  const cancelled = useRef(false)
+  useEffect(() => setText(shown), [shown])
+  const list = suggestions.length ? `strip-values-${cue.id}` : undefined
+  const commit = () => {
+    onBlurDone()
+    if (cancelled.current) {
+      cancelled.current = false
+      return setText(shown)
+    }
+    const v = text.trim()
+    if (v === shown) return setText(shown)
+    onCommit(v)
+  }
+  return (
+    <label className="strip-time strip-value">
+      {cap(field)}
+      <input
+        value={text}
+        spellCheck={false}
+        autoFocus={autoFocus}
+        list={list}
+        placeholder={`what to ${field === 'program' ? 'run' : 'fire'}`}
+        aria-label={`${cap(field)} of the selected cue`}
+        title={`${cap(field)}: what this cue does. Type it, then Enter (Esc cancels).`}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          e.stopPropagation()
+          if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+          else if (e.key === 'Escape') {
+            cancelled.current = true
+            ;(e.target as HTMLInputElement).blur()
+          }
+        }}
+      />
+      {list && (
+        <datalist id={list}>
+          {suggestions.map((s) => <option key={s} value={s} />)}
+        </datalist>
+      )}
+    </label>
   )
 }
 

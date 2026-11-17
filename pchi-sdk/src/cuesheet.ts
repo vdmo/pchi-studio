@@ -99,6 +99,21 @@ function deptFor(kind: string): string {
 
 type CuePatch = { at_ms?: number; length_ms?: number | undefined; label?: string; value?: string; num?: number }
 
+/** The payload field a cue's main value lives in: the one it already has, else its department's (scene, look, cue, program...). */
+export const cueValueField = (cue: ShowCue, dept?: string): string => Object.keys(cue.action.payload ?? {})[0] ?? deptOf(dept).field
+
+/** The cue's main value as text ('' when it has none). */
+export const cueValueOf = (cue: ShowCue, dept?: string): string => {
+  const v = (cue.action.payload ?? {})[cueValueField(cue, dept)]
+  return v === undefined || v === null ? '' : String(v)
+}
+
+/** The same cue with its main value set. */
+export const withCueValue = (cue: ShowCue, dept: string | undefined, value: string): ShowCue => ({
+  ...cue,
+  action: { ...cue.action, payload: { ...(cue.action.payload ?? {}), [cueValueField(cue, dept)]: value } },
+})
+
 /** A new chart with one cue changed. Unknown scene/cue returns the chart untouched. */
 export function updateCue(chart: Showchart, scene: string, cueId: string, patch: CuePatch): Showchart {
   return {
@@ -126,10 +141,7 @@ export function updateCue(chart: Showchart, scene: string, cueId: string, patch:
                   if (patch.label.trim() === '') delete next.label
                   else next.label = patch.label
                 }
-                if (patch.value !== undefined) {
-                  const field = Object.keys(c.action.payload ?? {})[0] ?? deptOf(l.dept).field
-                  next.action = { ...c.action, payload: { ...(c.action.payload ?? {}), [field]: patch.value } }
-                }
+                if (patch.value !== undefined) next.action = withCueValue(c, l.dept, patch.value).action
                 return next
               }),
             }

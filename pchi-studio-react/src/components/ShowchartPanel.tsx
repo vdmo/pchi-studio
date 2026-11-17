@@ -373,7 +373,7 @@ function Editor({ chart, history, note, scene, onScene, onOpenTimeline, rig, onR
           {chart.states.length === 0 && <StartScreen chart={chart} onApply={commit} />}
         </div>
 
-        {stripOn && <TimelineStrip state={selState!.id} tl={selState!.timeline} exit={sceneInfo(chart, selState!.id).exit} onOpen={onOpenTimeline} onChange={(next, key) => commit({ ...chart, states: chart.states.map((s) => (s.id === selState!.id ? { ...s, timeline: next } : s)) }, key)} layout={strip} />}
+        {stripOn && <TimelineStrip state={selState!.id} tl={selState!.timeline} exit={sceneInfo(chart, selState!.id).exit} onOpen={onOpenTimeline} nodes={rig?.nodes} onChange={(next, key) => commit({ ...chart, states: chart.states.map((s) => (s.id === selState!.id ? { ...s, timeline: next } : s)) }, key)} layout={strip} />}
 
         {outline && (
           <Card title="Outline" className="left" onClose={() => setOutline(false)}>

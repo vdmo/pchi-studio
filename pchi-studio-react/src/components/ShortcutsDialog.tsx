@@ -24,7 +24,7 @@ const GROUPS: { title: string; keys: [string, string][] }[] = [
       ['Drag a cue / its right edge', 'Move it / change its length, snapped to the grid (hold Alt to place freely)'],
       ['Click a cue, type a time', 'Exact time: 12.5 or 0:12.5, then Enter (Esc cancels)'],
       ['← →  /  Shift ← →', 'Nudge the focused cue one grid step / one second'],
-      ['Double-click a lane', 'Add a cue there'],
+      ['Double-click a lane', 'Add a cue there, then type what it does and press Enter'],
       ['Delete', 'Remove the focused cue'],
       ['Ctrl + scroll', 'Zoom the strip (Fit shows the whole scene)'],
     ],

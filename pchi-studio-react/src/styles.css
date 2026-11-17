@@ -741,4 +741,22 @@ button.go:disabled { background: #1b1d25; color: #7a7f92; border-color: #2f323e;
 .strip-time { display: inline-flex; align-items: center; gap: 6px; color: #9aa0b4; }
 .strip-time input { width: 78px; font: 12px ui-monospace, Menlo, Consolas, monospace; color: #e8e9ee; background: #0e1014; border: 1px solid #2f323e; border-radius: 6px; padding: 3px 6px; }
 .strip-time.bad input { border-color: #ef4444; }
+.strip-value input { width: 168px; font-family: inherit; }
 @media print { .strip-tools, .strip-edit { display: none !important; } }
+
+/* ───────── alignment: the global `button { text-align: left }` is right for a button that stretches across a row (a list item) and wrong for
+   one with a fixed size, where it pushes the glyph to the left edge. Fixed-size and icon buttons centre what is in them. ───────── */
+.icon-btn, .more-btn, .float-x, .float-bar button.primary, button.icon, button.x, .zoom button, .toolbar button, .strip-zoom button, .tabs button, .side-tabs button, .fold, .checks-btn {
+  text-align: center;
+}
+.icon-btn, .more-btn, .float-x, .float-bar button.primary {
+  display: inline-flex; align-items: center; justify-content: center; line-height: 1; box-sizing: border-box;
+}
+.toolbar button { min-width: 34px; }
+
+/* dense lanes: a cue box is only as wide as it needs to be, so cues 30 s apart do not pile up; the time moves to the tooltip when it will not fit */
+.live-tl .lcue { min-width: 58px; }
+.live-tl .lcue.compact .lt { display: none; }
+.live-tl .lcue.compact .ltxt { padding-right: 4px; }
+.live-tl .lcue.sel, .live-tl .lcue.moving { min-width: 104px; } /* the selected cue is wide enough to read, and the one being moved shows its time */
+.live-tl .lcue.sel .lt, .live-tl .lcue.moving .lt { display: inline; }

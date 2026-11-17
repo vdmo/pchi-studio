@@ -1,0 +1,623 @@
+{
+  "version": "1.0",
+  "project": "Stadium doors and pre-show (example)",
+  "name": "stadium-preshow-doors",
+  "nodes": [
+    {
+      "id": "walls",
+      "type": "resolume",
+      "label": "LED walls (Resolume)",
+      "position": {
+        "x": 0,
+        "y": 0
+      },
+      "params": {
+        "host": "10.20.1.10",
+        "port": 7000
+      }
+    },
+    {
+      "id": "lights",
+      "type": "grandma3",
+      "label": "Lighting (grandMA3)",
+      "position": {
+        "x": 260,
+        "y": 0
+      },
+      "params": {
+        "host": "10.20.2.10",
+        "port": 8000
+      }
+    },
+    {
+      "id": "foh",
+      "type": "x32",
+      "label": "FOH desk (X32)",
+      "position": {
+        "x": 520,
+        "y": 0
+      },
+      "params": {
+        "host": "10.20.4.10",
+        "port": 10023
+      }
+    },
+    {
+      "id": "playback",
+      "type": "qlab",
+      "label": "Playback (QLab)",
+      "position": {
+        "x": 780,
+        "y": 0
+      },
+      "params": {
+        "host": "10.20.4.20",
+        "port": 53000
+      }
+    }
+  ],
+  "edges": [],
+  "timeline": [],
+  "assets": [],
+  "showchart": {
+    "id": "stadium-preshow-doors",
+    "initial": "GATES_OPEN",
+    "states": [
+      {
+        "id": "GATES_OPEN",
+        "label": "Gates open: house loop (90 min)",
+        "timeline": {
+          "duration_ms": 5400000,
+          "lanes": [
+            {
+              "id": "walls",
+              "name": "LED walls",
+              "dept": "visual",
+              "device": "walls",
+              "cues": [
+                {
+                  "id": "c8l",
+                  "at_ms": 0,
+                  "label": "House loop",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "1"
+                    }
+                  },
+                  "num": 1
+                },
+                {
+                  "id": "c8m",
+                  "at_ms": 4800000,
+                  "label": "Show starts soon slide",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "7"
+                    }
+                  },
+                  "num": 6
+                }
+              ]
+            },
+            {
+              "id": "lights",
+              "name": "Lighting",
+              "dept": "lighting",
+              "device": "lights",
+              "cues": [
+                {
+                  "id": "c8n",
+                  "at_ms": 0,
+                  "label": "House look",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "1"
+                    }
+                  },
+                  "num": 2
+                },
+                {
+                  "id": "c8o",
+                  "at_ms": 5100000,
+                  "label": "Pre-support build",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "9"
+                    }
+                  },
+                  "num": 7
+                }
+              ]
+            },
+            {
+              "id": "foh",
+              "name": "FOH desk",
+              "dept": "audio",
+              "device": "foh",
+              "cues": [
+                {
+                  "id": "c8p",
+                  "at_ms": 0,
+                  "label": "House desk scene",
+                  "action": {
+                    "kind": "audio.snapshot",
+                    "payload": {
+                      "snapshot": "1"
+                    }
+                  },
+                  "num": 3
+                }
+              ]
+            },
+            {
+              "id": "playback",
+              "name": "Playback",
+              "dept": "audio",
+              "device": "playback",
+              "cues": [
+                {
+                  "id": "c8q",
+                  "at_ms": 0,
+                  "label": "House playlist",
+                  "action": {
+                    "kind": "audio.snapshot",
+                    "payload": {
+                      "snapshot": "H1"
+                    }
+                  },
+                  "num": 4
+                },
+                {
+                  "id": "c8r",
+                  "at_ms": 3600000,
+                  "label": "Safety announcement",
+                  "action": {
+                    "kind": "audio.snapshot",
+                    "payload": {
+                      "snapshot": "SAFE1"
+                    }
+                  },
+                  "num": 5
+                },
+                {
+                  "id": "c8s",
+                  "at_ms": 5100000,
+                  "label": "Support act soon",
+                  "action": {
+                    "kind": "audio.snapshot",
+                    "payload": {
+                      "snapshot": "SAFE2"
+                    }
+                  },
+                  "num": 8
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "SUPPORT_SET",
+        "label": "Support act (45 min)",
+        "timeline": {
+          "duration_ms": 2700000,
+          "lanes": [
+            {
+              "id": "walls",
+              "name": "LED walls",
+              "dept": "visual",
+              "device": "walls",
+              "cues": [
+                {
+                  "id": "c8t",
+                  "at_ms": 0,
+                  "label": "Support act content",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "8"
+                    }
+                  },
+                  "num": 9
+                }
+              ]
+            },
+            {
+              "id": "lights",
+              "name": "Lighting",
+              "dept": "lighting",
+              "device": "lights",
+              "cues": [
+                {
+                  "id": "c8u",
+                  "at_ms": 0,
+                  "label": "Support wash",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "20"
+                    }
+                  },
+                  "num": 10
+                },
+                {
+                  "id": "c8v",
+                  "at_ms": 2400000,
+                  "label": "Support finale",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "21"
+                    }
+                  },
+                  "num": 12
+                }
+              ]
+            },
+            {
+              "id": "foh",
+              "name": "FOH desk",
+              "dept": "audio",
+              "device": "foh",
+              "cues": [
+                {
+                  "id": "c8w",
+                  "at_ms": 0,
+                  "label": "Support desk scene",
+                  "action": {
+                    "kind": "audio.snapshot",
+                    "payload": {
+                      "snapshot": "5"
+                    }
+                  },
+                  "num": 11
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "CHANGEOVER",
+        "label": "Changeover (30 min)",
+        "timeline": {
+          "duration_ms": 1800000,
+          "lanes": [
+            {
+              "id": "walls",
+              "name": "LED walls",
+              "dept": "visual",
+              "device": "walls",
+              "cues": [
+                {
+                  "id": "c8x",
+                  "at_ms": 0,
+                  "label": "Changeover loop",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "2"
+                    }
+                  },
+                  "num": 13
+                },
+                {
+                  "id": "c8y",
+                  "at_ms": 1500000,
+                  "label": "5 minute slide",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "3"
+                    }
+                  },
+                  "num": 18
+                }
+              ]
+            },
+            {
+              "id": "lights",
+              "name": "Lighting",
+              "dept": "lighting",
+              "device": "lights",
+              "cues": [
+                {
+                  "id": "c8z",
+                  "at_ms": 0,
+                  "label": "Changeover look",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "2"
+                    }
+                  },
+                  "num": 14
+                }
+              ]
+            },
+            {
+              "id": "foh",
+              "name": "FOH desk",
+              "dept": "audio",
+              "device": "foh",
+              "cues": [
+                {
+                  "id": "c90",
+                  "at_ms": 0,
+                  "label": "House desk scene",
+                  "action": {
+                    "kind": "audio.snapshot",
+                    "payload": {
+                      "snapshot": "1"
+                    }
+                  },
+                  "num": 15
+                }
+              ]
+            },
+            {
+              "id": "playback",
+              "name": "Playback",
+              "dept": "audio",
+              "device": "playback",
+              "cues": [
+                {
+                  "id": "c91",
+                  "at_ms": 0,
+                  "label": "Changeover playlist",
+                  "action": {
+                    "kind": "audio.snapshot",
+                    "payload": {
+                      "snapshot": "H2"
+                    }
+                  },
+                  "num": 16
+                },
+                {
+                  "id": "c92",
+                  "at_ms": 1200000,
+                  "label": "Safety reminder",
+                  "action": {
+                    "kind": "audio.snapshot",
+                    "payload": {
+                      "snapshot": "SAFE3"
+                    }
+                  },
+                  "num": 17
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "COUNTDOWN",
+        "label": "Countdown clock (3:00)",
+        "timeline": {
+          "duration_ms": 180000,
+          "lanes": [
+            {
+              "id": "walls",
+              "name": "LED walls",
+              "dept": "visual",
+              "device": "walls",
+              "cues": [
+                {
+                  "id": "c93",
+                  "at_ms": 0,
+                  "label": "Countdown clock",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "4"
+                    }
+                  },
+                  "num": 19
+                }
+              ]
+            },
+            {
+              "id": "lights",
+              "name": "Lighting",
+              "dept": "lighting",
+              "device": "lights",
+              "cues": [
+                {
+                  "id": "c94",
+                  "at_ms": 0,
+                  "label": "Build look",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "3"
+                    }
+                  },
+                  "num": 20
+                },
+                {
+                  "id": "c95",
+                  "at_ms": 150000,
+                  "label": "Final 30 s",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "4"
+                    }
+                  },
+                  "num": 22
+                }
+              ]
+            },
+            {
+              "id": "playback",
+              "name": "Playback",
+              "dept": "audio",
+              "device": "playback",
+              "cues": [
+                {
+                  "id": "c96",
+                  "at_ms": 0,
+                  "label": "Rising bed",
+                  "action": {
+                    "kind": "audio.snapshot",
+                    "payload": {
+                      "snapshot": "CD"
+                    }
+                  },
+                  "num": 21
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "INTRO_FILM",
+        "label": "Intro film",
+        "timeline": {
+          "duration_ms": 95000,
+          "lanes": [
+            {
+              "id": "walls",
+              "name": "LED walls",
+              "dept": "visual",
+              "device": "walls",
+              "cues": [
+                {
+                  "id": "c97",
+                  "at_ms": 0,
+                  "label": "Intro film",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "6"
+                    }
+                  },
+                  "num": 23
+                }
+              ]
+            },
+            {
+              "id": "lights",
+              "name": "Lighting",
+              "dept": "lighting",
+              "device": "lights",
+              "cues": [
+                {
+                  "id": "c98",
+                  "at_ms": 0,
+                  "label": "Dark",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "5"
+                    }
+                  },
+                  "num": 24
+                }
+              ]
+            },
+            {
+              "id": "playback",
+              "name": "Playback",
+              "dept": "audio",
+              "device": "playback",
+              "cues": [
+                {
+                  "id": "c99",
+                  "at_ms": 0,
+                  "label": "Film audio",
+                  "action": {
+                    "kind": "audio.snapshot",
+                    "payload": {
+                      "snapshot": "FILM"
+                    }
+                  },
+                  "num": 25
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "HANDOVER",
+        "label": "Hand over to the show file"
+      }
+    ],
+    "transitions": [
+      {
+        "source": "GATES_OPEN",
+        "target": "SUPPORT_SET",
+        "after_ms": 5400000
+      },
+      {
+        "source": "GATES_OPEN",
+        "target": "SUPPORT_SET",
+        "event": "NEXT"
+      },
+      {
+        "source": "SUPPORT_SET",
+        "target": "CHANGEOVER",
+        "after_ms": 2700000
+      },
+      {
+        "source": "SUPPORT_SET",
+        "target": "CHANGEOVER",
+        "event": "NEXT"
+      },
+      {
+        "source": "CHANGEOVER",
+        "target": "COUNTDOWN",
+        "after_ms": 1800000
+      },
+      {
+        "source": "CHANGEOVER",
+        "target": "COUNTDOWN",
+        "event": "NEXT"
+      },
+      {
+        "source": "COUNTDOWN",
+        "target": "INTRO_FILM",
+        "after_ms": 180000
+      },
+      {
+        "source": "INTRO_FILM",
+        "target": "HANDOVER",
+        "after_ms": 95000
+      }
+    ],
+    "name": "stadium-preshow-doors",
+    "layout": {
+      "GATES_OPEN": {
+        "x": 0,
+        "y": 0
+      },
+      "SUPPORT_SET": {
+        "x": 300,
+        "y": 0
+      },
+      "CHANGEOVER": {
+        "x": 600,
+        "y": 0
+      },
+      "COUNTDOWN": {
+        "x": 0,
+        "y": 170
+      },
+      "INTRO_FILM": {
+        "x": 300,
+        "y": 170
+      },
+      "HANDOVER": {
+        "x": 600,
+        "y": 170
+      }
+    },
+    "cue_seq": 25
+  }
+}

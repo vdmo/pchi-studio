@@ -21,6 +21,10 @@ The **Library** button in the top bar opens the dialog.
 
 If the runtime has a roster, the dialog asks you to sign in with your own key first (the same key as the Live tab).
 
+## Example shows
+
+[tools/examples](../tools/examples/README.md) has three stage shows at different scales (a stadium pop tour, a condensed arena show, and a stadium doors and pre-show day) with invented content. Add them to a library with `node tools/examples/import-examples.mjs http://127.0.0.1:3101` (once each: running it again leaves them alone). They are marked as examples in their names and notes, so they are easy to tell from real shows and to remove.
+
 ## Who may do what
 
 | | Sees | Saves / changes | Removes |

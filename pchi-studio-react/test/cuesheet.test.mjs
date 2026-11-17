@@ -106,3 +106,21 @@ test('a number can be set by hand (12.5 slots in), and duplicates are reported',
 test('CSV carries the stored numbers', () => {
   assert.match(cueSheetCsv(numbered()), /^Q1,INTRO/m)
 })
+
+test('a cue value lives in the field the cue already has, else its department\'s', () => {
+  const { cueValueField, cueValueOf, withCueValue } = createRequire(import.meta.url)('../.sdk-test/sdk.cjs')
+  const motion = { id: 'c', at_ms: 0, action: { kind: 'motion.run', payload: { program: 'PARK' } } }
+  const empty = { id: 'e', at_ms: 0, action: { kind: 'lighting.look' } }
+  assert.equal(cueValueField(motion, 'motion'), 'program')
+  assert.equal(cueValueField(empty, 'lighting'), 'look')
+  assert.equal(cueValueField(empty, 'visual'), 'scene')
+  assert.equal(cueValueOf(motion, 'motion'), 'PARK')
+  assert.equal(cueValueOf(empty, 'lighting'), '')
+  const next = withCueValue(motion, 'motion', 'OPEN_ARM')
+  assert.equal(next.action.payload.program, 'OPEN_ARM')
+  assert.equal(motion.action.payload.program, 'PARK', 'the original is not changed')
+  assert.equal(withCueValue(empty, 'lighting', 'blue').action.payload.look, 'blue')
+  // another field the cue has is kept
+  const two = { id: 't', at_ms: 0, action: { kind: 'scene.activate', payload: { scene: 'a', fade: 2 } } }
+  assert.deepEqual(withCueValue(two, 'visual', 'b').action.payload, { scene: 'b', fade: 2 })
+})

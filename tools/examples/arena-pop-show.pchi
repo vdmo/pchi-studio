@@ -1,0 +1,1972 @@
+{
+  "version": "1.0",
+  "project": "Arena pop show (example)",
+  "name": "arena-pop-show",
+  "nodes": [
+    {
+      "id": "walls",
+      "type": "resolume",
+      "label": "LED walls (Resolume)",
+      "position": {
+        "x": 0,
+        "y": 0
+      },
+      "params": {
+        "host": "10.20.1.10",
+        "port": 7000
+      }
+    },
+    {
+      "id": "lights",
+      "type": "grandma3",
+      "label": "Lighting (grandMA3)",
+      "position": {
+        "x": 260,
+        "y": 0
+      },
+      "params": {
+        "host": "10.20.2.10",
+        "port": 8000
+      }
+    },
+    {
+      "id": "foh",
+      "type": "x32",
+      "label": "FOH desk (X32)",
+      "position": {
+        "x": 520,
+        "y": 0
+      },
+      "params": {
+        "host": "10.20.4.10",
+        "port": 10023
+      }
+    },
+    {
+      "id": "playback",
+      "type": "qlab",
+      "label": "Playback (QLab)",
+      "position": {
+        "x": 780,
+        "y": 0
+      },
+      "params": {
+        "host": "10.20.4.20",
+        "port": 53000
+      }
+    }
+  ],
+  "edges": [],
+  "timeline": [],
+  "assets": [],
+  "showchart": {
+    "id": "arena-pop-show",
+    "initial": "HOUSE",
+    "states": [
+      {
+        "id": "HOUSE",
+        "label": "Doors: house loop",
+        "timeline": {
+          "duration_ms": 600000,
+          "lanes": [
+            {
+              "id": "walls",
+              "name": "LED walls",
+              "dept": "visual",
+              "device": "walls",
+              "cues": [
+                {
+                  "id": "c88",
+                  "at_ms": 0,
+                  "label": "House loop",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "1"
+                    }
+                  },
+                  "num": 1
+                }
+              ]
+            },
+            {
+              "id": "lights",
+              "name": "Lighting",
+              "dept": "lighting",
+              "device": "lights",
+              "cues": [
+                {
+                  "id": "c89",
+                  "at_ms": 0,
+                  "label": "House look",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "1"
+                    }
+                  },
+                  "num": 2
+                }
+              ]
+            },
+            {
+              "id": "playback",
+              "name": "Playback",
+              "dept": "audio",
+              "device": "playback",
+              "cues": [
+                {
+                  "id": "c8a",
+                  "at_ms": 0,
+                  "label": "House playlist",
+                  "action": {
+                    "kind": "audio.snapshot",
+                    "payload": {
+                      "snapshot": "H1"
+                    }
+                  },
+                  "num": 3
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "COUNTDOWN",
+        "label": "Countdown clock (2:00)",
+        "timeline": {
+          "duration_ms": 120000,
+          "lanes": [
+            {
+              "id": "walls",
+              "name": "LED walls",
+              "dept": "visual",
+              "device": "walls",
+              "cues": [
+                {
+                  "id": "c8b",
+                  "at_ms": 0,
+                  "label": "Countdown clock",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "4"
+                    }
+                  },
+                  "num": 4
+                }
+              ]
+            },
+            {
+              "id": "lights",
+              "name": "Lighting",
+              "dept": "lighting",
+              "device": "lights",
+              "cues": [
+                {
+                  "id": "c8c",
+                  "at_ms": 0,
+                  "label": "Build look",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "3"
+                    }
+                  },
+                  "num": 5
+                }
+              ]
+            },
+            {
+              "id": "playback",
+              "name": "Playback",
+              "dept": "audio",
+              "device": "playback",
+              "cues": [
+                {
+                  "id": "c8d",
+                  "at_ms": 0,
+                  "label": "Rising bed",
+                  "action": {
+                    "kind": "audio.snapshot",
+                    "payload": {
+                      "snapshot": "CD"
+                    }
+                  },
+                  "num": 6
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "INTRO",
+        "label": "Intro film",
+        "timeline": {
+          "duration_ms": 60000,
+          "lanes": [
+            {
+              "id": "walls",
+              "name": "LED walls",
+              "dept": "visual",
+              "device": "walls",
+              "cues": [
+                {
+                  "id": "c8e",
+                  "at_ms": 0,
+                  "label": "Intro film",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "6"
+                    }
+                  },
+                  "num": 7
+                }
+              ]
+            },
+            {
+              "id": "lights",
+              "name": "Lighting",
+              "dept": "lighting",
+              "device": "lights",
+              "cues": [
+                {
+                  "id": "c8f",
+                  "at_ms": 0,
+                  "label": "Dark",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "5"
+                    }
+                  },
+                  "num": 8
+                }
+              ]
+            },
+            {
+              "id": "playback",
+              "name": "Playback",
+              "dept": "audio",
+              "device": "playback",
+              "cues": [
+                {
+                  "id": "c8g",
+                  "at_ms": 0,
+                  "label": "Film audio",
+                  "action": {
+                    "kind": "audio.snapshot",
+                    "payload": {
+                      "snapshot": "FILM"
+                    }
+                  },
+                  "num": 9
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "SET1_OPENER",
+        "label": "Set 1: Glass Cathedral (opener)",
+        "min_ms": 45000,
+        "timeline": {
+          "duration_ms": 240000,
+          "lanes": [
+            {
+              "id": "walls",
+              "name": "LED walls",
+              "dept": "visual",
+              "device": "walls",
+              "cues": [
+                {
+                  "id": "c5r",
+                  "at_ms": 0,
+                  "label": "Song visuals",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "10"
+                    }
+                  },
+                  "num": 10
+                },
+                {
+                  "id": "c5s",
+                  "at_ms": 72000,
+                  "label": "Chorus overlay",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "2/1"
+                    }
+                  },
+                  "num": 15
+                },
+                {
+                  "id": "c5t",
+                  "at_ms": 139250,
+                  "label": "Bridge visuals",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "11"
+                    }
+                  },
+                  "num": 18
+                },
+                {
+                  "id": "c5u",
+                  "at_ms": 182500,
+                  "label": "Final chorus overlay",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "2/2"
+                    }
+                  },
+                  "num": 20
+                }
+              ]
+            },
+            {
+              "id": "lights",
+              "name": "Lighting",
+              "dept": "lighting",
+              "device": "lights",
+              "cues": [
+                {
+                  "id": "c5l",
+                  "at_ms": 0,
+                  "label": "Song look",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "100"
+                    }
+                  },
+                  "num": 11
+                },
+                {
+                  "id": "c5m",
+                  "at_ms": 28750,
+                  "label": "Verse 1",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "101"
+                    }
+                  },
+                  "num": 14
+                },
+                {
+                  "id": "c5n",
+                  "at_ms": 72000,
+                  "label": "Chorus 1",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "102"
+                    }
+                  },
+                  "num": 16
+                },
+                {
+                  "id": "c5o",
+                  "at_ms": 115250,
+                  "label": "Verse 2",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "103"
+                    }
+                  },
+                  "num": 17
+                },
+                {
+                  "id": "c5p",
+                  "at_ms": 144000,
+                  "label": "Bridge",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "104"
+                    }
+                  },
+                  "num": 19
+                },
+                {
+                  "id": "c5q",
+                  "at_ms": 182500,
+                  "label": "Final chorus",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "105"
+                    }
+                  },
+                  "num": 21
+                }
+              ]
+            },
+            {
+              "id": "foh",
+              "name": "FOH desk",
+              "dept": "audio",
+              "device": "foh",
+              "cues": [
+                {
+                  "id": "c5v",
+                  "at_ms": 0,
+                  "label": "Desk scene",
+                  "action": {
+                    "kind": "audio.snapshot",
+                    "payload": {
+                      "snapshot": "10"
+                    }
+                  },
+                  "num": 12
+                }
+              ]
+            },
+            {
+              "id": "playback",
+              "name": "Playback",
+              "dept": "audio",
+              "device": "playback",
+              "cues": [
+                {
+                  "id": "c5w",
+                  "at_ms": 0,
+                  "label": "Track start",
+                  "action": {
+                    "kind": "audio.snapshot",
+                    "payload": {
+                      "snapshot": "T1"
+                    }
+                  },
+                  "num": 13
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "SET1_S2",
+        "label": "Set 1: Paper Satellites",
+        "min_ms": 45000,
+        "timeline": {
+          "duration_ms": 215000,
+          "lanes": [
+            {
+              "id": "walls",
+              "name": "LED walls",
+              "dept": "visual",
+              "device": "walls",
+              "cues": [
+                {
+                  "id": "c63",
+                  "at_ms": 0,
+                  "label": "Song visuals",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "12"
+                    }
+                  },
+                  "num": 22
+                },
+                {
+                  "id": "c64",
+                  "at_ms": 64500,
+                  "label": "Chorus overlay",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "2/2"
+                    }
+                  },
+                  "num": 27
+                },
+                {
+                  "id": "c65",
+                  "at_ms": 124750,
+                  "label": "Bridge visuals",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "13"
+                    }
+                  },
+                  "num": 30
+                },
+                {
+                  "id": "c66",
+                  "at_ms": 163500,
+                  "label": "Final chorus overlay",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "2/3"
+                    }
+                  },
+                  "num": 32
+                }
+              ]
+            },
+            {
+              "id": "lights",
+              "name": "Lighting",
+              "dept": "lighting",
+              "device": "lights",
+              "cues": [
+                {
+                  "id": "c5x",
+                  "at_ms": 0,
+                  "label": "Song look",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "110"
+                    }
+                  },
+                  "num": 23
+                },
+                {
+                  "id": "c5y",
+                  "at_ms": 25750,
+                  "label": "Verse 1",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "111"
+                    }
+                  },
+                  "num": 26
+                },
+                {
+                  "id": "c5z",
+                  "at_ms": 64500,
+                  "label": "Chorus 1",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "112"
+                    }
+                  },
+                  "num": 28
+                },
+                {
+                  "id": "c60",
+                  "at_ms": 103250,
+                  "label": "Verse 2",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "113"
+                    }
+                  },
+                  "num": 29
+                },
+                {
+                  "id": "c61",
+                  "at_ms": 129000,
+                  "label": "Bridge",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "114"
+                    }
+                  },
+                  "num": 31
+                },
+                {
+                  "id": "c62",
+                  "at_ms": 163500,
+                  "label": "Final chorus",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "115"
+                    }
+                  },
+                  "num": 33
+                }
+              ]
+            },
+            {
+              "id": "foh",
+              "name": "FOH desk",
+              "dept": "audio",
+              "device": "foh",
+              "cues": [
+                {
+                  "id": "c67",
+                  "at_ms": 0,
+                  "label": "Desk scene",
+                  "action": {
+                    "kind": "audio.snapshot",
+                    "payload": {
+                      "snapshot": "11"
+                    }
+                  },
+                  "num": 24
+                }
+              ]
+            },
+            {
+              "id": "playback",
+              "name": "Playback",
+              "dept": "audio",
+              "device": "playback",
+              "cues": [
+                {
+                  "id": "c68",
+                  "at_ms": 0,
+                  "label": "Track start",
+                  "action": {
+                    "kind": "audio.snapshot",
+                    "payload": {
+                      "snapshot": "T2"
+                    }
+                  },
+                  "num": 25
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "SET1_S3",
+        "label": "Set 1: Golden Static",
+        "min_ms": 45000,
+        "timeline": {
+          "duration_ms": 230000,
+          "lanes": [
+            {
+              "id": "walls",
+              "name": "LED walls",
+              "dept": "visual",
+              "device": "walls",
+              "cues": [
+                {
+                  "id": "c6f",
+                  "at_ms": 0,
+                  "label": "Song visuals",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "14"
+                    }
+                  },
+                  "num": 34
+                },
+                {
+                  "id": "c6g",
+                  "at_ms": 69000,
+                  "label": "Chorus overlay",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "2/3"
+                    }
+                  },
+                  "num": 39
+                },
+                {
+                  "id": "c6h",
+                  "at_ms": 133500,
+                  "label": "Bridge visuals",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "15"
+                    }
+                  },
+                  "num": 42
+                },
+                {
+                  "id": "c6i",
+                  "at_ms": 174750,
+                  "label": "Final chorus overlay",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "2/4"
+                    }
+                  },
+                  "num": 44
+                }
+              ]
+            },
+            {
+              "id": "lights",
+              "name": "Lighting",
+              "dept": "lighting",
+              "device": "lights",
+              "cues": [
+                {
+                  "id": "c69",
+                  "at_ms": 0,
+                  "label": "Song look",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "120"
+                    }
+                  },
+                  "num": 35
+                },
+                {
+                  "id": "c6a",
+                  "at_ms": 27500,
+                  "label": "Verse 1",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "121"
+                    }
+                  },
+                  "num": 38
+                },
+                {
+                  "id": "c6b",
+                  "at_ms": 69000,
+                  "label": "Chorus 1",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "122"
+                    }
+                  },
+                  "num": 40
+                },
+                {
+                  "id": "c6c",
+                  "at_ms": 110500,
+                  "label": "Verse 2",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "123"
+                    }
+                  },
+                  "num": 41
+                },
+                {
+                  "id": "c6d",
+                  "at_ms": 138000,
+                  "label": "Bridge",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "124"
+                    }
+                  },
+                  "num": 43
+                },
+                {
+                  "id": "c6e",
+                  "at_ms": 174750,
+                  "label": "Final chorus",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "125"
+                    }
+                  },
+                  "num": 45
+                }
+              ]
+            },
+            {
+              "id": "foh",
+              "name": "FOH desk",
+              "dept": "audio",
+              "device": "foh",
+              "cues": [
+                {
+                  "id": "c6j",
+                  "at_ms": 0,
+                  "label": "Desk scene",
+                  "action": {
+                    "kind": "audio.snapshot",
+                    "payload": {
+                      "snapshot": "12"
+                    }
+                  },
+                  "num": 36
+                }
+              ]
+            },
+            {
+              "id": "playback",
+              "name": "Playback",
+              "dept": "audio",
+              "device": "playback",
+              "cues": [
+                {
+                  "id": "c6k",
+                  "at_ms": 0,
+                  "label": "Track start",
+                  "action": {
+                    "kind": "audio.snapshot",
+                    "payload": {
+                      "snapshot": "T3"
+                    }
+                  },
+                  "num": 37
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "ACOUSTIC",
+        "label": "Acoustic: Kitchen Floor",
+        "min_ms": 45000,
+        "timeline": {
+          "duration_ms": 200000,
+          "lanes": [
+            {
+              "id": "walls",
+              "name": "LED walls",
+              "dept": "visual",
+              "device": "walls",
+              "cues": [
+                {
+                  "id": "c6r",
+                  "at_ms": 0,
+                  "label": "Song visuals",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "16"
+                    }
+                  },
+                  "num": 46
+                },
+                {
+                  "id": "c6s",
+                  "at_ms": 60000,
+                  "label": "Chorus overlay",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "2/4"
+                    }
+                  },
+                  "num": 50
+                },
+                {
+                  "id": "c6t",
+                  "at_ms": 116000,
+                  "label": "Bridge visuals",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "17"
+                    }
+                  },
+                  "num": 53
+                },
+                {
+                  "id": "c6u",
+                  "at_ms": 152000,
+                  "label": "Final chorus overlay",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "2/5"
+                    }
+                  },
+                  "num": 55
+                }
+              ]
+            },
+            {
+              "id": "lights",
+              "name": "Lighting",
+              "dept": "lighting",
+              "device": "lights",
+              "cues": [
+                {
+                  "id": "c6l",
+                  "at_ms": 0,
+                  "label": "Song look",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "130"
+                    }
+                  },
+                  "num": 47
+                },
+                {
+                  "id": "c6m",
+                  "at_ms": 24000,
+                  "label": "Verse 1",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "131"
+                    }
+                  },
+                  "num": 49
+                },
+                {
+                  "id": "c6n",
+                  "at_ms": 60000,
+                  "label": "Chorus 1",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "132"
+                    }
+                  },
+                  "num": 51
+                },
+                {
+                  "id": "c6o",
+                  "at_ms": 96000,
+                  "label": "Verse 2",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "133"
+                    }
+                  },
+                  "num": 52
+                },
+                {
+                  "id": "c6p",
+                  "at_ms": 120000,
+                  "label": "Bridge",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "134"
+                    }
+                  },
+                  "num": 54
+                },
+                {
+                  "id": "c6q",
+                  "at_ms": 152000,
+                  "label": "Final chorus",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "135"
+                    }
+                  },
+                  "num": 56
+                }
+              ]
+            },
+            {
+              "id": "foh",
+              "name": "FOH desk",
+              "dept": "audio",
+              "device": "foh",
+              "cues": [
+                {
+                  "id": "c6v",
+                  "at_ms": 0,
+                  "label": "Desk scene",
+                  "action": {
+                    "kind": "audio.snapshot",
+                    "payload": {
+                      "snapshot": "13"
+                    }
+                  },
+                  "num": 48
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "SET2_S1",
+        "label": "Set 2: Velvet Alarm",
+        "min_ms": 45000,
+        "timeline": {
+          "duration_ms": 205000,
+          "lanes": [
+            {
+              "id": "walls",
+              "name": "LED walls",
+              "dept": "visual",
+              "device": "walls",
+              "cues": [
+                {
+                  "id": "c72",
+                  "at_ms": 0,
+                  "label": "Song visuals",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "18"
+                    }
+                  },
+                  "num": 57
+                },
+                {
+                  "id": "c73",
+                  "at_ms": 61500,
+                  "label": "Chorus overlay",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "2/5"
+                    }
+                  },
+                  "num": 62
+                },
+                {
+                  "id": "c74",
+                  "at_ms": 119000,
+                  "label": "Bridge visuals",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "19"
+                    }
+                  },
+                  "num": 65
+                },
+                {
+                  "id": "c75",
+                  "at_ms": 155750,
+                  "label": "Final chorus overlay",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "2/6"
+                    }
+                  },
+                  "num": 67
+                }
+              ]
+            },
+            {
+              "id": "lights",
+              "name": "Lighting",
+              "dept": "lighting",
+              "device": "lights",
+              "cues": [
+                {
+                  "id": "c6w",
+                  "at_ms": 0,
+                  "label": "Song look",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "140"
+                    }
+                  },
+                  "num": 58
+                },
+                {
+                  "id": "c6x",
+                  "at_ms": 24500,
+                  "label": "Verse 1",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "141"
+                    }
+                  },
+                  "num": 61
+                },
+                {
+                  "id": "c6y",
+                  "at_ms": 61500,
+                  "label": "Chorus 1",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "142"
+                    }
+                  },
+                  "num": 63
+                },
+                {
+                  "id": "c6z",
+                  "at_ms": 98500,
+                  "label": "Verse 2",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "143"
+                    }
+                  },
+                  "num": 64
+                },
+                {
+                  "id": "c70",
+                  "at_ms": 123000,
+                  "label": "Bridge",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "144"
+                    }
+                  },
+                  "num": 66
+                },
+                {
+                  "id": "c71",
+                  "at_ms": 155750,
+                  "label": "Final chorus",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "145"
+                    }
+                  },
+                  "num": 68
+                }
+              ]
+            },
+            {
+              "id": "foh",
+              "name": "FOH desk",
+              "dept": "audio",
+              "device": "foh",
+              "cues": [
+                {
+                  "id": "c76",
+                  "at_ms": 0,
+                  "label": "Desk scene",
+                  "action": {
+                    "kind": "audio.snapshot",
+                    "payload": {
+                      "snapshot": "14"
+                    }
+                  },
+                  "num": 59
+                }
+              ]
+            },
+            {
+              "id": "playback",
+              "name": "Playback",
+              "dept": "audio",
+              "device": "playback",
+              "cues": [
+                {
+                  "id": "c77",
+                  "at_ms": 0,
+                  "label": "Track start",
+                  "action": {
+                    "kind": "audio.snapshot",
+                    "payload": {
+                      "snapshot": "T5"
+                    }
+                  },
+                  "num": 60
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "SET2_S2",
+        "label": "Set 2: Coastline Radio",
+        "min_ms": 45000,
+        "timeline": {
+          "duration_ms": 225000,
+          "lanes": [
+            {
+              "id": "walls",
+              "name": "LED walls",
+              "dept": "visual",
+              "device": "walls",
+              "cues": [
+                {
+                  "id": "c7e",
+                  "at_ms": 0,
+                  "label": "Song visuals",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "20"
+                    }
+                  },
+                  "num": 69
+                },
+                {
+                  "id": "c7f",
+                  "at_ms": 67500,
+                  "label": "Chorus overlay",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "2/6"
+                    }
+                  },
+                  "num": 74
+                },
+                {
+                  "id": "c7g",
+                  "at_ms": 130500,
+                  "label": "Bridge visuals",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "21"
+                    }
+                  },
+                  "num": 77
+                },
+                {
+                  "id": "c7h",
+                  "at_ms": 171000,
+                  "label": "Final chorus overlay",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "2/7"
+                    }
+                  },
+                  "num": 79
+                }
+              ]
+            },
+            {
+              "id": "lights",
+              "name": "Lighting",
+              "dept": "lighting",
+              "device": "lights",
+              "cues": [
+                {
+                  "id": "c78",
+                  "at_ms": 0,
+                  "label": "Song look",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "150"
+                    }
+                  },
+                  "num": 70
+                },
+                {
+                  "id": "c79",
+                  "at_ms": 27000,
+                  "label": "Verse 1",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "151"
+                    }
+                  },
+                  "num": 73
+                },
+                {
+                  "id": "c7a",
+                  "at_ms": 67500,
+                  "label": "Chorus 1",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "152"
+                    }
+                  },
+                  "num": 75
+                },
+                {
+                  "id": "c7b",
+                  "at_ms": 108000,
+                  "label": "Verse 2",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "153"
+                    }
+                  },
+                  "num": 76
+                },
+                {
+                  "id": "c7c",
+                  "at_ms": 135000,
+                  "label": "Bridge",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "154"
+                    }
+                  },
+                  "num": 78
+                },
+                {
+                  "id": "c7d",
+                  "at_ms": 171000,
+                  "label": "Final chorus",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "155"
+                    }
+                  },
+                  "num": 80
+                }
+              ]
+            },
+            {
+              "id": "foh",
+              "name": "FOH desk",
+              "dept": "audio",
+              "device": "foh",
+              "cues": [
+                {
+                  "id": "c7i",
+                  "at_ms": 0,
+                  "label": "Desk scene",
+                  "action": {
+                    "kind": "audio.snapshot",
+                    "payload": {
+                      "snapshot": "15"
+                    }
+                  },
+                  "num": 71
+                }
+              ]
+            },
+            {
+              "id": "playback",
+              "name": "Playback",
+              "dept": "audio",
+              "device": "playback",
+              "cues": [
+                {
+                  "id": "c7j",
+                  "at_ms": 0,
+                  "label": "Track start",
+                  "action": {
+                    "kind": "audio.snapshot",
+                    "payload": {
+                      "snapshot": "T6"
+                    }
+                  },
+                  "num": 72
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "SET2_S3",
+        "label": "Set 2: Ten Thousand Windows",
+        "min_ms": 45000,
+        "timeline": {
+          "duration_ms": 260000,
+          "lanes": [
+            {
+              "id": "walls",
+              "name": "LED walls",
+              "dept": "visual",
+              "device": "walls",
+              "cues": [
+                {
+                  "id": "c7q",
+                  "at_ms": 0,
+                  "label": "Song visuals",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "22"
+                    }
+                  },
+                  "num": 81
+                },
+                {
+                  "id": "c7r",
+                  "at_ms": 78000,
+                  "label": "Chorus overlay",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "2/1"
+                    }
+                  },
+                  "num": 86
+                },
+                {
+                  "id": "c7s",
+                  "at_ms": 150750,
+                  "label": "Bridge visuals",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "23"
+                    }
+                  },
+                  "num": 89
+                },
+                {
+                  "id": "c7t",
+                  "at_ms": 197500,
+                  "label": "Final chorus overlay",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "2/2"
+                    }
+                  },
+                  "num": 91
+                }
+              ]
+            },
+            {
+              "id": "lights",
+              "name": "Lighting",
+              "dept": "lighting",
+              "device": "lights",
+              "cues": [
+                {
+                  "id": "c7k",
+                  "at_ms": 0,
+                  "label": "Song look",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "160"
+                    }
+                  },
+                  "num": 82
+                },
+                {
+                  "id": "c7l",
+                  "at_ms": 31250,
+                  "label": "Verse 1",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "161"
+                    }
+                  },
+                  "num": 85
+                },
+                {
+                  "id": "c7m",
+                  "at_ms": 78000,
+                  "label": "Chorus 1",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "162"
+                    }
+                  },
+                  "num": 87
+                },
+                {
+                  "id": "c7n",
+                  "at_ms": 124750,
+                  "label": "Verse 2",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "163"
+                    }
+                  },
+                  "num": 88
+                },
+                {
+                  "id": "c7o",
+                  "at_ms": 156000,
+                  "label": "Bridge",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "164"
+                    }
+                  },
+                  "num": 90
+                },
+                {
+                  "id": "c7p",
+                  "at_ms": 197500,
+                  "label": "Final chorus",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "165"
+                    }
+                  },
+                  "num": 92
+                }
+              ]
+            },
+            {
+              "id": "foh",
+              "name": "FOH desk",
+              "dept": "audio",
+              "device": "foh",
+              "cues": [
+                {
+                  "id": "c7u",
+                  "at_ms": 0,
+                  "label": "Desk scene",
+                  "action": {
+                    "kind": "audio.snapshot",
+                    "payload": {
+                      "snapshot": "16"
+                    }
+                  },
+                  "num": 83
+                }
+              ]
+            },
+            {
+              "id": "playback",
+              "name": "Playback",
+              "dept": "audio",
+              "device": "playback",
+              "cues": [
+                {
+                  "id": "c7v",
+                  "at_ms": 0,
+                  "label": "Track start",
+                  "action": {
+                    "kind": "audio.snapshot",
+                    "payload": {
+                      "snapshot": "T7"
+                    }
+                  },
+                  "num": 84
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "ENCORE_BREAK",
+        "label": "Encore break",
+        "timeline": {
+          "duration_ms": 180000,
+          "lanes": [
+            {
+              "id": "lights",
+              "name": "Lighting",
+              "dept": "lighting",
+              "device": "lights",
+              "cues": [
+                {
+                  "id": "c8h",
+                  "at_ms": 0,
+                  "label": "Low blue",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "7"
+                    }
+                  },
+                  "num": 93
+                }
+              ]
+            },
+            {
+              "id": "walls",
+              "name": "LED walls",
+              "dept": "visual",
+              "device": "walls",
+              "cues": [
+                {
+                  "id": "c8i",
+                  "at_ms": 0,
+                  "label": "Chant visuals",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "22"
+                    }
+                  },
+                  "num": 94
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "ENCORE",
+        "label": "Encore: Last Light",
+        "min_ms": 45000,
+        "timeline": {
+          "duration_ms": 280000,
+          "lanes": [
+            {
+              "id": "walls",
+              "name": "LED walls",
+              "dept": "visual",
+              "device": "walls",
+              "cues": [
+                {
+                  "id": "c82",
+                  "at_ms": 0,
+                  "label": "Song visuals",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "24"
+                    }
+                  },
+                  "num": 95
+                },
+                {
+                  "id": "c83",
+                  "at_ms": 84000,
+                  "label": "Chorus overlay",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "2/2"
+                    }
+                  },
+                  "num": 100
+                },
+                {
+                  "id": "c84",
+                  "at_ms": 162500,
+                  "label": "Bridge visuals",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "25"
+                    }
+                  },
+                  "num": 103
+                },
+                {
+                  "id": "c85",
+                  "at_ms": 212750,
+                  "label": "Final chorus overlay",
+                  "action": {
+                    "kind": "scene.activate",
+                    "payload": {
+                      "scene": "2/3"
+                    }
+                  },
+                  "num": 105
+                }
+              ]
+            },
+            {
+              "id": "lights",
+              "name": "Lighting",
+              "dept": "lighting",
+              "device": "lights",
+              "cues": [
+                {
+                  "id": "c7w",
+                  "at_ms": 0,
+                  "label": "Song look",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "170"
+                    }
+                  },
+                  "num": 96
+                },
+                {
+                  "id": "c7x",
+                  "at_ms": 33500,
+                  "label": "Verse 1",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "171"
+                    }
+                  },
+                  "num": 99
+                },
+                {
+                  "id": "c7y",
+                  "at_ms": 84000,
+                  "label": "Chorus 1",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "172"
+                    }
+                  },
+                  "num": 101
+                },
+                {
+                  "id": "c7z",
+                  "at_ms": 134500,
+                  "label": "Verse 2",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "173"
+                    }
+                  },
+                  "num": 102
+                },
+                {
+                  "id": "c80",
+                  "at_ms": 168000,
+                  "label": "Bridge",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "174"
+                    }
+                  },
+                  "num": 104
+                },
+                {
+                  "id": "c81",
+                  "at_ms": 212750,
+                  "label": "Final chorus",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "175"
+                    }
+                  },
+                  "num": 106
+                }
+              ]
+            },
+            {
+              "id": "foh",
+              "name": "FOH desk",
+              "dept": "audio",
+              "device": "foh",
+              "cues": [
+                {
+                  "id": "c86",
+                  "at_ms": 0,
+                  "label": "Desk scene",
+                  "action": {
+                    "kind": "audio.snapshot",
+                    "payload": {
+                      "snapshot": "17"
+                    }
+                  },
+                  "num": 97
+                }
+              ]
+            },
+            {
+              "id": "playback",
+              "name": "Playback",
+              "dept": "audio",
+              "device": "playback",
+              "cues": [
+                {
+                  "id": "c87",
+                  "at_ms": 0,
+                  "label": "Track start",
+                  "action": {
+                    "kind": "audio.snapshot",
+                    "payload": {
+                      "snapshot": "T8"
+                    }
+                  },
+                  "num": 98
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "HOUSE_UP",
+        "label": "House lights up",
+        "timeline": {
+          "duration_ms": 240000,
+          "lanes": [
+            {
+              "id": "lights",
+              "name": "Lighting",
+              "dept": "lighting",
+              "device": "lights",
+              "cues": [
+                {
+                  "id": "c8j",
+                  "at_ms": 0,
+                  "label": "House up",
+                  "action": {
+                    "kind": "lighting.look",
+                    "payload": {
+                      "look": "8"
+                    }
+                  },
+                  "num": 107
+                }
+              ]
+            },
+            {
+              "id": "playback",
+              "name": "Playback",
+              "dept": "audio",
+              "device": "playback",
+              "cues": [
+                {
+                  "id": "c8k",
+                  "at_ms": 0,
+                  "label": "Exit music",
+                  "action": {
+                    "kind": "audio.snapshot",
+                    "payload": {
+                      "snapshot": "OUT"
+                    }
+                  },
+                  "num": 108
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "END",
+        "label": "Show over"
+      }
+    ],
+    "transitions": [
+      {
+        "source": "HOUSE",
+        "target": "COUNTDOWN",
+        "event": "NEXT"
+      },
+      {
+        "source": "COUNTDOWN",
+        "target": "INTRO",
+        "after_ms": 120000
+      },
+      {
+        "source": "INTRO",
+        "target": "SET1_OPENER",
+        "after_ms": 60000
+      },
+      {
+        "source": "SET1_OPENER",
+        "target": "SET1_S2",
+        "event": "NEXT"
+      },
+      {
+        "source": "SET1_S2",
+        "target": "SET1_S3",
+        "event": "NEXT"
+      },
+      {
+        "source": "SET1_S3",
+        "target": "ACOUSTIC",
+        "event": "NEXT"
+      },
+      {
+        "source": "ACOUSTIC",
+        "target": "SET2_S1",
+        "event": "NEXT"
+      },
+      {
+        "source": "SET2_S1",
+        "target": "SET2_S2",
+        "event": "NEXT"
+      },
+      {
+        "source": "SET2_S2",
+        "target": "SET2_S3",
+        "event": "NEXT"
+      },
+      {
+        "source": "SET2_S3",
+        "target": "ENCORE_BREAK",
+        "event": "NEXT"
+      },
+      {
+        "source": "ENCORE_BREAK",
+        "target": "ENCORE",
+        "event": "NEXT"
+      },
+      {
+        "source": "ENCORE",
+        "target": "HOUSE_UP",
+        "event": "NEXT"
+      },
+      {
+        "source": "HOUSE_UP",
+        "target": "END",
+        "event": "NEXT"
+      }
+    ],
+    "name": "arena-pop-show",
+    "layout": {
+      "HOUSE": {
+        "x": 0,
+        "y": 0
+      },
+      "COUNTDOWN": {
+        "x": 270,
+        "y": 0
+      },
+      "INTRO": {
+        "x": 540,
+        "y": 0
+      },
+      "SET1_OPENER": {
+        "x": 0,
+        "y": 170
+      },
+      "SET1_S2": {
+        "x": 270,
+        "y": 170
+      },
+      "SET1_S3": {
+        "x": 540,
+        "y": 170
+      },
+      "ACOUSTIC": {
+        "x": 810,
+        "y": 170
+      },
+      "SET2_S1": {
+        "x": 0,
+        "y": 340
+      },
+      "SET2_S2": {
+        "x": 270,
+        "y": 340
+      },
+      "SET2_S3": {
+        "x": 540,
+        "y": 340
+      },
+      "ENCORE_BREAK": {
+        "x": 0,
+        "y": 510
+      },
+      "ENCORE": {
+        "x": 270,
+        "y": 510
+      },
+      "HOUSE_UP": {
+        "x": 540,
+        "y": 510
+      },
+      "END": {
+        "x": 810,
+        "y": 510
+      }
+    },
+    "cue_seq": 108
+  }
+}
