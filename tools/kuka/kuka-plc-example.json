@@ -1,0 +1,55 @@
+{
+  "id": "kuka-plc-example",
+  "name": "Robot behind a PLC, over Modbus TCP (EXAMPLE: adapt to the site)",
+  "transport": "modbus-tcp",
+  "dept": "motion",
+  "port": 502,
+  "unit": 1,
+  "kinds": ["motion.run", "motion.stop"],
+  "value": "[A-Z][A-Z0-9_]{0,31}",
+  "needs_programs": true,
+  "hint": "the name of a program the PLC knows (upper case letters, digits and _); it must be on the device's list as NAME=<number>, the number the PLC program expects",
+  "never_addresses": ["coil:30-39"],
+  "actions": {
+    "motion.run": {
+      "steps": [
+        {"send": "read_input 20", "expect": "20=1", "fail": "the PLC says the robot is not accepting commands from outside ({reply})"},
+        {"send": "read_input 21", "expect": "21=1", "fail": "the PLC says the robot's safety status is not OK ({reply})"},
+        {"send": "read_ireg 200", "expect": "200=0", "fail": "the robot is not idle ({reply}: 0 idle, 1 running, 2 fault)"},
+        {"send": "write_reg 100 {n}", "expect": "OK", "fail": "the PLC did not take the program number ({reply})"},
+        {"send": "write_coil 10 1", "expect": "OK", "wait_ms": 300, "fail": "the PLC did not take the start ({reply})"},
+        {"send": "write_coil 10 0", "expect": "OK", "fail": "the PLC did not take the start being released ({reply})"}
+      ],
+      "confirm": {"send": "read_ireg 200", "expect": "200=1", "within_ms": 3000, "every_ms": 250},
+      "cleanup": [{"send": "write_coil 10 0"}]
+    },
+    "motion.stop": {
+      "steps": [
+        {"send": "write_coil 11 1", "expect": "OK", "wait_ms": 300, "fail": "the PLC did not take the stop ({reply})"},
+        {"send": "write_coil 11 0", "expect": "OK"}
+      ],
+      "confirm": {"send": "read_ireg 200", "expect": "200=0", "within_ms": 3000, "every_ms": 250},
+      "cleanup": [{"send": "write_coil 11 0"}]
+    }
+  },
+  "status": {
+    "poll_ms": 1000,
+    "reads": [
+      {"var": "remote", "send": "read_input 20", "expect": "20=(\\d)"},
+      {"var": "safety", "send": "read_input 21", "expect": "21=(\\d)"},
+      {"var": "state", "send": "read_ireg 200", "expect": "200=(\\d+)"}
+    ],
+    "ready_when": [
+      {"var": "remote", "equals": "1", "why": "it is not accepting commands from outside"},
+      {"var": "safety", "equals": "1", "why": "its safety status is not OK"},
+      {"var": "state", "one_of": ["0", "1"], "why": "its state is {value} (2 means fault)"}
+    ]
+  },
+  "stop": [
+    {"send": "write_coil 11 1", "expect": "OK", "wait_ms": 300},
+    {"send": "write_coil 11 0", "expect": "OK"}
+  ],
+  "basis": "memory",
+  "source": "A register map INVENTED for PCHI's tests (docs/kuka.md and plcsim.rs), NOT any real PLC's or any robot's. Modbus TCP itself is a published standard and is implemented from it; what each address MEANS is the PLC programmer's, and how the PLC drives the robot (for a KUKA, its Automatic External inputs) is theirs and the robot programmer's.",
+  "notes": "An EXAMPLE. It does nothing until the PLC programmer has written a program with this contract (or you have edited this file to match theirs) and every program number it can start has been validated by the robot's programmer. The reserved coils 30 to 39 stand for the machine's drives and fault acknowledgement: this profile promises never to write them, and the runtime refuses to load a profile that does. The start is a pulse: the number is written, the start coil is raised, then lowered, and if anything fails in between the start coil is lowered again. Not tested against any PLC or robot: only against a pretend PLC. A PCHI stop is a software request over a network, NOT an emergency stop."
+}

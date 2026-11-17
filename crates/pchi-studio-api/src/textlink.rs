@@ -59,6 +59,12 @@ struct RawStep {
     within_ms: Option<u64>,
     #[serde(default)]
     every_ms: Option<u64>,
+    /// Wait this long after the step succeeds (a PLC needs a moment to see a pulse before it is released).
+    #[serde(default)]
+    wait_ms: Option<u64>,
+    /// This step changes something the action's `cleanup` must put back. (For Modbus every write counts, without saying so.)
+    #[serde(default)]
+    changes: bool,
 }
 
 #[derive(Deserialize)]
@@ -66,6 +72,9 @@ struct RawAction {
     steps: Vec<RawStep>,
     #[serde(default)]
     confirm: Option<RawStep>,
+    /// Run, best effort, if any step fails: put back what the steps changed (release a start pulse). Never skipped by an error.
+    #[serde(default)]
+    cleanup: Vec<RawStep>,
 }
 
 #[derive(Deserialize)]
@@ -115,6 +124,12 @@ struct RawLink {
     hint: String,
     #[serde(default)]
     never: Vec<String>,
+    /// For "modbus-tcp": the unit (slave) id; 1 if not said.
+    #[serde(default)]
+    unit: Option<u8>,
+    /// For "modbus-tcp": addresses this profile must never write, such as "coil:30-39" or "reg:100". A profile with a step that writes one is refused.
+    #[serde(default)]
+    never_addresses: Vec<String>,
     /// What ends a request on the wire: "\n" (the default), "\r\n", or "" for a device that frames its own messages (XML).
     #[serde(default)]
     request_end: Option<String>,
@@ -144,11 +159,36 @@ struct Step {
     skip_if: Option<(String, String)>,
     within: Duration,
     every: Duration,
+    wait: Duration,
+    changes: bool,
 }
 
 struct Action2 {
     steps: Vec<Step>,
     confirm: Option<Step>,
+    cleanup: Vec<Step>,
+}
+
+/// What a Modbus profile is told on the wire: the unit, and the addresses it can never write.
+struct ModbusCfg {
+    unit: u8,
+    never: Vec<crate::modbus::Forbidden>,
+}
+
+/// What goes into a command template: the program's name (`{0}`) and, for a PLC that picks programs by number, its number (`{n}`).
+struct Subst<'a> {
+    name: &'a str,
+    num: Option<u16>,
+}
+
+impl Subst<'_> {
+    fn render(&self, t: &str) -> String {
+        let t = t.replace("{0}", self.name);
+        match self.num {
+            Some(n) => t.replace("{n}", &n.to_string()),
+            None => t,
+        }
+    }
 }
 
 struct Read {
@@ -206,13 +246,14 @@ pub struct LinkProfile {
     stop: Vec<Step>,
     request_end: String,
     reply_until: Option<String>,
+    modbus: Option<ModbusCfg>,
 }
 
 fn full(p: &str) -> Result<Regex, String> {
     regex::RegexBuilder::new(&format!("^(?:{p})$")).dot_matches_new_line(true).size_limit(1 << 20).build().map_err(|e| format!("pattern '{p}': {e}"))
 }
 
-/// A command template: printable text, with `{0}` as its only placeholder.
+/// A command template: printable text, with `{0}` (the program's name) and `{n}` (its number) as the only placeholders.
 fn template_ok(t: &str) -> Result<(), String> {
     if t.trim().is_empty() {
         return Err("an empty command".into());
@@ -223,8 +264,8 @@ fn template_ok(t: &str) -> Result<(), String> {
     let mut rest = t;
     while let Some(i) = rest.find('{') {
         let after = &rest[i..];
-        if !after.starts_with("{0}") {
-            return Err(format!("'{t}': the only placeholder is {{0}} (the program name)"));
+        if !after.starts_with("{0}") && !after.starts_with("{n}") {
+            return Err(format!("'{t}': the only placeholders are {{0}} (the program name) and {{n}} (its number)"));
         }
         rest = &after[3..];
     }
@@ -249,6 +290,8 @@ fn step_of(r: &RawStep, what: &str) -> Result<Step, String> {
         skip_if: r.skip_if.as_ref().map(|s| (s.var.clone(), s.regex.clone())),
         within: Duration::from_millis(r.within_ms.unwrap_or(0).min(30_000)),
         every: Duration::from_millis(r.every_ms.unwrap_or(250).clamp(50, 5_000)),
+        wait: Duration::from_millis(r.wait_ms.unwrap_or(0).min(5_000)),
+        changes: r.changes,
     })
 }
 
@@ -259,8 +302,16 @@ impl LinkProfile {
         if id.is_empty() || id.len() > 32 || !id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
             return Err(format!("id '{id}' must be 1 to 32 characters: a to z, 0 to 9 and -"));
         }
-        if raw.transport != "tcp-text" {
-            return Err(format!("{id}: transport must be \"tcp-text\""));
+        let is_modbus = match raw.transport.as_str() {
+            "tcp-text" => false,
+            "modbus-tcp" => true,
+            _ => return Err(format!("{id}: transport must be \"tcp-text\" or \"modbus-tcp\"")),
+        };
+        if is_modbus && (raw.request_end.is_some() || raw.reply_until.is_some()) {
+            return Err(format!("{id}: request_end and reply_until are for text devices: Modbus frames its own messages"));
+        }
+        if !is_modbus && (raw.unit.is_some() || !raw.never_addresses.is_empty()) {
+            return Err(format!("{id}: unit and never_addresses are for \"modbus-tcp\""));
         }
         if !["visual", "lighting", "laser", "motion", "audio"].contains(&raw.dept.as_str()) {
             return Err(format!("{id}: dept must be visual, lighting, laser, motion or audio"));
@@ -313,7 +364,13 @@ impl LinkProfile {
                 }
                 None => None,
             };
-            actions.insert(kind.clone(), Action2 { steps, confirm });
+            let mut cleanup = Vec::new();
+            for (n, c) in a.cleanup.iter().enumerate() {
+                let at = format!("{id} {kind} cleanup {}", n + 1);
+                sent.push((at.clone(), c.send.clone()));
+                cleanup.push(step_of(c, &at)?);
+            }
+            actions.insert(kind.clone(), Action2 { steps, confirm, cleanup });
         }
         let mut stop = Vec::new();
         for (n, s) in raw.stop.iter().enumerate() {
@@ -327,8 +384,8 @@ impl LinkProfile {
             for (n, r) in st.reads.iter().enumerate() {
                 let at = format!("{id} status read {}", n + 1);
                 template_ok(&r.send).map_err(|e| format!("{at}: {e}"))?;
-                if r.send.contains("{0}") {
-                    return Err(format!("{at}: a status read has no program name to put in"));
+                if r.send.contains("{0}") || r.send.contains("{n}") {
+                    return Err(format!("{at}: a status read has no program to put in"));
                 }
                 sent.push((at.clone(), r.send.clone()));
                 if r.var.is_none() && r.extract.is_empty() {
@@ -351,6 +408,19 @@ impl LinkProfile {
                 ready_when.push(Ready { var: r.var.clone(), equals: r.equals.clone(), one_of: r.one_of.clone().unwrap_or_default(), why: r.why.clone() });
             }
         }
+        // a Modbus profile: every command must be a Modbus command, and none may write an address the profile forbids
+        let modbus = if is_modbus {
+            let never_addr: Vec<crate::modbus::Forbidden> = raw.never_addresses.iter().map(|a| crate::modbus::parse_forbidden(a)).collect::<Result<_, _>>().map_err(|e| format!("{id} never_addresses: {e}"))?;
+            for (at, cmd) in &sent {
+                let c = crate::modbus::parse(&cmd.replace("{0}", "A").replace("{n}", "1")).map_err(|e| format!("{at}: {e}"))?;
+                if let Some(f) = never_addr.iter().find(|f| f.covers(&c)) {
+                    return Err(format!("{at}: '{cmd}' writes an address this profile says it must never write ({:?} {} to {})", f.space, f.lo, f.hi));
+                }
+            }
+            Some(ModbusCfg { unit: raw.unit.unwrap_or(1), never: never_addr })
+        } else {
+            None
+        };
         // the never list: nothing the profile can send may begin with a forbidden command
         for (at, cmd) in &sent {
             let c = cmd.trim().to_ascii_lowercase();
@@ -379,6 +449,7 @@ impl LinkProfile {
             stop,
             request_end,
             reply_until,
+            modbus,
         })
     }
 
@@ -386,7 +457,7 @@ impl LinkProfile {
     pub fn commands(&self) -> Vec<String> {
         let mut v: Vec<String> = Vec::new();
         for a in self.actions.values() {
-            for s in a.steps.iter().chain(a.confirm.iter()) {
+            for s in a.steps.iter().chain(a.confirm.iter()).chain(a.cleanup.iter()) {
                 v.push(s.send.clone());
             }
         }
@@ -450,7 +521,7 @@ pub fn load_values(items: Vec<Value>, from: &str) -> Result<Vec<String>, String>
 
 /// Whether a file's JSON is a link profile (so the OSC loader leaves it alone).
 pub fn is_link_json(v: &Value) -> bool {
-    v.get("transport").and_then(Value::as_str) == Some("tcp-text")
+    matches!(v.get("transport").and_then(Value::as_str), Some("tcp-text") | Some("modbus-tcp"))
 }
 
 // ---- what a cue would do, checked without sending anything ----
@@ -467,9 +538,27 @@ pub fn value_of(action: &Action) -> String {
     }
 }
 
-/// The names on a device's allow-list (the rig node's `programs`: names separated by commas, spaces or semicolons).
+/// The entries of a device's allow-list (the rig node's `programs`: separated by commas, spaces or semicolons): a name, or for a PLC that
+/// picks programs by number, `NAME=3`.
+fn program_entries(dev: &Device) -> Vec<(String, Option<u16>)> {
+    dev.programs.as_deref().unwrap_or("").split(|c: char| c == ',' || c == ';' || c.is_whitespace()).map(str::trim).filter(|s| !s.is_empty()).map(|e| match e.split_once('=') {
+        Some((n, num)) => (n.trim().to_string(), num.trim().parse::<u16>().ok()),
+        None => (e.to_string(), None),
+    }).collect()
+}
+
+/// The names on a device's allow-list.
 pub fn allowed_programs(dev: &Device) -> Vec<String> {
-    dev.programs.as_deref().unwrap_or("").split(|c: char| c == ',' || c == ';' || c.is_whitespace()).map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect()
+    program_entries(dev).into_iter().map(|(n, _)| n).collect()
+}
+
+/// The number a device's list gives a program (`OPEN_ARM=3`), if it gives one.
+pub fn program_number(dev: &Device, name: &str) -> Option<u16> {
+    program_entries(dev).into_iter().find(|(n, _)| n == name).and_then(|(_, num)| num)
+}
+
+fn uses_number(a: &Action2) -> bool {
+    a.steps.iter().chain(a.confirm.iter()).chain(a.cleanup.iter()).any(|s| s.send.contains("{n}"))
 }
 
 /// Check a cue against the profile and the device's allow-list. Sends nothing. The error says what to fix.
@@ -480,7 +569,7 @@ pub fn check_action(dev: &Device, action: &Action) -> Result<(), String> {
         return Err(format!("{} has no mapping for \"{}\"", p.name, action.kind));
     }
     // pause and stop take no program name; run does. A step uses {0} only if it needs one.
-    let needs_value = a.is_some_and(|a| a.steps.iter().chain(a.confirm.iter()).any(|s| s.send.contains("{0}") || s.skip_if.is_some()));
+    let needs_value = a.is_some_and(|a| a.steps.iter().chain(a.confirm.iter()).chain(a.cleanup.iter()).any(|s| s.send.contains("{0}") || s.send.contains("{n}") || s.skip_if.is_some()));
     let v = value_of(action);
     if !needs_value {
         return Ok(());
@@ -500,6 +589,9 @@ pub fn check_action(dev: &Device, action: &Action) -> Result<(), String> {
             return Err(format!("\"{v}\" is not on {}'s list of allowed programs ({}): add it in the rig node's \"programs\" only if its programmer validated it", dev.label, allowed.join(", ")));
         }
     }
+    if a.is_some_and(uses_number) && program_number(dev, &v).is_none() {
+        return Err(format!("\"{v}\" has no program number on {}'s list: this device picks programs by number, so write it as {v}=<number> in the rig node's \"programs\" (the number its PLC program expects)", dev.label));
+    }
     Ok(())
 }
 
@@ -509,14 +601,16 @@ pub fn describe(dev: &Device, action: &Action) -> Result<Vec<(String, Vec<Value>
     let p = get(dev.profile_key()).ok_or("no link profile")?;
     let a = p.actions.get(&action.kind).ok_or("no mapping")?;
     let v = value_of(action);
+    let sub = Subst { name: &v, num: program_number(dev, &v) };
     let mut out = Vec::new();
     for s in &a.steps {
-        let line = s.send.replace("{0}", &v);
+        let line = sub.render(&s.send);
         let note = if s.skip_if.is_some() { " (skipped if it is already loaded)" } else { "" };
-        out.push((format!("{} text: {}{}", p.name, line, note), vec![]));
+        let kind = if p.modbus.is_some() { "Modbus TCP" } else { "text" };
+        out.push((format!("{} {kind}: {}{}", p.name, line, note), vec![]));
     }
     if let Some(c) = &a.confirm {
-        out.push((format!("{} text: {} (read back, to see it running)", p.name, c.send.replace("{0}", &v)), vec![]));
+        out.push((format!("{} text: {} (read back, to see it running)", p.name, sub.render(&c.send)), vec![]));
     }
     Ok(out)
 }
@@ -637,17 +731,26 @@ pub async fn probe(profile: &LinkProfile, addr: &str) -> Result<Probe, String> {
     let _ = s.set_nodelay(true);
     let mut r = BufReader::new(s);
     // wait a little longer than a normal connect for a greeting, so "none" really means none
-    let mut greeting = String::new();
-    let g = tokio::time::timeout(Duration::from_millis(1500), r.read_line(&mut greeting)).await;
-    let greeting = match g {
-        Ok(Ok(n)) if n > 0 => Some(greeting.trim().to_string()),
-        _ => None,
+    // a Modbus device does not greet: do not make a probe wait to find that out
+    let greeting = if profile.modbus.is_some() {
+        None
+    } else {
+        let mut line = String::new();
+        match tokio::time::timeout(Duration::from_millis(1500), r.read_line(&mut line)).await {
+            Ok(Ok(n)) if n > 0 => Some(line.trim().to_string()),
+            _ => None,
+        }
     };
+    let mut txid: u16 = 0;
     let mut reads = Vec::new();
     let mut vars: BTreeMap<String, String> = BTreeMap::new();
     for rd in &profile.reads {
         let mut item = ProbeRead { var: rd.var.clone().unwrap_or_else(|| rd.extract.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>().join(",")), send: rd.send.clone(), reply: None, matched: false, value: None, error: None };
         let go = async {
+            if let Some(m) = &profile.modbus {
+                txid = txid.wrapping_add(1);
+                return modbus_text(&mut r, m, txid, &rd.send).await;
+            }
             write_request(&mut r, &rd.send, &profile.request_end).await?;
             read_reply(&mut r, profile.reply_until.as_deref()).await
         };
@@ -714,6 +817,7 @@ struct Link {
     state: Mutex<LinkState>,
     was_linked: std::sync::atomic::AtomicBool,
     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    txid: std::sync::atomic::AtomicU16,
 }
 
 impl Drop for Link {
@@ -729,8 +833,14 @@ pub struct TextLinks {
     links: tokio::sync::Mutex<HashMap<String, Arc<Link>>>,
 }
 
-fn render(t: &str, v: &str) -> String {
-    t.replace("{0}", v)
+/// One Modbus command on an open connection, for a profile: parsed, checked against the addresses the profile forbids (again, at the
+/// moment of sending), sent, and answered as text.
+async fn modbus_text(r: &mut BufReader<TcpStream>, m: &ModbusCfg, txid: u16, cmd: &str) -> Result<String, String> {
+    let c = crate::modbus::parse(cmd)?;
+    if let Some(f) = m.never.iter().find(|f| f.covers(&c)) {
+        return Err(format!("refused before sending: '{cmd}' writes an address this profile forbids ({:?} {} to {})", f.space, f.lo, f.hi));
+    }
+    crate::modbus::do_command(r, m.unit, txid, &c).await
 }
 
 impl Link {
@@ -741,9 +851,11 @@ impl Link {
         let s = tokio::time::timeout(CONNECT, TcpStream::connect(&self.addr)).await.map_err(|_| format!("{} did not answer within {} s", self.addr, CONNECT.as_secs()))?.map_err(|e| format!("cannot reach {}: {e}", self.addr))?;
         let _ = s.set_nodelay(true);
         let mut r = BufReader::new(s);
-        // some devices greet on connect: take that line if it comes, so it is not read as the answer to the first command
-        let mut greeting = String::new();
-        let _ = tokio::time::timeout(GREETING, r.read_line(&mut greeting)).await;
+        if self.profile.modbus.is_none() {
+            // some text devices greet on connect: take that line if it comes, so it is not read as the answer to the first command
+            let mut greeting = String::new();
+            let _ = tokio::time::timeout(GREETING, r.read_line(&mut greeting)).await;
+        }
         conn.stream = Some(r);
         Ok(())
     }
@@ -753,6 +865,10 @@ impl Link {
         self.connect(conn).await?;
         let r = conn.stream.as_mut().ok_or("not connected")?;
         let go = async {
+            if let Some(m) = &self.profile.modbus {
+                let tx = self.txid.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return modbus_text(r, m, tx, cmd).await.map_err(|e| format!("{e} ({})", self.addr));
+            }
             write_request(r, cmd, &self.profile.request_end).await.map_err(|e| format!("{e} ({})", self.addr))?;
             read_reply(r, self.profile.reply_until.as_deref()).await.map_err(|e| format!("{e} ({})", self.addr))
         };
@@ -770,18 +886,31 @@ impl Link {
     }
 
     /// Run a list of steps. `vars` carries what earlier steps stored.
-    async fn run_steps(&self, conn: &mut Conn, steps: &[Step], value: &str, vars: &mut HashMap<String, String>) -> Result<(), LinkError> {
+    /// Whether a step would change something (so a failure after it needs the cleanup): a Modbus write, or a step that says so.
+    fn changes(&self, s: &Step, sub: &Subst<'_>) -> bool {
+        s.changes || (self.profile.modbus.is_some() && crate::modbus::parse(&sub.render(&s.send)).is_ok_and(|c| c.is_write()))
+    }
+
+    /// Run a list of steps. `changed` is set as soon as a step that changes something is ATTEMPTED (even one whose answer is lost: it may
+    /// have landed), so the caller knows whether a cleanup is needed.
+    async fn run_steps(&self, conn: &mut Conn, steps: &[Step], sub: &Subst<'_>, vars: &mut HashMap<String, String>, changed: &mut bool) -> Result<(), LinkError> {
         for s in steps {
             if let Some((var, pat)) = &s.skip_if {
-                let re = full(&pat.replace("{0}", &regex::escape(value))).map_err(LinkError::Failed)?;
+                let re = full(&pat.replace("{0}", &regex::escape(sub.name))).map_err(LinkError::Failed)?;
                 if vars.get(var).is_some_and(|x| re.is_match(x)) {
                     continue;
                 }
             }
-            let reply = self.exchange(conn, &render(&s.send, value)).await.map_err(LinkError::Failed)?;
+            if self.changes(s, sub) {
+                *changed = true;
+            }
+            let reply = self.exchange(conn, &sub.render(&s.send)).await.map_err(LinkError::Failed)?;
+            if !s.wait.is_zero() {
+                tokio::time::sleep(s.wait).await;
+            }
             if let Some(re) = &s.expect {
                 match re.captures(&reply) {
-                    None => return Err(LinkError::Refused(render(&s.fail, value).replace("{reply}", &reply))),
+                    None => return Err(LinkError::Refused(sub.render(&s.fail).replace("{reply}", &reply))),
                     Some(c) => {
                         if let Some(var) = &s.store {
                             vars.insert(var.clone(), c.get(1).map_or(reply.clone(), |m| m.as_str().to_string()));
@@ -795,10 +924,10 @@ impl Link {
         Ok(())
     }
 
-    async fn confirm(&self, conn: &mut Conn, c: &Step, value: &str) -> Result<bool, LinkError> {
+    async fn confirm(&self, conn: &mut Conn, c: &Step, sub: &Subst<'_>) -> Result<bool, LinkError> {
         let until = tokio::time::Instant::now() + c.within;
         loop {
-            let reply = self.exchange(conn, &render(&c.send, value)).await.map_err(LinkError::Failed)?;
+            let reply = self.exchange(conn, &sub.render(&c.send)).await.map_err(LinkError::Failed)?;
             if c.expect.as_ref().is_some_and(|re| re.is_match(&reply)) {
                 return Ok(true);
             }
@@ -817,17 +946,26 @@ impl Link {
         check_action(dev, action).map_err(LinkError::Failed)?;
         let a = self.profile.actions.get(&action.kind).ok_or_else(|| LinkError::Failed("no mapping".into()))?;
         let value = value_of(action);
+        let sub = Subst { name: &value, num: program_number(dev, &value) };
         let mut conn = self.lock().await?;
         let mut vars = HashMap::new();
-        let result = self.run_steps(&mut conn, &a.steps, &value, &mut vars).await;
+        let mut changed = false;
+        let result = self.run_steps(&mut conn, &a.steps, &sub, &mut vars, &mut changed).await;
         if let Err(e) = &result {
             self.note_failure(e);
+            // put back what the steps changed (a start pulse that was raised must be lowered), whatever went wrong: best effort, and the
+            // original error is what is reported. Only if a step that changes something was actually attempted: a PLC that said no at the
+            // first check is not written to at all.
+            if changed && !a.cleanup.is_empty() {
+                let (mut ignore, mut also) = (HashMap::new(), false);
+                let _ = self.run_steps(&mut conn, &a.cleanup, &sub, &mut ignore, &mut also).await;
+            }
         }
         result?;
         let target = self.addr.clone();
         match &a.confirm {
             None => Ok(Outcome { status: "accepted", note: "the device said yes".into(), target }),
-            Some(c) => match self.confirm(&mut conn, c, &value).await {
+            Some(c) => match self.confirm(&mut conn, c, &sub).await {
                 Ok(true) => Ok(Outcome { status: "running", note: "read back: it is doing it".into(), target }),
                 Ok(false) => Ok(Outcome { status: "accepted", note: format!("the device said yes, but a read-back did not show it within {} s (a short program may already have finished)", c.within.as_secs_f32()), target }),
                 Err(e) => Ok(Outcome { status: "accepted", note: format!("the device said yes, but the read-back failed: {e}"), target }),
@@ -842,10 +980,12 @@ impl Link {
         let mut conn = self.lock().await?;
         // a stop is the one request that must try twice: a dropped connection is retried once on a fresh one
         let mut vars = HashMap::new();
-        let mut r = self.run_steps(&mut conn, &self.profile.stop, "", &mut vars).await;
+        let none = Subst { name: "", num: None };
+        let mut changed = false;
+        let mut r = self.run_steps(&mut conn, &self.profile.stop, &none, &mut vars, &mut changed).await;
         if matches!(r, Err(LinkError::Failed(_))) {
             conn.stream = None;
-            r = self.run_steps(&mut conn, &self.profile.stop, "", &mut vars).await;
+            r = self.run_steps(&mut conn, &self.profile.stop, &none, &mut vars, &mut changed).await;
         }
         r.map(|_| Outcome { status: "accepted", note: "the device acknowledged the stop request".into(), target: self.addr.clone() })
     }
@@ -905,7 +1045,7 @@ impl TextLinks {
         if let Some(l) = links.get(&dev.id).filter(|l| l.key == key) {
             return Ok(Arc::clone(l));
         }
-        let link = Arc::new(Link { profile: Arc::clone(&profile), addr, key, conn: tokio::sync::Mutex::new(Conn { stream: None }), state: Mutex::new(LinkState { state: "silent", ..Default::default() }), was_linked: Default::default(), task: Mutex::new(None) });
+        let link = Arc::new(Link { profile: Arc::clone(&profile), addr, key, conn: tokio::sync::Mutex::new(Conn { stream: None }), state: Mutex::new(LinkState { state: "silent", ..Default::default() }), was_linked: Default::default(), task: Mutex::new(None), txid: Default::default() });
         links.insert(dev.id.clone(), Arc::clone(&link));
         Ok(link)
     }
@@ -1370,6 +1510,164 @@ mod tests {
         // request_end and reply_until are checked
         assert!(LinkProfile::from_json(&XML_PROFILE.replace("\"request_end\":\"\"", "\"request_end\":\"x\""), false).err().unwrap().contains("request_end"));
         assert!(LinkProfile::from_json(&XML_PROFILE.replace("\"reply_until\":\"</Reply>\"", "\"reply_until\":\"\""), false).err().unwrap().contains("reply_until"));
+    }
+
+    // ---- a PLC over Modbus TCP, against a pretend PLC ----
+
+    const PLC_EXAMPLE: &str = include_str!("../../../tools/kuka/kuka-plc-example.json");
+
+    fn plc_dev(port: u16, programs: &str) -> Device {
+        let mut d = dev(port, programs);
+        d.kind = "kuka-plc-example".into();
+        d
+    }
+
+    fn with_plc_profile() {
+        let p = LinkProfile::from_json(PLC_EXAMPLE, false).expect("the example PLC profile is valid");
+        registry().write().unwrap().insert("kuka-plc-example".into(), Arc::new(p));
+    }
+
+    #[test]
+    fn the_plc_example_profile_loads_and_cannot_write_what_it_forbids() {
+        let p = LinkProfile::from_json(PLC_EXAMPLE, false).expect("valid");
+        assert_eq!((p.id.as_str(), p.dept.as_str(), p.basis.as_str(), p.port), ("kuka-plc-example", "motion", "memory", Some(502)));
+        let cmds = p.commands();
+        assert!(cmds.iter().all(|c| !c.starts_with("write_coil 3")), "reserved coils 30 to 39 are never written: {cmds:?}");
+        assert!(cmds.contains(&"write_reg 100 {n}".to_string()) && cmds.contains(&"write_coil 10 1".to_string()));
+        assert!(p.notes.contains("NOT an emergency stop") && p.source.contains("INVENTED"));
+    }
+
+    #[test]
+    fn a_modbus_profile_that_could_write_a_forbidden_address_or_is_not_modbus_is_refused() {
+        let mk = |step: &str| format!(r#"{{"id":"m","name":"M","transport":"modbus-tcp","dept":"motion","kinds":["motion.run"],"value":"[A-Z]+","never_addresses":["coil:30-39","reg:100"],"actions":{{"motion.run":{{"steps":[{{"send":"{step}"}}]}}}}}}"#);
+        assert!(LinkProfile::from_json(&mk("write_coil 10 1"), false).is_ok());
+        for (bad, why) in [("write_coil 35 1", "must never write"), ("write_coil 30 0", "must never write"), ("write_reg 100 {n}", "must never write"), ("write_reg 101 {n}", ""), ("write_reg 7 {0}", "not a value"), ("play", "not a Modbus command")] {
+            let r = LinkProfile::from_json(&mk(bad), false);
+            if why.is_empty() {
+                assert!(r.is_ok(), "{bad}: {:?}", r.err());
+            } else {
+                let e = r.err().unwrap_or_else(|| panic!("{bad} should be refused"));
+                assert!(e.contains(why), "{bad}: {e}");
+            }
+        }
+        // text-only settings do not belong on a Modbus profile
+        assert!(LinkProfile::from_json(&mk("write_coil 10 1").replace("\"dept\"", "\"request_end\":\"\",\"dept\""), false).err().unwrap().contains("Modbus frames its own messages"));
+    }
+
+    #[tokio::test]
+    async fn a_run_writes_the_number_pulses_the_start_reads_back_and_never_touches_the_reserved_coils() {
+        with_plc_profile();
+        let sim = crate::plcsim::PlcSim::start(1, &[3, 5]).await.unwrap();
+        let links = TextLinks::default();
+        let d = plc_dev(sim.port, "OPEN_ARM=3, PARK=5");
+        let o = links.apply(&d, &run("OPEN_ARM")).await.unwrap();
+        assert_eq!(o.status, "running", "{}", o.note);
+        assert_eq!(sim.seen(), ["read_input 20", "read_input 21", "read_ireg 200", "write_reg 100 3", "write_coil 10 1", "write_coil 10 0", "read_ireg 200"]);
+        let st = sim.snapshot();
+        assert_eq!((st.iregs[200], st.iregs[201], st.coils[10]), (1, 3, false), "running program 3, and the start pulse was released");
+        assert!(!sim.seen().iter().any(|c| c.starts_with("write_coil 3")), "a reserved coil was written");
+        // it is running: another run is refused by the profile's own idle check, and nothing is written
+        sim.with(|s| s.seen.clear());
+        let e = links.apply(&d, &run("PARK")).await.err().unwrap();
+        assert_eq!(e.status(), "refused");
+        assert!(e.text().contains("not idle"), "{}", e.text());
+        assert!(!sim.seen().iter().any(|c| c.starts_with("write_")), "{:?}", sim.seen());
+        // the stop is a second pulse, on its own coil
+        let o = links.stop(&d).await.unwrap();
+        assert_eq!(o.status, "accepted");
+        assert_eq!(sim.snapshot().iregs[200], 0);
+        assert!(sim.seen().iter().any(|c| c == "write_coil 11 1") && sim.seen().iter().any(|c| c == "write_coil 11 0"));
+    }
+
+    #[tokio::test]
+    async fn the_plc_route_has_the_same_allow_list_and_a_program_needs_its_number() {
+        with_plc_profile();
+        let sim = crate::plcsim::PlcSim::start(1, &[3]).await.unwrap();
+        let links = TextLinks::default();
+        for (prog, list, why) in [("OPEN_ARM", "OPEN_ARM", "has no program number"), ("PARK", "OPEN_ARM=3", "not on"), ("OPEN_ARM", "", "no list of allowed programs"), ("open_arm", "OPEN_ARM=3", "not a program name")] {
+            let e = links.apply(&plc_dev(sim.port, list), &run(prog)).await.err().unwrap_or_else(|| panic!("{prog} should be refused"));
+            assert!(e.text().contains(why), "{prog}/{list}: {}", e.text());
+        }
+        assert!(sim.seen().is_empty(), "not one byte reached the PLC: {:?}", sim.seen());
+        assert_eq!(program_number(&plc_dev(1, "A=7, B"), "A"), Some(7));
+        assert_eq!(program_number(&plc_dev(1, "A=7, B"), "B"), None);
+        assert_eq!(allowed_programs(&plc_dev(1, "A=7, B")), ["A", "B"]);
+    }
+
+    #[tokio::test]
+    async fn the_plc_saying_no_stops_the_sequence_before_anything_is_written() {
+        with_plc_profile();
+        let sim = crate::plcsim::PlcSim::start(1, &[3]).await.unwrap();
+        let links = TextLinks::default();
+        let d = plc_dev(sim.port, "OPEN_ARM=3");
+        sim.fault("not-remote").unwrap();
+        let e = links.apply(&d, &run("OPEN_ARM")).await.err().unwrap();
+        assert_eq!(e.status(), "refused");
+        assert!(e.text().contains("not accepting commands from outside"), "{}", e.text());
+        sim.fault("healthy").unwrap();
+        sim.fault("safety-fault").unwrap();
+        let e = links.apply(&d, &run("OPEN_ARM")).await.err().unwrap();
+        assert!(e.text().contains("safety status is not OK"), "{}", e.text());
+        assert!(!sim.seen().iter().any(|c| c.starts_with("write_")), "something was written to a PLC that said no: {:?}", sim.seen());
+    }
+
+    #[tokio::test]
+    async fn if_a_step_fails_after_the_start_was_raised_the_cleanup_lowers_it() {
+        // step 2 writes an address the PLC does not have: it answers exception 2, after the start coil was raised
+        let text = r#"{"id":"plc-clean","name":"C","transport":"modbus-tcp","dept":"motion","kinds":["motion.run"],"value":"[A-Z]+","port":1,
+            "actions":{"motion.run":{"steps":[{"send":"write_coil 10 1","expect":"OK"},{"send":"write_reg 900 1","expect":"OK","fail":"the PLC said {reply}"}],
+                                      "cleanup":[{"send":"write_coil 10 0"}]}}}"#;
+        registry().write().unwrap().insert("plc-clean".into(), Arc::new(LinkProfile::from_json(text, false).unwrap()));
+        let sim = crate::plcsim::PlcSim::start(1, &[3]).await.unwrap();
+        let mut d = dev(sim.port, "");
+        d.kind = "plc-clean".into();
+        d.programs = None;
+        let links = TextLinks::default();
+        let e = links.apply(&d, &run("GO")).await.err().unwrap();
+        assert_eq!(e.status(), "refused");
+        assert!(e.text().contains("EXCEPTION 2 illegal data address"), "{}", e.text());
+        assert_eq!(sim.seen(), ["write_coil 10 1", "write_reg 900 1", "write_coil 10 0"], "the cleanup ran, and last");
+        assert!(!sim.snapshot().coils[10], "the start coil was left lowered");
+        registry().write().unwrap().remove("plc-clean");
+    }
+
+    #[tokio::test]
+    async fn the_plc_is_read_for_state_and_a_fault_makes_it_not_ready_and_the_probe_reads_it_too() {
+        with_plc_profile();
+        let sim = crate::plcsim::PlcSim::start(1, &[3]).await.unwrap();
+        let links = TextLinks::default();
+        let d = plc_dev(sim.port, "OPEN_ARM=3");
+        links.ensure(&d).await.unwrap();
+        let until = std::time::Instant::now() + Duration::from_secs(4);
+        while !links.state("ur1").is_some_and(|s| s.state == "linked") {
+            assert!(std::time::Instant::now() < until, "never linked: {:?}", links.state("ur1"));
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(links.state("ur1").unwrap().ready, Some(true));
+        sim.fault("safety-fault").unwrap();
+        let until = std::time::Instant::now() + Duration::from_secs(4);
+        while links.state("ur1").is_some_and(|s| s.ready != Some(false)) {
+            assert!(std::time::Instant::now() < until, "never noticed the safety fault");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(links.state("ur1").unwrap().note.contains("safety status is not OK"), "{:?}", links.state("ur1"));
+        // the probe reads, and sends no writes
+        sim.fault("healthy").unwrap();
+        sim.with(|s| s.seen.clear());
+        let p = get("kuka-plc-example").unwrap();
+        let r = probe(&p, &format!("127.0.0.1:{}", sim.port)).await.unwrap();
+        assert_eq!(r.greeting, None);
+        assert!(r.all_matched() && r.ready == Some(true), "{r:?}");
+        assert!(sim.seen().iter().all(|c| c.starts_with("read_")), "a probe only reads: {:?}", sim.seen());
+    }
+
+    #[test]
+    fn what_a_plc_cue_would_send_is_readable_with_its_number_in() {
+        with_plc_profile();
+        let lines = describe(&plc_dev(1, "OPEN_ARM=3"), &run("OPEN_ARM")).unwrap();
+        let text: Vec<&str> = lines.iter().map(|(l, _)| l.as_str()).collect();
+        assert!(text.iter().any(|l| l.contains("Modbus TCP: write_reg 100 3")), "{text:?}");
+        assert!(text.iter().any(|l| l.contains("write_coil 10 1")), "{text:?}");
     }
 
     #[test]

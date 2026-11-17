@@ -71,6 +71,8 @@ pub mod twin;
 pub mod describe;
 pub mod bench;
 pub mod follow;
+pub mod modbus;
+pub mod plcsim;
 pub mod rig;
 pub mod textlink;
 pub mod ursim;
@@ -3864,6 +3866,41 @@ mod tests {
         assert_eq!((devices[0].dept.as_str(), devices[0].address().as_deref(), devices[0].programs.as_deref()), ("motion", Some("10.0.0.9:29999"), Some("OPEN_ARM, PARK")));
         assert_eq!((devices[1].address().as_deref(), devices[1].programs.as_deref()), (Some("10.0.0.10:30000"), Some("A,B")));
         assert_eq!(textlink::allowed_programs(&devices[0]), ["OPEN_ARM", "PARK"]);
+    }
+
+    #[tokio::test]
+    async fn a_robot_behind_a_plc_goes_through_the_same_arming_stop_and_fault_rules() {
+        let profile: Value = serde_json::from_str(include_str!("../../../tools/kuka/kuka-plc-example.json")).unwrap();
+        textlink::load_values(vec![profile], "test").unwrap();
+        let sim = plcsim::PlcSim::start(1, &[3]).await.unwrap();
+        let dev = rig::Device { id: "plc1".into(), label: "Arm (PLC)".into(), kind: "kuka-plc-example".into(), dept: "motion".into(), host: Some("127.0.0.1".into()), port: Some(sim.port), listen_port: None, profile: None, universe: None, patch: None, password: None, programs: Some("OPEN_ARM=3".into()) };
+        let show = Show::start_with(motion_quick(), EventStore::open_in_memory().unwrap(), Some(Output::new(vec![dev], true))).unwrap();
+        let mut rx = show.subscribe();
+        // disarmed: held, and not one request reaches the PLC from a cue
+        assert_eq!(show.try_cue("plc1", "OPEN_ARM").await.unwrap()["status"], "held");
+        assert!(!sim.seen().iter().any(|c| c.starts_with("write_")), "{:?}", sim.seen());
+        // armed: it runs, read back
+        show.set_armed("plc1", true).unwrap();
+        let m = show.try_cue("plc1", "OPEN_ARM").await.unwrap();
+        assert_eq!(m["status"], "running", "{m}");
+        assert_eq!((sim.snapshot().iregs[200], sim.snapshot().iregs[201]), (1, 3));
+        assert!(!sim.seen().iter().any(|c| c.starts_with("write_coil 3")), "a reserved coil was written");
+        // STOP MOTION: disarmed, and the stop pulse reaches the PLC, reported accepted
+        let r = show.motion_stop();
+        assert_eq!(r["stopped"], json!(["plc1"]));
+        let d = wait_for(&mut rx, |m| m["type"] == "delivery" && m["kind"] == "motion.stop").await.expect("a stop delivery");
+        assert_eq!(d["status"], "accepted", "{d}");
+        assert_eq!(sim.snapshot().iregs[200], 0);
+        // a safety fault on the PLC: an armed device is disarmed, and a cue is held with the PLC's reason
+        show.set_armed("plc1", true).unwrap();
+        sim.fault("safety-fault").unwrap();
+        let fault = wait_for(&mut rx, |m| m["type"] == "fault").await.expect("a fault message");
+        assert!(fault["why"].as_str().unwrap().contains("safety status is not OK"), "{fault}");
+        assert_eq!(show.snapshot()["devices"][0]["armed"], false);
+        show.set_armed("plc1", true).unwrap();
+        let m = show.try_cue("plc1", "OPEN_ARM").await.unwrap();
+        assert_eq!(m["status"], "held", "{m}");
+        assert!(m["error"].as_str().unwrap().contains("not ready"), "{m}");
     }
 
     fn osc_bytes(addr: &str) -> Vec<u8> {

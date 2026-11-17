@@ -41,6 +41,15 @@ The point of a file and not code: a robot's command language belongs to the robo
 - **`stop`**: what STOP MOTION sends.
 - **`never`**: commands this profile must never contain (compared in lower case, as a whole command or its first words). **A profile with a step that could send one is refused when it is loaded** (for XML commands too: `<Power>` or `<Brake .../>` is caught by a `never` entry `power` or `brake`), so an edit that adds `power on` cannot get in unnoticed.
 
+## Modbus TCP profiles (`"transport": "modbus-tcp"`)
+
+For a PLC in front of a machine. Same format and guarantees; the differences:
+
+- `unit` (default 1) and `port` (502 is the standard). No `request_end` or `reply_until`: Modbus frames its own messages.
+- A step's `send` is one of `read_coil A`, `read_input A`, `read_reg A`, `read_ireg A`, `write_coil A 0|1`, `write_reg A V` (addresses count from 0). A read answers `A=value`; a write answers `OK` once the device has echoed it; a device that refuses answers `EXCEPTION <code> <name>` (a `refused`, not a broken link). The only placeholder in a Modbus command is `{n}`, the program's number from the device's list (`NAME=3`); a name with no number is refused.
+- **`never_addresses`**: `["coil:30-39", "reg:100"]`. A profile with a step that writes one is refused at load, and each write is checked again as it is sent.
+- **`wait_ms`** on a step waits after it succeeds (a PLC needs time to see a pulse). **`cleanup`** on an action runs if a step fails after a changing step (every Modbus write, or a text step marked `"changes": true`) was attempted: put back what the steps changed. If no changing step was attempted, nothing is written.
+
 ## What the runtime guarantees
 
 - Only commands in the file are ever sent, and a cue chooses only a program name that passes the pattern and the allow-list. A cue, an agent and the command bar cannot send a command of their own.
