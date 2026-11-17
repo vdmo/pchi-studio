@@ -118,3 +118,16 @@ test('removed scenes, cues and moved cues are described', () => {
   assert.ok(d.some((x) => x.startsWith('Changes cue A / Motion at 1.00 s')))
   assert.ok(d.some((x) => x.startsWith('Removes cue A / Motion at 2.00 s')))
 })
+
+test('a proposal is ready only while the draft is what the model was shown', () => {
+  const { proposalStatus } = sdk
+  const base = chart()
+  const proposed = chart([cue('c1', 1000, 'PARK', 1), cue('c2', 3000, 'OPEN_ARM', 2)])
+  assert.equal(proposalStatus(base, base, proposed), 'ready')
+  assert.equal(proposalStatus(proposed, base, proposed), 'applied')
+  // undone: back to what the model saw, so it may be applied again
+  assert.equal(proposalStatus(base, base, proposed), 'ready')
+  // the user edited the draft after sending (or after applying): applying would overwrite those edits
+  const edited = chart([cue('c1', 2000, 'PARK', 1)])
+  assert.equal(proposalStatus(edited, base, proposed), 'stale')
+})

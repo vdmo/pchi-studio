@@ -682,3 +682,29 @@ button.go:disabled { background: #1b1d25; color: #7a7f92; border-color: #2f323e;
   .side { width: 100%; }
 }
 @media print { .side { display: none !important; } .app.with-side { padding-right: 0; } }
+
+/* ───────── floating AI prompt, ⋯ menu, settings ───────── */
+.float-ai { position: fixed; z-index: 35; left: 50%; bottom: 78px; transform: translateX(-50%); width: min(640px, calc(100vw - 32px)); box-sizing: border-box; display: grid; gap: 8px; padding: 12px 14px; background: #1b1d25; border: 1px solid #5b4fd8aa; border-radius: 14px; box-shadow: 0 16px 48px rgba(0,0,0,.55); }
+.app.with-side .float-ai { left: calc((100vw - 400px) / 2); width: min(640px, calc(100vw - 432px)); }
+.float-ai textarea { font: inherit; font-size: 14px; color: #e8e9ee; background: transparent; border: 0; outline: none; resize: none; padding: 2px 28px 2px 2px; }
+.float-x { position: absolute; top: 8px; right: 8px; min-width: 24px; width: 24px; height: 24px; padding: 0; }
+.float-bar { display: flex; align-items: center; gap: 8px; }
+.float-bar .spacer { flex: 1; }
+.float-bar button.primary { min-width: 32px; border-radius: 50%; padding: 4px 0; background: #7c6cf0; border-color: #7c6cf0; }
+.float-bar .link { border: 0; background: none; color: #9aa0b4; font-size: 12px; padding: 0; }
+.float-bar .link:hover { color: #e8e9ee; }
+.float-result { max-height: 38vh; overflow: auto; }
+.float-note { margin: 0; font-size: 11px; }
+.more { position: fixed; z-index: 34; right: 12px; bottom: 46px; }
+.app.with-side .more { right: 412px; }
+.more-btn { width: 34px; height: 34px; padding: 0; border-radius: 50%; font-size: 18px; line-height: 1; background: #1b1d25; border: 1px solid #2f323e; box-shadow: 0 6px 20px rgba(0,0,0,.3); }
+.more-menu { position: absolute; right: 0; bottom: 42px; min-width: 220px; display: grid; padding: 5px; background: #1b1d25; border: 1px solid #2f323e; border-radius: 12px; box-shadow: 0 16px 44px rgba(0,0,0,.55); }
+.more-menu button { display: flex; justify-content: space-between; gap: 18px; align-items: center; text-align: left; border: 0; background: none; padding: 7px 10px; border-radius: 7px; font-size: 13px; color: #e8e9ee; }
+.more-menu button:hover:not(:disabled) { background: #2b3040; }
+.more-menu button:disabled { color: #6b7084; }
+.more-menu button.sep { margin-top: 5px; position: relative; }
+.more-menu button.sep::before { content: ''; position: absolute; left: 8px; right: 8px; top: -3px; height: 1px; background: #2a2e3a; }
+.more-menu kbd { font: 11px ui-monospace, Menlo, Consolas, monospace; color: #8a8fa3; }
+.set-h { margin: 12px 0 0; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: #8a8fa3; }
+@media print { .float-ai, .more { display: none !important; } }
+.proposal button:disabled, .float-ai button:disabled, .side button.primary:disabled { opacity: .4; cursor: not-allowed; }

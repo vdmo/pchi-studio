@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { ASSIST_SYSTEM, assistPrompt, canApply, readProposal, validateShow, type PchiNode, type PchiShowFile, type Proposal, type Showchart, type Validation } from '@pchi/sdk'
-import type { History } from './useHistory'
+import { useEffect, useMemo, useState } from 'react'
+import { validateShow, type PchiNode, type PchiShowFile, type Showchart, type Validation } from '@pchi/sdk'
+import { AI_PRIVACY, ProposalCard, type Assistant } from './assistant'
+import { useAiSettings } from '../lib/aiSettings'
 
 export type SideTab = 'checks' | 'code' | 'ai'
 
@@ -10,10 +11,11 @@ interface Props {
   onClose: () => void
   chart: Showchart
   nodes: PchiNode[]
-  history: History
+  ai: Assistant
   scene: string | null
   getFile: () => PchiShowFile
   onGoto: (v: Validation) => void
+  onSettings: () => void
 }
 
 const TABS: { id: SideTab; label: string }[] = [
@@ -42,7 +44,7 @@ export default function SidePanel(p: Props) {
       <div className="side-body">
         {p.tab === 'checks' && <Checks chart={p.chart} nodes={p.nodes} onGoto={p.onGoto} />}
         {p.tab === 'code' && <Code chart={p.chart} scene={p.scene} getFile={p.getFile} />}
-        {p.tab === 'ai' && <Assistant chart={p.chart} nodes={p.nodes} history={p.history} />}
+        {p.tab === 'ai' && <AiTab ai={p.ai} onSettings={p.onSettings} />}
       </div>
     </aside>
   )
@@ -121,149 +123,34 @@ function Code({ chart, scene, getFile }: { chart: Showchart; scene: string | nul
 
 // ───────── AI ─────────
 
-const KEY = 'pchi.ai.key'
-const MODEL = 'pchi.ai.model'
-const read = (k: string) => {
-  try {
-    return sessionStorage.getItem(k) ?? ''
-  } catch {
-    return ''
-  }
-}
-const write = (k: string, v: string) => {
-  try {
-    if (v) sessionStorage.setItem(k, v)
-    else sessionStorage.removeItem(k)
-  } catch {
-    /* blocked: the key is then kept only while this panel is open */
-  }
-}
-
-function Assistant({ chart, nodes, history }: { chart: Showchart; nodes: PchiNode[]; history: History }) {
-  const [key, setKey] = useState(() => read(KEY))
-  const [model, setModel] = useState(() => read(MODEL) || 'claude-sonnet-5-5')
-  const [text, setText] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState('')
-  const [proposal, setProposal] = useState<Proposal | null>(null)
-  const [applied, setApplied] = useState(false)
-  const abort = useRef<AbortController | null>(null)
-  useEffect(() => () => abort.current?.abort(), [])
-
-  const send = async () => {
-    if (!key.trim() || !text.trim() || busy) return
-    write(KEY, key.trim())
-    write(MODEL, model.trim())
-    setBusy(true)
-    setError('')
-    setProposal(null)
-    setApplied(false)
-    abort.current?.abort()
-    const ac = new AbortController()
-    abort.current = ac
-    try {
-      const r = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        signal: ac.signal,
-        headers: {
-          'content-type': 'application/json',
-          'x-api-key': key.trim(),
-          'anthropic-version': '2023-06-01',
-          'anthropic-dangerous-direct-browser-access': 'true',
-        },
-        body: JSON.stringify({ model: model.trim(), max_tokens: 16000, system: ASSIST_SYSTEM, messages: [{ role: 'user', content: assistPrompt(chart, nodes, text) }] }),
-      })
-      const body = await r.json().catch(() => null)
-      if (!r.ok) {
-        setError(r.status === 401 ? 'The key was not accepted.' : `The AI service said no (${r.status}): ${body?.error?.message ?? 'no reason given'}`)
-        return
-      }
-      if (body?.stop_reason === 'max_tokens') {
-        setError('The reply was cut off. Ask for a smaller change, or one scene at a time.')
-        return
-      }
-      const reply = (body?.content ?? []).filter((b: { type: string }) => b.type === 'text').map((b: { text: string }) => b.text).join('')
-      const res = readProposal(reply, chart, nodes)
-      if (!res.ok) setError(res.error)
-      else setProposal(res.proposal)
-    } catch (e) {
-      if ((e as Error).name !== 'AbortError') setError('Could not reach the AI service. Check the connection.')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const apply = () => {
-    if (!proposal || !canApply(proposal)) return
-    history.commit(proposal.chart)
-    setApplied(true)
-  }
-  // Undo is offered only while the draft is still exactly what Apply made it: after any other edit it would undo that edit instead
-  const untouched = applied && proposal !== null && chart === proposal.chart
-  const undo = () => {
-    if (untouched && history.undo()) setApplied(false)
-  }
-
+function AiTab({ ai, onSettings }: { ai: Assistant; onSettings: () => void }) {
+  const { key, model } = useAiSettings()
+  const ready = key.trim() !== ''
   return (
     <>
+      <p className="side-note">Describe a change and get a <b>proposal</b>. {AI_PRIVACY}</p>
       <p className="side-note">
-        Describe a change and get a <b>proposal</b>. Nothing is applied until you press Apply, and Apply edits only this draft, which you can undo. The AI cannot change the rig, arm a device or send anything to the runtime.
-        When you press Send, the scenes and cues, and each device's name, type and allowed program names, go to Anthropic. <b>Addresses, ports and passwords are never sent.</b>
+        {ready ? <>Using <b>{model}</b> with the key set in Settings. </> : <b>No key yet. </b>}
+        <button onClick={onSettings}>{ready ? 'Settings' : 'Add your key in Settings'}</button>
       </p>
-      <label className="side-field">
-        API key (kept in this tab only)
-        <input type="password" value={key} onChange={(e) => setKey(e.target.value)} autoComplete="off" spellCheck={false} placeholder="sk-ant-…" />
-      </label>
-      <label className="side-field">
-        Model
-        <input value={model} onChange={(e) => setModel(e.target.value)} spellCheck={false} />
-      </label>
       <label className="side-field">
         What should change?
         <textarea
           rows={4}
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => (e.ctrlKey || e.metaKey) && e.key === 'Enter' && send()}
+          value={ai.text}
+          onChange={(e) => ai.setText(e.target.value)}
+          onKeyDown={(e) => (e.ctrlKey || e.metaKey) && e.key === 'Enter' && ai.send()}
           placeholder="Add a PARK cue to the arm 2 seconds before the end of the finale…"
         />
       </label>
       <div className="side-bar">
-        <button className="primary" onClick={send} disabled={busy || !key.trim() || !text.trim()}>
-          {busy ? 'Thinking…' : 'Send'}
+        <button className="primary" onClick={ai.send} disabled={ai.busy || !ready || !ai.text.trim()}>
+          {ai.busy ? 'Thinking…' : 'Send'}
         </button>
-        {busy && <button onClick={() => abort.current?.abort()}>Cancel</button>}
+        {ai.busy && <button onClick={ai.cancel}>Cancel</button>}
       </div>
-      {error && <p className="side-err" role="alert">{error}</p>}
-      {proposal && (
-        <section className="proposal" aria-label="Proposal">
-          <h4>Proposal</h4>
-          <p>{proposal.summary}</p>
-          {proposal.changes.length === 0 ? <p className="side-note">It changes nothing in the show.</p> : (
-            <ul className="side-list">
-              {proposal.changes.map((c, i) => <li key={i}>{c}</li>)}
-            </ul>
-          )}
-          {proposal.added.length > 0 && (
-            <>
-              <p className="side-err">This would add problems, so it cannot be applied:</p>
-              <ul className="side-list">{proposal.added.map((v, i) => <li key={i}>{v.level === 'error' ? '⛔' : '⚠'} {v.text}</li>)}</ul>
-            </>
-          )}
-          {proposal.fixed.length > 0 && <p className="side-note">It also fixes {proposal.fixed.length} existing problem{proposal.fixed.length > 1 ? 's' : ''}.</p>}
-          <div className="side-bar">
-            <button className="primary" onClick={apply} disabled={!canApply(proposal) || applied || proposal.changes.length === 0}>
-              {applied ? 'Applied' : 'Apply to the draft'}
-            </button>
-            <button onClick={() => setProposal(null)}>Discard</button>
-          </div>
-          {applied && (
-            <p className="side-note" role="status">
-              Applied to the draft. Nothing was sent to the runtime. {untouched ? <button onClick={undo}>Undo this change</button> : 'Use the ↶ button on the Show or Timeline tab to undo.'}
-            </p>
-          )}
-        </section>
-      )}
+      {ai.error && <p className="side-err" role="alert">{ai.error}</p>}
+      <ProposalCard ai={ai} />
     </>
   )
 }

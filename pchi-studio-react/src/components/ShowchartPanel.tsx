@@ -57,6 +57,8 @@ interface Props {
   /** The rig, so the command box can add and change systems ("add qlab"). */
   rig?: RigState
   onRig?: (rig: RigState) => void
+  /** Open the floating AI prompt (the ✦ button in the canvas tools). */
+  onAsk?: () => void
 }
 
 type Tool = 'select' | 'pan'
@@ -73,7 +75,7 @@ export default function ShowchartPanel(props: Props) {
   )
 }
 
-function Editor({ chart, history, note, scene, onScene, onOpenTimeline, rig, onRig }: Props) {
+function Editor({ chart, history, note, scene, onScene, onOpenTimeline, rig, onRig, onAsk }: Props) {
   const rf = useReactFlow()
   const { commit } = history
 
@@ -363,6 +365,7 @@ function Editor({ chart, history, note, scene, onScene, onOpenTimeline, rig, onR
                 <button className={tool === 'select' ? 'on' : ''} onClick={() => setTool('select')} aria-pressed={tool === 'select'} title="Select, move and connect states">↖</button>
                 <button className={tool === 'pan' ? 'on' : ''} onClick={() => setTool('pan')} aria-pressed={tool === 'pan'} title="Pan the canvas">✋</button>
                 <button className={right === 'simulate' ? 'on' : ''} onClick={() => setRight((r) => (r === 'simulate' ? null : 'simulate'))} aria-pressed={right === 'simulate'} title="Simulate the show">▶</button>
+                {onAsk && <button onClick={onAsk} title="Ask AI to update this show" aria-label="Ask AI">✦</button>}
               </div>
             </Panel>
 

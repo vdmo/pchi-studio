@@ -28,9 +28,19 @@ What keeps it safe next to a robot:
 - **It never sees where your devices are.** What leaves your browser: scenes, cues, and for each device its name, type, department and allowed program **names**. Not addresses, ports or passwords. (The panel says so before you press Send.)
 - **A proposal that adds a problem the show did not already have cannot be applied** (for example a program the arm does not allow, or a device that does not exist). A problem the show already had does not block it.
 - The canvas layout and the cue-number counter are kept from your show, so cue numbers are never reused.
-- Applying is one undo step: **Undo this change** appears next to it, as long as you have not edited since.
+- Applying is one undo step: **Undo this change** appears next to it, as long as you have not edited since (or use Undo in the ⋯ menu).
 
-How it works: your browser calls the Anthropic API directly with **your own key**, which is kept in this tab (session storage) and never saved to the show, the runtime or the server. You choose the model (the default is `claude-sonnet-5-5`). It needs an internet connection from the computer running Studio, which a venue network may not allow.
+How it works: your browser calls the Anthropic API directly with **your own key** (entered in Settings), which is kept in this tab (session storage) and never saved to the show, the runtime or the server. You choose the model (the default is `claude-sonnet-5-5`). It needs an internet connection from the computer running Studio, which a venue network may not allow.
+
+## Ask AI from anywhere, and the ⋯ menu
+
+- **✦ in the canvas tools** (Show tab) or **Ask AI…** in the ⋯ menu (any editing tab) opens a small prompt at the bottom of the window. It is the same helper as the AI tab, with one conversation: **Open in sidebar** moves it across, proposal and all. Enter sends, Shift+Enter is a new line, Esc closes it.
+- **The ⋯ menu** (bottom right) holds Ask AI, **Undo and Redo** (Show, Timeline and Cue sheet only: the Rig is not part of undo and the Live tab has none), Fit to content (Show tab), Keyboard shortcuts and Settings.
+- **Settings** holds the AI key and model. The key is kept in the browser tab only (gone when it closes), never in a show, the runtime or the server, and is sent only to Anthropic when you press Send. **Forget the key** clears it.
+
+## A proposal only fits the show it was made for
+
+A proposal is a complete replacement of the show, based on the draft **as it was when you pressed Send**. If you edit the draft after that (before or after pressing Apply), the proposal no longer fits and applying it would overwrite your edits, so Apply is switched off and the card says why: ask again. If you apply it and then undo it (from the card or the ⋯ menu), the draft is back to what the model saw, and the proposal can be applied again.
 
 ## What is not proven
 

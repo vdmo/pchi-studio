@@ -11,6 +11,10 @@ import Logo from './components/Logo'
 import ShortcutsDialog from './components/ShortcutsDialog'
 import LibraryDialog, { type ServerRef } from './components/LibraryDialog'
 import SidePanel, { type SideTab } from './components/SidePanel'
+import FloatingPrompt from './components/FloatingPrompt'
+import MoreMenu, { type MoreItem } from './components/MoreMenu'
+import SettingsDialog from './components/SettingsDialog'
+import { useAssistant } from './components/assistant'
 
 const AUTOSAVE = 'pchi.autosave'
 interface Autosave {
@@ -69,6 +73,10 @@ export default function App() {
   const [help, setHelp] = useState(false)
   // the drawer on the right: Checks, Code, AI. The count on its button is the problems in the show right now.
   const [side, setSide] = useState<SideTab | null>(null)
+  // the AI helper: one conversation, shown in the side panel and in the floating prompt
+  const ai = useAssistant(showchart, rig.nodes, history)
+  const [ask, setAsk] = useState(false)
+  const [settings, setSettings] = useState(false)
   const problems = useMemo(() => validateShow(showchart, rig.nodes), [showchart, rig.nodes])
   const nErr = problems.filter((p) => p.level === 'error').length
   const gotoProblem = (v: Validation) => {
@@ -184,6 +192,21 @@ export default function App() {
     }
   }
 
+  // the ⋯ menu. Undo and redo are for the tabs that edit the show: the Rig is not part of undo and the Live tab has none.
+  const editing = mode === 'show' || mode === 'timeline' || mode === 'cues'
+  const moreItems: MoreItem[] = [
+    ...(mode !== 'live' ? [{ label: 'Ask AI…', onClick: () => setAsk(true) }] : []),
+    ...(editing
+      ? [
+          { label: 'Undo', onClick: () => history.undo(), disabled: !history.canUndo, hint: 'Ctrl Z', group: true },
+          { label: 'Redo', onClick: () => history.redo(), disabled: !history.canRedo, hint: 'Ctrl Shift Z' },
+        ]
+      : []),
+    ...(mode === 'show' ? [{ label: 'Fit to content', onClick: () => window.dispatchEvent(new Event('pchi:fit')), group: true }] : []),
+    { label: 'Keyboard shortcuts', onClick: () => setHelp(true), hint: '?', group: true },
+    { label: 'Settings', onClick: () => setSettings(true) },
+  ]
+
   return (
     <div className={`app ${side ? 'with-side' : ''}`}>
       <header className="topbar">
@@ -250,7 +273,20 @@ export default function App() {
         </div>
       )}
       {help && <ShortcutsDialog onClose={() => setHelp(false)} />}
-      {side && <SidePanel tab={side} onTab={setSide} onClose={() => setSide(null)} chart={showchart} nodes={rig.nodes} history={history} scene={scene} getFile={buildFile} onGoto={gotoProblem} />}
+      {settings && <SettingsDialog onClose={() => setSettings(false)} />}
+      {ask && mode !== 'live' && (
+        <FloatingPrompt
+          ai={ai}
+          onClose={() => setAsk(false)}
+          onSidebar={() => {
+            setAsk(false)
+            setSide('ai')
+          }}
+          onSettings={() => setSettings(true)}
+        />
+      )}
+      <MoreMenu items={moreItems} />
+      {side && <SidePanel tab={side} onTab={setSide} onClose={() => setSide(null)} chart={showchart} nodes={rig.nodes} ai={ai} scene={scene} getFile={buildFile} onGoto={gotoProblem} onSettings={() => setSettings(true)} />}
       {lib && (
         <LibraryDialog
           start={lib}
@@ -268,7 +304,7 @@ export default function App() {
         />
       )}
 
-      {mode === 'show' && <ShowchartPanel chart={showchart} history={history} note={note} scene={scene} onScene={setScene} onOpenTimeline={() => setMode('timeline')} rig={rig} onRig={setRig} />}
+      {mode === 'show' && <ShowchartPanel onAsk={() => setAsk((v) => !v)} chart={showchart} history={history} note={note} scene={scene} onScene={setScene} onOpenTimeline={() => setMode('timeline')} rig={rig} onRig={setRig} />}
       {mode === 'timeline' && <TimelinePanel chart={showchart} history={history} note={note} scene={scene} onScene={setScene} nodes={rig.nodes} rig={rig} onRig={setRig} />}
       {mode === 'cues' && <CueSheet chart={showchart} history={history} scene={scene} onScene={setScene} onOpenTimeline={() => setMode('timeline')} nodes={rig.nodes} />}
       {mode === 'rig' && <RigPanel rig={rig} onChange={setRig} issues={rigIssues} onRemoved={(id) => {

@@ -121,3 +121,16 @@ export function readProposal(reply: string, current: Showchart, nodes: PchiNode[
 
 /** A proposal may be applied only if it adds no problem the show did not already have. */
 export const canApply = (p: Proposal): boolean => p.added.length === 0
+
+/**
+ * Where a proposal stands against the draft as it is NOW (identity, not content: any edit makes a new chart).
+ *  - "ready":   the draft is exactly what the model was shown, so Apply replaces nothing the model did not see.
+ *  - "applied": the draft is exactly what Apply made it.
+ *  - "stale":   the draft changed since (before or after Apply). Applying would overwrite those edits, so it is not offered.
+ * A proposal that was applied and then undone is "ready" again, because the draft is back to what the model was shown.
+ */
+export function proposalStatus(current: Showchart, base: Showchart, proposed: Showchart): 'ready' | 'applied' | 'stale' {
+  if (current === proposed && current !== base) return 'applied'
+  if (current === base) return 'ready'
+  return 'stale'
+}

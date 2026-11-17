@@ -261,6 +261,12 @@ export function buildEdges(chart: Showchart, current?: string): Edge<ShowEdgeDat
 export function ZoomControls() {
   const rf = useReactFlow()
   const { zoom } = useViewport()
+  // the ⋯ menu's "Fit to content" asks the canvas to fit itself
+  useEffect(() => {
+    const h = () => rf.fitView({ padding: 0.18, duration: 250 })
+    window.addEventListener('pchi:fit', h)
+    return () => window.removeEventListener('pchi:fit', h)
+  }, [rf])
   return (
     <div className="zoom" role="group" aria-label="Zoom">
       <button onClick={() => rf.zoomOut({ duration: 150 })} aria-label="Zoom out">−</button>
