@@ -132,7 +132,7 @@ pub fn html(records: &[EventRecord], chain: Option<&Chain>, memory: Option<&Memo
     let mut problems: Vec<&EventRecord> = Vec::new();
     for r in run.iter().filter(|r| r.event_type == "show.delivery") {
         let s = r.payload["status"].as_str().unwrap_or("?").to_string();
-        if matches!(s.as_str(), "failed" | "no-device") {
+        if matches!(s.as_str(), "failed" | "no-device" | "refused") {
             problems.push(r);
         }
         *by_status.entry(s).or_default() += 1;

@@ -537,7 +537,7 @@ mod tests {
     }
 
     fn dev(id: &str, kind: &str, host: Option<&str>) -> Device {
-        Device { id: id.into(), label: id.into(), kind: kind.into(), dept: crate::rig::dept_of_type(kind).unwrap().into(), host: host.map(String::from), port: Some(9), listen_port: None, profile: None, universe: None, patch: None, password: None }
+        Device { id: id.into(), label: id.into(), kind: kind.into(), dept: crate::rig::dept_of_type(kind).unwrap().into(), host: host.map(String::from), port: Some(9), listen_port: None, profile: None, universe: None, patch: None, password: None, programs: None }
     }
 
     fn rig() -> Vec<Device> {

@@ -43,6 +43,22 @@ pub struct Output {
     dmx: Arc<crate::dmx::Dmx>,
     /// OBS devices: their connections, kept open. Shared across live edits.
     obs: Arc<crate::obs::Obs>,
+    /// Devices driven by a line of text over TCP (a robot's own command interface): their connections and what was last read from them.
+    textlinks: Arc<crate::textlink::TextLinks>,
+}
+
+/// What came of delivering an action, honestly: `sent` (it left; nothing more is known), `accepted` (the device said yes), `running` (a
+/// read-back shows it doing it).
+pub struct Delivered {
+    pub target: String,
+    pub status: &'static str,
+    pub note: Option<String>,
+}
+
+/// A delivery that did not happen: `failed` (no answer, or our own check said no) or `refused` (the device answered, and said no).
+pub struct Undelivered {
+    pub status: &'static str,
+    pub error: String,
 }
 
 /// What routing decided for one action.
@@ -57,7 +73,7 @@ pub enum Plan {
 
 impl Output {
     pub fn new(devices: Vec<Device>, send: bool) -> Self {
-        Self { devices, send: std::sync::atomic::AtomicBool::new(send), armed: Mutex::new(BTreeSet::new()), links: Arc::new(Links::default()), probe_every: Duration::from_secs(5), link_timeout: Duration::from_secs(15), dmx: Arc::new(crate::dmx::Dmx::default()), obs: Arc::new(crate::obs::Obs::default()) }
+        Self { devices, send: std::sync::atomic::AtomicBool::new(send), armed: Mutex::new(BTreeSet::new()), links: Arc::new(Links::default()), probe_every: Duration::from_secs(5), link_timeout: Duration::from_secs(15), dmx: Arc::new(crate::dmx::Dmx::default()), obs: Arc::new(crate::obs::Obs::default()), textlinks: Arc::default() }
     }
 
     /// Change how often devices are probed and when silence counts as lost (the defaults are 5 s and 15 s).
@@ -73,7 +89,7 @@ impl Output {
 
     /// Whether this device is expected to answer: it can be probed, or has a listen port.
     pub fn expects_feedback(dev: &Device) -> bool {
-        dev.kind == "obs" || profiles::probe(dev.profile_key()).is_some() || dev.listen_port.is_some()
+        dev.kind == "obs" || dev.is_link() || profiles::probe(dev.profile_key()).is_some() || dev.listen_port.is_some()
     }
 
     /// The device's link: "linked" (answered a probe recently), "lost" (answered before, now silent),
@@ -82,6 +98,11 @@ impl Output {
     pub fn link_state(&self, dev: &Device) -> Option<Value> {
         if !self.sending() {
             return None;
+        }
+        if dev.is_link() {
+            // a robot's own interface is read by the watcher: its state says whether it is there, and whether it is ready
+            let s = self.textlinks.state(&dev.id).unwrap_or_default();
+            return Some(json!({"state": if s.state.is_empty() { "silent" } else { s.state }, "heard_ms_ago": null, "probed": true, "ready": s.ready, "note": s.note, "values": s.vars}));
         }
         if dev.kind == "obs" {
             // OBS's own connection says whether it is there
@@ -105,7 +126,7 @@ impl Output {
     /// The same output with a new device list (after a live edit), keeping the armed state of lasers that are still there.
     pub fn with_devices(&self, devices: Vec<Device>) -> Self {
         let keep: BTreeSet<String> = self.armed.lock().unwrap().iter().filter(|id| devices.iter().any(|d| &d.id == *id && crate::rig::is_armable(&d.dept))).cloned().collect();
-        Self { devices, send: std::sync::atomic::AtomicBool::new(self.sending()), armed: Mutex::new(keep), links: Arc::clone(&self.links), probe_every: self.probe_every, link_timeout: self.link_timeout, dmx: Arc::clone(&self.dmx), obs: Arc::clone(&self.obs) }
+        Self { devices, send: std::sync::atomic::AtomicBool::new(self.sending()), armed: Mutex::new(keep), links: Arc::clone(&self.links), probe_every: self.probe_every, link_timeout: self.link_timeout, dmx: Arc::clone(&self.dmx), obs: Arc::clone(&self.obs), textlinks: Arc::clone(&self.textlinks) }
     }
 
     pub fn is_armed(&self, id: &str) -> bool {
@@ -197,6 +218,42 @@ pub async fn deliver(dev: &Device, action: &Action) -> Result<String, String> {
 }
 
 impl Output {
+    /// Start watching a robot-style device: its state is read every second or so (only while the runtime is sending).
+    pub async fn textlink_ensure(&self, dev: &Device) -> Result<(), String> {
+        self.textlinks.ensure(dev).await
+    }
+
+    /// Why a device cannot take a cue right now although it is armed: its own reading of itself says it is not ready (a protective stop,
+    /// out of Remote Control mode, not reachable). `None` for a device that is ready, that is not a text link, or not being watched.
+    pub fn not_ready(&self, dev: &Device) -> Option<String> {
+        if !dev.is_link() || !self.sending() {
+            return None;
+        }
+        let s = self.textlinks.state(&dev.id)?;
+        match s.ready {
+            Some(false) => Some(if s.note.is_empty() { "it reports it is not ready".to_string() } else { s.note }),
+            _ => None,
+        }
+    }
+
+    /// The profile's stop steps, for a text-link device (what STOP MOTION sends).
+    pub async fn link_stop(&self, dev: &Device) -> Result<Delivered, Undelivered> {
+        self.textlinks.stop(dev).await.map(|o| Delivered { target: o.target, status: o.status, note: Some(o.note) }).map_err(|e| Undelivered { status: e.status(), error: e.text().to_string() })
+    }
+
+    /// Read a text-link device's state and say what it is. Sends only reads.
+    pub async fn link_check(&self, dev: &Device) -> Result<Value, Undelivered> {
+        self.textlinks.check(dev).await.map_err(|e| Undelivered { status: e.status(), error: e.text().to_string() })
+    }
+
+    /// Like `deliver`, but says how far it got: `sent`, `accepted` or `running`; or `refused` / `failed` with the reason.
+    pub async fn deliver_detail(&self, dev: &Device, action: &Action) -> Result<Delivered, Undelivered> {
+        if dev.is_link() {
+            return self.textlinks.apply(dev, action).await.map(|o| Delivered { target: o.target, status: o.status, note: Some(o.note) }).map_err(|e| Undelivered { status: e.status(), error: e.text().to_string() });
+        }
+        self.deliver(dev, action).await.map(|target| Delivered { target, status: "sent", note: None }).map_err(|error| Undelivered { status: "failed", error })
+    }
+
     /// Start (or check) the connection of an OBS device.
     pub async fn obs_ensure(&self, dev: &Device) -> Result<(), String> {
         self.obs.ensure(dev).await
@@ -206,6 +263,9 @@ impl Output {
     pub async fn deliver(&self, dev: &Device, action: &Action) -> Result<String, String> {
         if dev.is_dmx() {
             return self.dmx.apply(dev, action).await;
+        }
+        if dev.is_link() {
+            return self.textlinks.apply(dev, action).await.map(|o| o.target).map_err(|e| e.to_string());
         }
         if dev.kind == "obs" {
             return self.obs.apply(dev, action).await;
@@ -237,6 +297,9 @@ pub fn wire_lines(dev: &Device, action: &Action) -> Result<Vec<(String, Vec<Valu
         let summary = crate::dmx::describe(dev, action)?;
         let proto = crate::dmx::proto_of(&dev.kind).ok_or("not a DMX device")?;
         return Ok(vec![(format!("{} universe {}", proto.name(), dev.universe.unwrap_or(proto.default_universe())), vec![Value::String(crate::dmx::value_of(action)), Value::String(summary)])]);
+    }
+    if dev.is_link() {
+        return crate::textlink::describe(dev, action);
     }
     if dev.kind == "obs" {
         let scene = crate::obs::scene_of(action)?;
@@ -277,7 +340,7 @@ mod tests {
     use serde_json::json;
 
     fn dev(id: &str, kind: &str, port: u16) -> Device {
-        Device { id: id.into(), label: id.into(), kind: kind.into(), dept: dept_of_type(kind).unwrap().into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None, profile: None, universe: None, patch: None, password: None }
+        Device { id: id.into(), label: id.into(), kind: kind.into(), dept: dept_of_type(kind).unwrap().into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None, profile: None, universe: None, patch: None, password: None, programs: None }
     }
 
     #[test]

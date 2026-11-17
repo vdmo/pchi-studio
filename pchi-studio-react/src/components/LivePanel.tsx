@@ -62,7 +62,7 @@ type RunDevice = { id: string; label: string; dept: string; armed?: boolean; lin
 /** Something a device sent back (OSC), newest last. */
 type Feedback = { ts: number; device: string; label?: string; address: string; args: unknown[] }
 /** What the runtime did with one cue: sent, dry-run, no-device or failed. */
-type Delivery = { ts: number; kind: string; status: 'sent' | 'dry-run' | 'no-device' | 'failed' | 'held'; device?: string; label?: string; dept?: string; target?: string; error?: string; lane?: string }
+type Delivery = { ts: number; kind: string; status: 'sent' | 'accepted' | 'running' | 'dry-run' | 'no-device' | 'failed' | 'refused' | 'held'; device?: string; label?: string; dept?: string; target?: string; error?: string; lane?: string }
 
 const linkText = (l: Link | undefined, now: number) => {
   if (!l || l.state === 'none') return ''
@@ -485,14 +485,14 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile, onAddCa
             return (
               <button
                 key={key}
-                className={`ready-chip ${st} ${device?.armed ? 'armed' : ''} ${device?.link?.state === 'lost' ? 'nolinkdev' : ''} ${nodev ? 'nodev' : ''} ${dv?.status === 'failed' ? 'failed' : ''} ${needed.has(key) ? 'needed' : ''}`}
+                className={`ready-chip ${st} ${device?.armed ? 'armed' : ''} ${device?.link?.state === 'lost' ? 'nolinkdev' : ''} ${nodev ? 'nodev' : ''} ${dv?.status === 'failed' || dv?.status === 'refused' ? 'failed' : ''} ${needed.has(key) ? 'needed' : ''}`}
                 onClick={() => setReady(key, !r || !r.ready ? true : false)}
                 title={`${device ? `${label} (${d.label})` : d.label}${nodev ? ' (no device in the rig)' : ''}: ${st === 'nolink' ? 'has not reported' : st === 'ready' ? 'standing by' : 'on hold'}${r?.note ? ' – ' + r.note : ''}${r?.source ? ` (via ${r.source})` : ''}${dv ? `. Last cue: ${dv.status}${dv.error ? ' – ' + dv.error : ''}` : ''}. Click to ${r?.ready ? 'hold' : 'mark ready'}.`}
               >
                 <i style={{ background: d.color }} aria-hidden />
                 <span>
                   {label}
-                  {device && <small className="dev">{d.label}{device.dept === 'laser' || device.dept === 'motion' ? (device.armed ? ' · ARMED' : ' · disarmed') : ''}{linkText(device.link, beat)}{dv ? ` · ${dv.status === 'failed' ? '⚠ failed' : dv.status}` : ''}</small>}
+                  {device && <small className="dev">{d.label}{device.dept === 'laser' || device.dept === 'motion' ? (device.armed ? ' · ARMED' : ' · disarmed') : ''}{linkText(device.link, beat)}{dv ? ` · ${dv.status === 'failed' ? '⚠ failed' : dv.status === 'refused' ? '⚠ refused' : dv.status}` : ''}</small>}
                   {nodev && <small className="dev">⚠ no device</small>}
                   {needed.has(key) && nextScene && <small className="dev need">needed in {nextScene}</small>}
                 </span>
@@ -513,12 +513,12 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile, onAddCa
             </ul>
           </details>
         )}
-        {(gaps.length > 0 || Object.values(last).some((l) => l.status === 'failed')) && (
+        {(gaps.length > 0 || Object.values(last).some((l) => l.status === 'failed' || l.status === 'refused')) && (
           <ul className="delivery-warn" role="status">
             {gaps.map((g, i) => (
               <li key={`g${i}`}>⚠ {g.kind}: {g.error}</li>
             ))}
-            {Object.values(last).filter((l) => l.status === 'failed').map((l) => (
+            {Object.values(last).filter((l) => l.status === 'failed' || l.status === 'refused').map((l) => (
               <li key={l.device}>⚠ {l.label ?? l.device}: {l.error}</li>
             ))}
           </ul>

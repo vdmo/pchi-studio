@@ -181,11 +181,22 @@ async fn check_device(c: &mut dyn Console, out: &Output, dev: &Device, o: &Optio
     if crate::rig::is_armable(&dev.dept) {
         out.set_armed(&dev.id, true); // only inside this check: the real runtime always starts disarmed
     }
-    match if dev.is_direct() { out.deliver(dev, &action).await } else { out.send_packets(dev, packets).await } {
-        Ok(_) => c.say("Sent."),
-        Err(e) => {
-            c.say(&format!("Could not send: {e}"));
-            r.send_error = Some(e);
+    if dev.is_link() {
+        // a robot's own interface answers: say what it said, not just "sent"
+        match out.deliver_detail(dev, &action).await {
+            Ok(d) => c.say(&format!("The device answered: {}. {}", d.status, d.note.unwrap_or_default())),
+            Err(e) => {
+                c.say(&format!("{}: {}", e.status, e.error));
+                r.send_error = Some(e.error);
+            }
+        }
+    } else {
+        match if dev.is_direct() { out.deliver(dev, &action).await } else { out.send_packets(dev, packets).await } {
+            Ok(_) => c.say("Sent."),
+            Err(e) => {
+                c.say(&format!("Could not send: {e}"));
+                r.send_error = Some(e);
+            }
         }
     }
     if crate::rig::is_armable(&dev.dept) {
@@ -472,7 +483,7 @@ mod tests {
     }
 
     fn dev(id: &str, kind: &str, port: u16) -> Device {
-        Device { id: id.into(), label: id.into(), kind: kind.into(), dept: dept_of_type(kind).unwrap().into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None, profile: None, universe: None, patch: None, password: None }
+        Device { id: id.into(), label: id.into(), kind: kind.into(), dept: dept_of_type(kind).unwrap().into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None, profile: None, universe: None, patch: None, password: None, programs: None }
     }
 
     /// A pretend X32: answers /info to whoever asked, while `up` is true; records what it received.
@@ -576,6 +587,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_robot_is_checked_with_its_own_answer_reported_and_only_after_area_clear() {
+        let sim = crate::ursim::UrSim::start(&["OPEN_ARM"]).await.unwrap();
+        let mut d = dev("arm", "ur", sim.port);
+        d.programs = Some("OPEN_ARM".into());
+        let out = Output::new(vec![d], true);
+        let mut c = Script::new(&["", ""]);
+        let res = run(&mut c, &out, &[], &fast()).await;
+        assert_eq!(res[0].why, "motion area not confirmed clear");
+        assert!(sim.seen().is_empty(), "nothing was sent without AREA CLEAR: {:?}", sim.seen());
+        let mut c = Script::new(&["AREA CLEAR", "OPEN_ARM", "y", "y", "", "", ""]);
+        let res = run(&mut c, &out, &["arm".into()], &Options { cable_wait: Duration::from_millis(100), recover_wait: Duration::from_millis(100), ..fast() }).await;
+        assert!(c.said.iter().any(|l| l.contains("The device answered: running")), "{:?}", c.said);
+        assert!(!out.is_armed("arm"), "disarmed again after the check");
+        assert_eq!(res[0].send_error, None);
+        assert!(sim.seen().iter().any(|x| x == "play"));
+    }
+
+    #[tokio::test]
     async fn only_what_was_tried_changes_the_checklist() {
         let doc = "| Tool | Try a cue with | Address to confirm | Status |\n|---|---|---|---|\n| Resolume Arena | `3` | `/composition/columns/3/connect` | not yet tried |\n| QLab | a cue number | `/cue/<n>/start` (re-check) | not yet tried |\n| ChamSys MagicQ | `3` | `/pb/3/go` | not yet tried |\n";
         let ok = DeviceResult { tool: "resolume".into(), sent: vec!["/composition/columns/3/connect 1".into()], reacted: "yes".into(), verdict: "ticked".into(), ..Default::default() };
@@ -602,7 +631,7 @@ mod tests {
     async fn a_dmx_output_is_checked_with_levels_and_ticked_when_the_fixture_reacts() {
         let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let port = sock.local_addr().unwrap().port();
-        let d = Device { id: "rack".into(), label: "Rack".into(), kind: "artnet".into(), dept: "lighting".into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None, profile: None, universe: Some(1), patch: None, password: None };
+        let d = Device { id: "rack".into(), label: "Rack".into(), kind: "artnet".into(), dept: "lighting".into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None, profile: None, universe: Some(1), patch: None, password: None, programs: None };
         let out = Output::new(vec![d], true);
         let mut c = Script::new(&["", "1-3=100%", "y", "y"]);
         let r = run(&mut c, &out, &[], &fast()).await.remove(0);

@@ -1,0 +1,52 @@
+{
+  "id": "ur",
+  "name": "Universal Robots (Dashboard Server)",
+  "transport": "tcp-text",
+  "dept": "motion",
+  "port": 29999,
+  "kinds": ["motion.run", "motion.pause", "motion.stop"],
+  "value": "[A-Za-z0-9_.-]{1,64}",
+  "needs_programs": true,
+  "hint": "the name of a program on the robot, without .urp (it must be on the device's list of allowed programs)",
+  "never": ["power on", "power off", "brake release", "unlock protective stop", "close safety popup", "restart safety", "load installation", "shutdown", "set operational mode", "clear operational mode", "close popup", "popup", "addtolog"],
+  "actions": {
+    "motion.run": {
+      "steps": [
+        {"send": "is in remote control", "expect": "true", "fail": "the robot is not in Remote Control mode, so it refuses program commands ({reply}): switch it on the pendant"},
+        {"send": "safetystatus", "expect": "Safetystatus: NORMAL", "fail": "the robot's safety status is not NORMAL ({reply}): inspect it on the pendant"},
+        {"send": "get loaded program", "store": "loaded"},
+        {"send": "load {0}.urp", "expect": "Loading program: .*", "fail": "the robot would not load {0}.urp ({reply})", "skip_if": {"var": "loaded", "regex": ".*(^|[/ ]){0}\\.urp"}},
+        {"send": "play", "expect": "Starting program", "fail": "the robot would not start {0} ({reply})"}
+      ],
+      "confirm": {"send": "programState", "expect": "PLAYING.*", "within_ms": 3000, "every_ms": 250}
+    },
+    "motion.pause": {
+      "steps": [{"send": "pause", "expect": "Pausing program", "fail": "the robot would not pause ({reply})"}],
+      "confirm": {"send": "programState", "expect": "PAUSED.*", "within_ms": 2000, "every_ms": 250}
+    },
+    "motion.stop": {
+      "steps": [{"send": "stop", "expect": "Stopped", "fail": "the robot would not stop the program ({reply})"}],
+      "confirm": {"send": "programState", "expect": "STOPPED.*", "within_ms": 2000, "every_ms": 250}
+    }
+  },
+  "status": {
+    "poll_ms": 1000,
+    "reads": [
+      {"var": "remote", "send": "is in remote control", "expect": "(true|false)"},
+      {"var": "safety", "send": "safetystatus", "expect": "Safetystatus: (\\w+)"},
+      {"var": "mode", "send": "robotmode", "expect": "Robotmode: (\\w+)"},
+      {"var": "program", "send": "programState", "expect": "(STOPPED|PLAYING|PAUSED).*"}
+    ],
+    "ready_when": [
+      {"var": "remote", "equals": "true", "why": "it is not in Remote Control mode"},
+      {"var": "safety", "equals": "NORMAL", "why": "its safety status is {value}"},
+      {"var": "mode", "equals": "RUNNING", "why": "its robot mode is {value}, not RUNNING"}
+    ]
+  },
+  "stop": [
+    {"send": "stop", "expect": "Stopped|Failed to execute: stop", "fail": "the robot did not acknowledge the stop request ({reply})"}
+  ],
+  "basis": "vendor",
+  "source": "Universal Robots, Dashboard Server e-Series manual (software 5.25): the command table, syntax and reply text. The connect greeting and the program name after programState are from memory, not the manual page, and the profile accepts them present or absent.",
+  "notes": "Starts, pauses and stops named programs that the robot's programmer wrote and validated, and reads the robot's state. It cannot power the robot on, release brakes, clear a protective stop or change its mode: the profile's 'never' list forbids those and the runtime refuses to load a profile that could send them. The robot must be in Remote Control mode. STOP MOTION sends 'stop'. A PCHI stop is a software request over a network, NOT an emergency stop. Not yet run against a real UR or URSim: only against a pretend one written from the same manual."
+}

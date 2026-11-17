@@ -46,7 +46,7 @@ export type NodeType =
   // distribution
   | 'ndi' | 'osc' | 'webrtc' | 'rtsp'
   // venue
-  | 'ghost-arcade' | 'projector' | 'led-wall' | 'audio-zone' | 'laser' | 'lighting-desk' | 'audio-console' | 'motion'
+  | 'ghost-arcade' | 'projector' | 'led-wall' | 'audio-zone' | 'laser' | 'lighting-desk' | 'audio-console' | 'motion' | 'ur'
   // tool profiles (the exact OSC dialect of a popular tool)
   | 'resolume' | 'grandma3' | 'eos' | 'x32' | 'beyond' | 'qlab' | 'magicq' | 'artnet' | 'sacn' | 'obs'
   // intelligence
@@ -101,6 +101,8 @@ export const NODE_CATALOG: NodeSpec[] = [
   spec('venue', 'audio-zone', 'Audio Zone', {}),
   spec('venue', 'laser', 'Laser', { host: '127.0.0.1', port: 8000 }),
   spec('venue', 'motion', 'Motion (robot, generic OSC)', { host: '127.0.0.1', port: 9100 }),
+  // programs: the names this robot may be asked to run (its programmer validated them). Nothing else is ever run.
+  spec('venue', 'ur', 'Universal Robots (Dashboard)', { host: '127.0.0.1', port: 29999, programs: '' }),
   spec('venue', 'lighting-desk', 'Lighting Desk', { host: '127.0.0.1', port: 7700 }),
   spec('venue', 'audio-console', 'Audio Console', { host: '127.0.0.1', port: 10023 }),
   // Ports are the tools' usual ones or placeholders: set them to match the tool's own OSC settings.

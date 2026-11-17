@@ -10,7 +10,7 @@ const TYPE_DEPT: Record<string, string> = {
   vork: 'visual', unreal: 'visual', touchdesigner: 'visual', notch: 'visual',
   projector: 'visual', 'led-wall': 'visual',
   lighting: 'lighting', 'lighting-desk': 'lighting',
-  laser: 'laser', motion: 'motion',
+  laser: 'laser', motion: 'motion', ur: 'motion',
   resolume: 'visual', grandma3: 'lighting', eos: 'lighting', x32: 'audio', beyond: 'laser', qlab: 'audio', magicq: 'lighting', artnet: 'lighting', sacn: 'lighting', obs: 'visual',  'audio-zone': 'audio', 'audio-console': 'audio', 'audio-agent': 'audio',
 }
 

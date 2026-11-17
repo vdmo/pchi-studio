@@ -9,7 +9,7 @@
 //!   {"type":"context", "ts", "key", "value"}
 //!   {"type":"readiness", "ts", "dept", "ready", "note", "source"}
 //!   {"type":"delivery", "ts", "kind", "lane", "cue", "status", "device", "label", "dept", "target", "error"}
-//!       status: "sent" | "dry-run" | "no-device" | "failed" (see the `output` module)
+//!       status: "sent" | "accepted" | "running" | "dry-run" | "held" | "refused" | "no-device" | "failed" (see the `output` module)
 //!   {"type":"feedback", "ts", "device", "label", "address", "args"}: what a device sent back (rate-limited)
 //!   {"type":"link", "ts", "device", "state"}: linked | lost | heard | silent | none (see `Output::link_state`)
 //!   {"type":"arming", "ts", "device", "armed"}: a laser was armed or disarmed (lasers get no cues until armed)
@@ -72,6 +72,8 @@ pub mod describe;
 pub mod bench;
 pub mod follow;
 pub mod rig;
+pub mod textlink;
+pub mod ursim;
 
 use futures_util::{SinkExt, StreamExt};
 use governance::{said_suffix, Actor, Perm, Proposal};
@@ -457,6 +459,13 @@ impl Show {
                     if dev.kind == "obs" {
                         // OBS is held open by its own connection: just make sure it is being made
                         let _ = out.obs_ensure(dev).await;
+                    } else if dev.is_link() {
+                        // a robot's own interface: start reading its state
+                        if let Err(e) = out.textlink_ensure(dev).await {
+                            if warned.insert(dev.id.clone()) {
+                                show.publish(json!({"type": "error", "message": e}));
+                            }
+                        }
                     } else if output::Output::expects_feedback(dev) {
                         match out.links().get(dev).await {
                             Err(e) => {
@@ -471,6 +480,24 @@ impl Show {
                                         let _ = out.send_packets(dev, vec![p]).await;
                                     }
                                 }
+                            }
+                        }
+                    }
+                    if dev.is_link() {
+                        // what the device says of itself is its readiness; and one that faults while armed is disarmed, so a person must arm it again
+                        let ready = out.link_state(dev).map(|l| (l["ready"].as_bool(), l["note"].as_str().unwrap_or("").to_string()));
+                        if let Some((Some(r), note)) = ready {
+                            let key = format!("ready:{}", dev.id);
+                            let word = format!("{r}|{note}");
+                            if last.get(&key) != Some(&word) {
+                                last.insert(key, word);
+                                let _ = show.set_ready(&dev.id, r, if r { "reads ready" } else { &note }, "link");
+                            }
+                            if !r && rig::is_armable(&dev.dept) && out.is_armed(&dev.id) {
+                                out.set_armed(&dev.id, false);
+                                show.publish(json!({"type": "arming", "ts": now, "device": dev.id, "armed": false}));
+                                show.publish(json!({"type": "fault", "ts": now, "device": dev.id, "label": dev.label, "why": note}));
+                                show.receipt("motion.fault", "ALLOW", &Actor::Person(None), &format!("{} reported it is not ready ({note}): disarmed. A person must arm it again", dev.label));
                             }
                         }
                     }
@@ -1135,6 +1162,22 @@ impl Show {
         } else if !out.sending() {
             m["status"] = json!("dry-run");
             m["note"] = json!("sending is off: start the runtime with --send");
+        } else if dev.is_link() {
+            // a test of a robot reads its state and asks it to do nothing
+            match out.link_check(&dev).await {
+                Ok(v) => {
+                    m["status"] = json!("accepted");
+                    m["note"] = json!(format!("it answered; its state: {}", v["values"]));
+                    m["ready"] = v["ready"].clone();
+                    if v["ready"] == json!(false) {
+                        m["error"] = json!(format!("it answers, but it is not ready: {}", v["note"].as_str().unwrap_or("")));
+                    }
+                }
+                Err(e) => {
+                    m["status"] = json!(e.status);
+                    m["error"] = json!(e.error);
+                }
+            }
         } else {
             match out.deliver(&dev, &Action::new("test", json!({}))).await {
                 Ok(_) => m["status"] = json!("sent"),
@@ -1183,7 +1226,32 @@ impl Show {
             stopped.push(dev.id.clone());
             let msgs = profiles::stop_messages(dev.profile_key());
             let base = json!({"type": "delivery", "ts": ts, "kind": kind, "lane": null, "cue": null, "device": dev.id, "label": dev.label, "dept": dev.dept, "target": dev.address()});
-            if msgs.is_empty() {
+            if dev.is_link() {
+                // a robot's own interface: the profile's stop steps, said honestly (accepted, refused or failed), never "done"
+                if !out.sending() {
+                    let mut m = base;
+                    m["status"] = json!("dry-run");
+                    m["note"] = json!("hard stop: would send the profile's stop to the robot");
+                    self.report(m);
+                } else {
+                    let show = Arc::clone(self);
+                    let out = Arc::clone(&out);
+                    tokio::spawn(async move {
+                        let mut m = base;
+                        match out.link_stop(&dev).await {
+                            Ok(d) => {
+                                m["status"] = json!(d.status);
+                                m["note"] = json!(d.note);
+                            }
+                            Err(e) => {
+                                m["status"] = json!(e.status);
+                                m["error"] = json!(format!("{} (use the machine's own stop)", e.error));
+                            }
+                        }
+                        show.report(m);
+                    });
+                }
+            } else if msgs.is_empty() {
                 notes.push(format!("{}: disarmed here, but no stop message is known for this tool: use its own stop", dev.label));
             } else if !out.sending() {
                 let mut m = base;
@@ -1257,11 +1325,27 @@ impl Show {
         if rig::is_armable(&dev.dept) && !out.is_armed(&dev.id) {
             m["status"] = json!("held");
             m["error"] = json!(format!("{} is not armed: arm it first", dev.label));
+        } else if let Some(why) = out.not_ready(&dev) {
+            m["status"] = json!("held");
+            m["error"] = json!(format!("{} is not ready: {why}", dev.label));
         } else if !out.sending() {
             m["status"] = json!("dry-run");
             m["note"] = json!("sending is off: this is exactly what WOULD be sent");
+        } else if dev.is_direct() {
+            match out.deliver_detail(&dev, &action).await {
+                Ok(d) => {
+                    m["status"] = json!(d.status);
+                    if let Some(n) = d.note {
+                        m["note"] = json!(n);
+                    }
+                }
+                Err(e) => {
+                    m["status"] = json!(e.status);
+                    m["error"] = json!(e.error);
+                }
+            }
         } else {
-            match if dev.is_direct() { out.deliver(&dev, &action).await } else { out.send_packets(&dev, packets).await } {
+            match out.send_packets(&dev, packets).await {
                 Ok(_) => m["status"] = json!("sent"),
                 Err(e) => {
                     m["status"] = json!("failed");
@@ -1916,7 +2000,7 @@ impl Show {
         let of = |t: &str| events.iter().filter(|e| e["type"] == t).map(|e| e["payload"].clone()).collect::<Vec<_>>();
         let cues = of("show.cue");
         let deliveries = of("show.delivery");
-        let problems: Vec<&Value> = deliveries.iter().filter(|d| matches!(d["status"].as_str(), Some("failed") | Some("no-device"))).collect();
+        let problems: Vec<&Value> = deliveries.iter().filter(|d| matches!(d["status"].as_str(), Some("failed") | Some("no-device") | Some("refused"))).collect();
         let worst = cues.iter().map(|c| c["drift_ms"].as_i64().unwrap_or(0).abs()).max().unwrap_or(0);
         json!({
             "cues": cues,
@@ -1926,7 +2010,7 @@ impl Show {
             "summary": {
                 "cues_fired": cues.len(),
                 "deliveries": deliveries.len(),
-                "failed": deliveries.iter().filter(|d| d["status"] == "failed").count(),
+                "failed": deliveries.iter().filter(|d| d["status"] == "failed" || d["status"] == "refused").count(),
                 "no_device": deliveries.iter().filter(|d| d["status"] == "no-device").count(),
                 "worst_drift_ms": worst,
             },
@@ -1960,7 +2044,7 @@ impl Show {
     }
 
     /// Send an action to the device that handles it and report what happened as a
-    /// `delivery` message: status "sent", "dry-run", "no-device" or "failed". Never blocks the show.
+    /// `delivery` message: status "sent", "accepted", "running", "held", "refused", "dry-run", "no-device" or "failed". Never blocks the show.
     fn route(self: &Arc<Self>, ts: i64, action: &Action, lane: Option<&str>, cue: Option<&str>, dept: Option<&str>, device: Option<&str>) {
         let Some(out) = self.output.lock().unwrap().clone() else { return };
         if self.is_fenced() {
@@ -1983,6 +2067,12 @@ impl Show {
                     m["error"] = json!(format!("{} is not armed: arm it on the Live tab to let cues through", dev.label));
                     return self.report(with(&base, m));
                 }
+                if let Some(why) = out.not_ready(&dev) {
+                    let mut m = ident;
+                    m["status"] = json!("held");
+                    m["error"] = json!(format!("{} is not ready: {why}. Cues to it are held until it is.", dev.label));
+                    return self.report(with(&base, m));
+                }
                 if !out.sending() {
                     let mut m = ident;
                     m["status"] = json!("dry-run");
@@ -1993,13 +2083,18 @@ impl Show {
                 let action = action.clone();
                 let out = Arc::clone(&out);
                 tokio::spawn(async move {
-                    let result = out.deliver(&dev, &action).await;
+                    let result = out.deliver_detail(&dev, &action).await;
                     let mut m = ident;
                     match result {
-                        Ok(_) => m["status"] = json!("sent"),
+                        Ok(d) => {
+                            m["status"] = json!(d.status);
+                            if let Some(n) = d.note {
+                                m["note"] = json!(n);
+                            }
+                        }
                         Err(e) => {
-                            m["status"] = json!("failed");
-                            m["error"] = json!(e);
+                            m["status"] = json!(e.status);
+                            m["error"] = json!(e.error);
                         }
                     }
                     show.report(with(&base, m));
@@ -3102,7 +3197,7 @@ mod tests {
     }
 
     fn device(id: &str, kind: &str, port: u16) -> rig::Device {
-        rig::Device { id: id.into(), label: id.into(), kind: kind.into(), dept: rig::dept_of_type(kind).unwrap().into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None, profile: None, universe: None, patch: None, password: None }
+        rig::Device { id: id.into(), label: id.into(), kind: kind.into(), dept: rig::dept_of_type(kind).unwrap().into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None, profile: None, universe: None, patch: None, password: None, programs: None }
     }
 
     fn deliveries(rx: &mut broadcast::Receiver<Value>) -> Vec<Value> {
@@ -3614,6 +3709,161 @@ mod tests {
         show.set_armed("m1", true).unwrap();
         let after = said(&show);
         assert!(after.iter().any(|(l, t)| l == "warn" && t.contains("ARMED") && t.contains("emergency stop")), "{after:?}");
+    }
+
+    // ---- a robot's own interface (Universal Robots Dashboard Server), through the whole runtime, against a pretend UR ----
+
+    fn ur_device(port: u16, programs: Option<&str>) -> rig::Device {
+        rig::Device { id: "ur1".into(), label: "UR".into(), kind: "ur".into(), dept: "motion".into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None, profile: None, universe: None, patch: None, password: None, programs: programs.map(String::from) }
+    }
+
+    fn never_sent(seen: &[String]) -> bool {
+        !seen.iter().any(|c| {
+            let c = c.to_ascii_lowercase();
+            ["power on", "power off", "brake release", "unlock protective stop", "close safety popup", "restart safety", "load installation", "shutdown", "set operational mode"].iter().any(|n| c.starts_with(n))
+        })
+    }
+
+    async fn ur_show(sim: &ursim::UrSim, sending: bool) -> Arc<Show> {
+        let out = Output::new(vec![ur_device(sim.port, Some("OPEN_ARM, PARK"))], sending);
+        Show::start_with(motion_quick(), EventStore::open_in_memory().unwrap(), Some(out)).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_cue_to_a_ur_is_held_until_armed_then_runs_and_the_delivery_says_how_far_it_got() {
+        let sim = ursim::UrSim::start(&["OPEN_ARM", "PARK"]).await.unwrap();
+        let show = ur_show(&sim, true).await;
+        let mut rx = show.subscribe();
+        show.apply("studio", "START"); // INTRO: the motion cue "OPEN_ARM" at 0.8 s
+        tokio::time::sleep(Duration::from_millis(1_300)).await;
+        let held: Vec<Value> = deliveries(&mut rx).into_iter().filter(|d| d["kind"] == "motion.run").collect();
+        assert_eq!(held[0]["status"], "held", "{held:?}");
+        assert!(!sim.seen().iter().any(|c| c == "play" || c.starts_with("load")), "a disarmed robot was asked to do something: {:?}", sim.seen());
+
+        show.set_armed("ur1", true).unwrap();
+        let m = show.try_cue("ur1", "OPEN_ARM").await.unwrap();
+        assert_eq!(m["status"], "running", "{m}");
+        assert!(m["note"].as_str().unwrap().contains("read back"), "{m}");
+        assert_eq!(sim.snapshot().program, "PLAYING");
+        let seen = sim.seen();
+        assert!(seen.iter().any(|c| c == "load OPEN_ARM.urp") && seen.iter().any(|c| c == "play"), "{seen:?}");
+        assert!(never_sent(&seen), "PCHI sent a forbidden command: {seen:?}");
+    }
+
+    #[tokio::test]
+    async fn a_robot_that_says_no_is_refused_in_its_own_words_and_the_report_counts_it_as_a_problem() {
+        let sim = ursim::UrSim::start(&["OPEN_ARM"]).await.unwrap();
+        let show = ur_show(&sim, true).await;
+        let mut rx = show.subscribe();
+        show.set_armed("ur1", true).unwrap();
+        sim.fault("refuse-play").unwrap();
+        let m = show.try_cue("ur1", "OPEN_ARM").await.unwrap();
+        assert_eq!(m["status"], "refused", "{m}");
+        assert!(m["error"].as_str().unwrap().contains("Failed to execute: play"), "{m}");
+        assert_eq!(sim.snapshot().program, "STOPPED", "a refused request must not leave the robot running");
+        let r = show.run_report();
+        assert_eq!(r["summary"]["failed"], 1, "{}", r["summary"]);
+        let _ = deliveries(&mut rx);
+    }
+
+    #[tokio::test]
+    async fn a_fault_disarms_the_robot_holds_cues_and_stays_held_after_the_fault_clears_until_a_person_arms_it() {
+        let sim = ursim::UrSim::start(&["OPEN_ARM"]).await.unwrap();
+        let show = ur_show(&sim, true).await;
+        let mut rx = show.subscribe();
+        show.set_armed("ur1", true).unwrap();
+        let ready = |show: &Arc<Show>| show.snapshot()["readiness"]["ur1"]["ready"].clone();
+        // it reads ready first
+        let end = tokio::time::Instant::now() + Duration::from_secs(4);
+        while ready(&show) != json!(true) {
+            assert!(tokio::time::Instant::now() < end, "never read ready: {}", show.snapshot()["readiness"]);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        sim.fault("protective-stop").unwrap();
+        let fault = wait_for(&mut rx, |m| m["type"] == "fault").await.expect("a fault message");
+        assert!(fault["why"].as_str().unwrap().contains("PROTECTIVE_STOP"), "{fault}");
+        assert_eq!(show.snapshot()["devices"][0]["armed"], false, "a robot that faults is disarmed");
+        assert_eq!(ready(&show), json!(false));
+        assert!(show.snapshot()["readiness"]["ur1"]["note"].as_str().unwrap().contains("PROTECTIVE_STOP"));
+        // a person arms it while it is still faulted: the cue is held, with the robot's reason
+        show.set_armed("ur1", true).unwrap();
+        let m = show.try_cue("ur1", "OPEN_ARM").await.unwrap();
+        assert_eq!(m["status"], "held", "{m}");
+        assert!(m["error"].as_str().unwrap().contains("PROTECTIVE_STOP"), "{m}");
+        assert!(!sim.seen().iter().any(|c| c == "play"), "a stopped robot was asked to play");
+        // the fault clears: it reads ready again, and is NOT armed again by itself
+        sim.fault("healthy").unwrap();
+        show.set_armed("ur1", false).unwrap();
+        let end = tokio::time::Instant::now() + Duration::from_secs(4);
+        while ready(&show) != json!(true) {
+            assert!(tokio::time::Instant::now() < end, "never read ready again");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(show.snapshot()["devices"][0]["armed"], false);
+        assert_eq!(show.try_cue("ur1", "OPEN_ARM").await.unwrap()["status"], "held");
+        show.set_armed("ur1", true).unwrap();
+        assert_eq!(show.try_cue("ur1", "OPEN_ARM").await.unwrap()["status"], "running");
+    }
+
+    #[tokio::test]
+    async fn stop_motion_reaches_the_robot_as_a_stop_and_is_reported_accepted_not_done() {
+        let sim = ursim::UrSim::start(&["OPEN_ARM"]).await.unwrap();
+        let show = ur_show(&sim, true).await;
+        let mut rx = show.subscribe();
+        show.set_armed("ur1", true).unwrap();
+        assert_eq!(show.try_cue("ur1", "OPEN_ARM").await.unwrap()["status"], "running");
+        let r = show.motion_stop();
+        assert_eq!(r["stopped"], json!(["ur1"]));
+        assert_eq!(show.snapshot()["devices"][0]["armed"], false);
+        let d = wait_for(&mut rx, |m| m["type"] == "delivery" && m["kind"] == "motion.stop").await.expect("a stop delivery");
+        assert_eq!(d["status"], "accepted", "{d}");
+        assert_eq!(sim.snapshot().program, "STOPPED");
+        assert!(r["notes"].as_array().unwrap().is_empty(), "a robot with stop steps is not told 'no stop message is known': {r}");
+    }
+
+    #[tokio::test]
+    async fn a_test_of_a_robot_only_reads_and_a_dry_run_touches_nothing() {
+        let sim = ursim::UrSim::start(&["OPEN_ARM"]).await.unwrap();
+        let show = ur_show(&sim, true).await;
+        show.set_armed("ur1", true).unwrap();
+        let t = show.test_fire("ur1").await.unwrap();
+        assert_eq!(t["status"], "accepted", "{t}");
+        let seen = sim.seen();
+        assert!(!seen.is_empty() && !seen.iter().any(|c| matches!(c.as_str(), "play" | "pause" | "stop") || c.starts_with("load")), "a test must only read: {seen:?}");
+        // not sending: not one connection is made
+        let sim2 = ursim::UrSim::start(&["OPEN_ARM"]).await.unwrap();
+        let dry = ur_show(&sim2, false).await;
+        dry.apply("studio", "START");
+        tokio::time::sleep(Duration::from_millis(1_300)).await;
+        assert!(sim2.seen().is_empty(), "a dry run sent something: {:?}", sim2.seen());
+        assert_eq!(dry.try_cue("ur1", "OPEN_ARM").await.unwrap()["status"], "held");
+        dry.set_armed("ur1", true).unwrap();
+        assert_eq!(dry.try_cue("ur1", "OPEN_ARM").await.unwrap()["status"], "dry-run");
+        assert!(sim2.seen().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_doors_check_fails_a_cue_whose_program_is_not_on_the_robots_allow_list() {
+        let check = |programs: Option<&str>| {
+            let out = Output::new(vec![ur_device(9, programs)], false);
+            let show = Show::start_with(motion_quick(), EventStore::open_in_memory().unwrap(), Some(out)).unwrap();
+            show.preflight()["checks"].as_array().unwrap().iter().filter(|c| c["area"] == "cue" && c["level"] == "fail" && c["device"] == "ur1").map(|c| c["text"].as_str().unwrap().to_string()).collect::<Vec<_>>()
+        };
+        assert!(check(Some("OPEN_ARM")).is_empty(), "an allowed program is fine");
+        let not_listed = check(Some("PARK"));
+        assert!(not_listed.iter().any(|t| t.contains("not on UR's list of allowed programs")), "{not_listed:?}");
+        let none = check(None);
+        assert!(none.iter().any(|t| t.contains("no list of allowed programs")), "{none:?}");
+    }
+
+    #[tokio::test]
+    async fn a_ur_in_a_show_file_reads_its_program_list_and_defaults_its_port() {
+        let file = r#"{"showchart": {"initial":"A","states":[{"id":"A"}],"transitions":[]},"nodes":[{"id":"arm","type":"ur","params":{"host":"10.0.0.9","programs":"OPEN_ARM, PARK"}},{"id":"arm2","type":"ur","params":{"host":"10.0.0.10","port":30000,"programs":["A","B"]}}]}"#;
+        let (_, devices) = rig::load(file).unwrap();
+        let devices = devices.unwrap();
+        assert_eq!((devices[0].dept.as_str(), devices[0].address().as_deref(), devices[0].programs.as_deref()), ("motion", Some("10.0.0.9:29999"), Some("OPEN_ARM, PARK")));
+        assert_eq!((devices[1].address().as_deref(), devices[1].programs.as_deref()), (Some("10.0.0.10:30000"), Some("A,B")));
+        assert_eq!(textlink::allowed_programs(&devices[0]), ["OPEN_ARM", "PARK"]);
     }
 
     fn osc_bytes(addr: &str) -> Vec<u8> {
@@ -4890,7 +5140,7 @@ mod tests {
     // ---- DMX over the network: a lighting cue becomes Art-Net or sACN ----
 
     fn dmx_device(kind: &str, port: u16) -> rig::Device {
-        rig::Device { id: "d1".into(), label: "Rack".into(), kind: kind.into(), dept: "lighting".into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None, profile: None, universe: Some(if kind == "sacn" { 1 } else { 0 }), patch: None, password: None }
+        rig::Device { id: "d1".into(), label: "Rack".into(), kind: kind.into(), dept: "lighting".into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None, profile: None, universe: Some(if kind == "sacn" { 1 } else { 0 }), patch: None, password: None, programs: None }
     }
 
     fn lit(look: &str) -> Showchart {
@@ -5095,7 +5345,7 @@ mod tests {
     // ---- OBS as a device: a cue cuts the picture ----
 
     fn obs_device(port: u16) -> rig::Device {
-        rig::Device { id: "obs1".into(), label: "OBS".into(), kind: "obs".into(), dept: "visual".into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None, profile: None, universe: None, patch: None, password: None }
+        rig::Device { id: "obs1".into(), label: "OBS".into(), kind: "obs".into(), dept: "visual".into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None, profile: None, universe: None, patch: None, password: None, programs: None }
     }
 
     #[tokio::test]

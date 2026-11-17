@@ -431,7 +431,7 @@ mod tests {
     use serde_json::json;
 
     fn dev(kind: &str, host: Option<&str>, port: Option<u16>, universe: Option<u32>) -> Device {
-        Device { id: "d1".into(), label: "Rack".into(), kind: kind.into(), dept: "lighting".into(), host: host.map(String::from), port, listen_port: None, profile: None, universe, patch: None, password: None }
+        Device { id: "d1".into(), label: "Rack".into(), kind: kind.into(), dept: "lighting".into(), host: host.map(String::from), port, listen_port: None, profile: None, universe, patch: None, password: None, programs: None }
     }
 
     fn look(v: &str) -> Action {

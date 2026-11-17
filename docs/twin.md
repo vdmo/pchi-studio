@@ -9,6 +9,9 @@ curl 127.0.0.1:3400/seen/grandma-1                      # what the lighting desk
 curl -X POST 127.0.0.1:3400/fault -d '{"device":"grandma-1","fault":"down"}'
 ```
 
+
+**A pretend UR.** A device of type `ur` (Universal Robots, see [ur.md](ur.md)) gets a pretend Dashboard Server instead of a UDP socket: it answers the commands in UR's manual, writes down every command it was sent (`GET /seen/<id>` shows them, so you can prove what PCHI never sent), and takes the faults `protective-stop`, `local-control`, `refuse-play`, `down` and `healthy` (`POST /fault`). It is written from the manual, not from a real controller.
+
 ## What a twin does
 
 Each UDP device in the rig (OSC tools, Art-Net, sACN) gets one twin: a socket on a free loopback port. `pchi-twin` writes a **copy** of the show with each device's `host` and `port` changed to its twin (and `listen_port` removed, so nothing else is bound); your show file is not touched. The twin:

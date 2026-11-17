@@ -1,0 +1,32 @@
+{
+  "version": "1.0",
+  "project": "UR demo",
+  "name": "ur-demo",
+  "nodes": [
+    { "id": "ur-1", "type": "ur", "label": "UR arm", "position": { "x": 0, "y": 0 }, "dept": "motion", "params": { "host": "127.0.0.1", "port": 29999, "programs": "PARK, OPEN_ARM" } }
+  ],
+  "edges": [],
+  "timeline": [],
+  "assets": [],
+  "showchart": {
+    "id": "ur-demo",
+    "name": "UR demo",
+    "initial": "PARKED",
+    "states": [
+      { "id": "PARKED", "label": "Parked", "timeline": { "duration_ms": 3000, "lanes": [
+        { "id": "motion", "name": "Motion", "dept": "motion", "cues": [
+          { "id": "m0", "at_ms": 500, "num": 1, "action": { "kind": "motion.run", "payload": { "program": "PARK" } } } ] }
+      ] } },
+      { "id": "REVEAL", "label": "Reveal", "timeline": { "duration_ms": 6000, "lanes": [
+        { "id": "motion", "name": "Motion", "dept": "motion", "cues": [
+          { "id": "m1", "at_ms": 500, "num": 2, "action": { "kind": "motion.run", "payload": { "program": "OPEN_ARM" } } } ] }
+      ] } },
+      { "id": "END", "label": "End" }
+    ],
+    "transitions": [
+      { "source": "PARKED", "target": "REVEAL", "event": "REVEAL" },
+      { "source": "REVEAL", "target": "PARKED", "event": "PARK" },
+      { "source": "REVEAL", "target": "END", "event": "END" }
+    ]
+  }
+}

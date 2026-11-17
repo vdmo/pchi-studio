@@ -183,7 +183,7 @@ pub fn view(records: &[EventRecord]) -> Result<Value, String> {
             }
             "show.delivery" => {
                 let status = p["status"].as_str().unwrap_or("");
-                let ok = matches!(status, "sent" | "dry-run");
+                let ok = matches!(status, "sent" | "dry-run" | "accepted" | "running");
                 if !ok {
                     bad += 1;
                 }

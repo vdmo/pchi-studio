@@ -41,7 +41,16 @@ async fn seen(State(s): State<Shared>, Path(id): Path<String>) -> Json<Value> {
 
 async fn fault(State(s): State<Shared>, Json(b): Json<Value>) -> (axum::http::StatusCode, Json<Value>) {
     let id = b["device"].as_str().unwrap_or("");
-    match Fault::parse(b["fault"].as_str().unwrap_or("")).and_then(|f| s.0.set_fault(id, f).map(|_| f)) {
+    let word = b["fault"].as_str().unwrap_or("");
+    // a name only a pretend controller has (protective-stop ...), else healthy / down / lag:<ms>
+    let named = if Fault::parse(word).is_err() { Some(s.0.set_named_fault(id, word)) } else { None };
+    if let Some(r) = named {
+        return match r {
+            Ok(()) => (axum::http::StatusCode::OK, Json(json!({"device": id, "fault": word}))),
+            Err(e) => (axum::http::StatusCode::BAD_REQUEST, Json(json!({"error": e}))),
+        };
+    }
+    match Fault::parse(word).and_then(|f| s.0.set_fault(id, f).map(|_| f)) {
         Ok(f) => (axum::http::StatusCode::OK, Json(json!({"device": id, "fault": f.text()}))),
         Err(e) => (axum::http::StatusCode::BAD_REQUEST, Json(json!({"error": e}))),
     }

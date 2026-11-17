@@ -26,6 +26,9 @@ pub struct Device {
     /// A password for the tool (OBS). Never sent to clients or written to the record.
     #[serde(skip)]
     pub password: Option<String>,
+    /// For a device that runs named programs (a robot): the names it may be asked to run, separated by commas. Nothing else is ever run:
+    /// without a list, a cue to such a device is refused. These are programs the robot's own programmer wrote and validated.
+    pub programs: Option<String>,
 }
 
 impl Device {
@@ -40,11 +43,16 @@ impl Device {
 
     /// Devices that are reached by their own protocol (DMX, OBS) rather than by OSC messages.
     pub fn is_direct(&self) -> bool {
-        Self::is_direct_kind(&self.kind)
+        Self::is_direct_kind(&self.kind) || self.is_link()
     }
 
     pub fn is_direct_kind(kind: &str) -> bool {
-        kind == "obs" || crate::dmx::proto_of(kind).is_some()
+        kind == "obs" || crate::dmx::proto_of(kind).is_some() || crate::textlink::get(kind).is_some()
+    }
+
+    /// A device driven by a line of text over TCP, described by a link profile (see `textlink`): a robot's own command interface.
+    pub fn is_link(&self) -> bool {
+        crate::textlink::get(self.profile_key()).is_some()
     }
 
     pub fn address(&self) -> Option<String> {
@@ -53,7 +61,8 @@ impl Device {
             let u = self.universe.unwrap_or(1) as u16;
             return Some(format!("{}:{}", crate::dmx::sacn_multicast(u), self.port.unwrap_or(5568)));
         }
-        match (&self.host, self.port) {
+        let port = self.port.or_else(|| crate::textlink::get(self.profile_key()).and_then(|p| p.port));
+        match (&self.host, port) {
             (Some(h), Some(p)) if !h.trim().is_empty() => Some(format!("{}:{}", h.trim(), p)),
             _ => None,
         }
@@ -67,7 +76,7 @@ pub fn dept_of_type(t: &str) -> Option<&'static str> {
         "lighting" | "lighting-desk" | "grandma3" | "eos" | "magicq" | "artnet" | "sacn" => "lighting",
         "laser" | "beyond" => "laser",
         "audio-zone" | "audio-console" | "audio-agent" | "x32" | "qlab" => "audio",
-        "motion" => "motion",
+        "motion" | "ur" => "motion",
         _ => return None,
     })
 }
@@ -131,12 +140,17 @@ fn device_of(n: &Value) -> Option<Device> {
     let listen_port = params.and_then(|p| p.get("listen_port")).and_then(|p| p.as_u64().or_else(|| p.as_str().and_then(|s| s.trim().parse().ok()))).and_then(|p| u16::try_from(p).ok()).filter(|p| *p > 0);
     let id = n.get("id")?.as_str()?.to_string();
     let password = params.and_then(|p| p.get("password")).and_then(Value::as_str).map(str::to_string).filter(|s| !s.is_empty());
+    let programs = params.and_then(|p| p.get("programs")).and_then(|v| match v {
+        Value::String(s) => Some(s.trim().to_string()),
+        Value::Array(a) => Some(a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(",")),
+        _ => None,
+    }).filter(|s| !s.is_empty());
     let patch = params.and_then(|p| p.get("patch")).and_then(Value::as_str).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     // DMX devices have standard ports and universes
     let proto = crate::dmx::proto_of(&kind);
     let port = port.or(proto.map(|p| p.default_port()));
     let universe = params.and_then(|p| p.get("universe")).and_then(|p| p.as_u64().or_else(|| p.as_str().and_then(|s| s.trim().parse().ok()))).and_then(|u| u32::try_from(u).ok()).or(proto.map(|p| p.default_universe()));
-    Some(Device { label: n.get("label").and_then(Value::as_str).unwrap_or(&id).to_string(), id, kind, dept, host, port, listen_port, profile, universe, patch, password })
+    Some(Device { label: n.get("label").and_then(Value::as_str).unwrap_or(&id).to_string(), id, kind, dept, host, port, listen_port, profile, universe, patch, password, programs })
 }
 
 /// The device that handles a cue: the lane's chosen one, else the only device of
@@ -158,7 +172,7 @@ mod tests {
     use super::*;
 
     fn dev(id: &str, kind: &str) -> Device {
-        Device { id: id.into(), label: id.into(), kind: kind.into(), dept: dept_of_type(kind).unwrap().into(), host: Some("127.0.0.1".into()), port: Some(9000), listen_port: None, profile: None, universe: None, patch: None, password: None }
+        Device { id: id.into(), label: id.into(), kind: kind.into(), dept: dept_of_type(kind).unwrap().into(), host: Some("127.0.0.1".into()), port: Some(9000), listen_port: None, profile: None, universe: None, patch: None, password: None, programs: None }
     }
 
     #[test]

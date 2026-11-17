@@ -243,7 +243,7 @@ mod tests {
     }
 
     fn dev(port: u16, password: Option<&str>) -> Device {
-        Device { id: "obs1".into(), label: "OBS".into(), kind: "obs".into(), dept: "visual".into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None, profile: None, universe: None, patch: None, password: password.map(String::from) }
+        Device { id: "obs1".into(), label: "OBS".into(), kind: "obs".into(), dept: "visual".into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None, profile: None, universe: None, patch: None, password: password.map(String::from), programs: None }
     }
 
     fn scene(n: &str) -> Action {

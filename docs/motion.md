@@ -1,6 +1,6 @@
 # Motion: robots and moving rigs
 
-Step 1 of the [robotics plan](robotics-plan.md), and the safety behaviour that every robot driver will sit on. It is the `motion` department: a robot arm, a moving rig or any machine that can hurt someone. **There is no driver for a real robot yet** (UR and KUKA are the next steps, see [robotics-kuka-ur.md](robotics-kuka-ur.md)). What exists is the gate, the roles, the stop, the drill and a pretend device to build against.
+Step 1 of the [robotics plan](robotics-plan.md), and the safety behaviour that every robot driver will sit on. It is the `motion` department: a robot arm, a moving rig or any machine that can hurt someone. **There is no driver for KUKA yet**; Universal Robots has one ([ur.md](ur.md)), tested only against a pretend UR. What exists is the gate, the roles, the stop, the drill and a pretend device to build against.
 
 ## The one rule
 

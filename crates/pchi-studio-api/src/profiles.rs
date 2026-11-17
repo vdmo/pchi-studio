@@ -478,7 +478,7 @@ pub fn list() -> Vec<Arc<Profile>> {
 
 /// The department a profile's devices serve, for a device that names it.
 pub fn dept_of(id: &str) -> Option<String> {
-    get(id).map(|p| p.dept.clone())
+    get(id).map(|p| p.dept.clone()).or_else(|| crate::textlink::dept_of(id))
 }
 
 /// Add the profile files (`*.json`, each one profile or a list of them) in `dir`. A file with a built-in's id replaces it.
@@ -488,15 +488,18 @@ pub fn load_dir(dir: &Path) -> Result<Vec<String>, String> {
     let mut files: Vec<_> = std::fs::read_dir(dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "json")).collect();
     files.sort();
     let mut loaded: Vec<Profile> = Vec::new();
+    let mut link_lines: Vec<String> = Vec::new();
     for f in &files {
         let text = std::fs::read_to_string(f).map_err(|e| format!("{}: {e}", f.display()))?;
         let v: Value = serde_json::from_str(&text).map_err(|e| format!("{}: not valid JSON: {e}", f.display()))?;
         let items: Vec<Value> = if let Value::Array(a) = v { a } else { vec![v] };
-        for item in items {
+        let (links, osc): (Vec<Value>, Vec<Value>) = items.into_iter().partition(crate::textlink::is_link_json);
+        link_lines.extend(crate::textlink::load_values(links, &f.display().to_string())?);
+        for item in osc {
             loaded.push(Profile::from_json(&item.to_string(), false).map_err(|e| format!("{}: {e}", f.display()))?);
         }
     }
-    let mut lines = Vec::new();
+    let mut lines = link_lines;
     let mut reg = registry().write().unwrap();
     for p in loaded {
         let replaced = reg.get(&p.id).map(|o| o.built_in);

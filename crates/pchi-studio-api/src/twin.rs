@@ -78,6 +78,8 @@ struct Dev {
 }
 
 pub struct Twin {
+    /// Pretend controllers for devices driven by a text interface (a UR): they answer like the real thing and write down every command.
+    urs: BTreeMap<String, crate::ursim::UrSim>,
     devs: Arc<Mutex<BTreeMap<String, Dev>>>,
     rig: Vec<Device>,
     skipped: Vec<(String, String)>,
@@ -115,7 +117,22 @@ impl Twin {
     pub async fn start(devices: &[Device]) -> Result<Twin, String> {
         let devs: Arc<Mutex<BTreeMap<String, Dev>>> = Arc::default();
         let (mut rig, mut skipped, mut tasks) = (Vec::new(), Vec::new(), Vec::new());
+        let mut urs: BTreeMap<String, crate::ursim::UrSim> = BTreeMap::new();
         for d in devices {
+            if d.is_link() && d.kind == "ur" {
+                // a Universal Robots controller: the pretend one has the device's allowed programs "on the robot"
+                let names = crate::textlink::allowed_programs(d);
+                let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+                let sim = crate::ursim::UrSim::start(&refs).await?;
+                devs.lock().unwrap().insert(d.id.clone(), Dev { fault: Fault::Healthy, seen: Vec::new(), kind: d.kind.clone(), dept: d.dept.clone(), label: d.label.clone() });
+                let mut twinned = d.clone();
+                twinned.host = Some("127.0.0.1".into());
+                twinned.port = Some(sim.port);
+                twinned.listen_port = None;
+                rig.push(twinned);
+                urs.insert(d.id.clone(), sim);
+                continue;
+            }
             if d.kind == "obs" {
                 skipped.push((d.id.clone(), "OBS is reached by a websocket: it has no twin".to_string()));
                 rig.push(d.clone());
@@ -166,7 +183,7 @@ impl Twin {
                 }
             }));
         }
-        Ok(Twin { devs, rig, skipped, tasks })
+        Ok(Twin { urs, devs, rig, skipped, tasks })
     }
 
     /// The rig with every twinned device's host and port pointed at its twin (and no listen port, so nothing else is bound).
@@ -179,7 +196,22 @@ impl Twin {
         &self.skipped
     }
 
+    /// A fault only a pretend controller has (`protective-stop`, `local-control`, `refuse-play`): see `ursim`.
+    pub fn set_named_fault(&self, id: &str, name: &str) -> Result<(), String> {
+        match self.urs.get(id) {
+            Some(sim) => sim.fault(name),
+            None => Err(format!("'{name}' is not a fault: use healthy, down or lag:<milliseconds> (a UR twin also takes protective-stop, local-control and refuse-play)")),
+        }
+    }
+
     pub fn set_fault(&self, id: &str, fault: Fault) -> Result<(), String> {
+        if let Some(sim) = self.urs.get(id) {
+            return match fault {
+                Fault::Healthy => sim.fault("healthy"),
+                Fault::Down => sim.fault("down"),
+                Fault::Lag(_) => Err("a UR twin does not lag: use down, protective-stop, local-control or refuse-play".into()),
+            };
+        }
         let mut g = self.devs.lock().unwrap();
         g.get_mut(id).map(|d| d.fault = fault).ok_or_else(|| format!("no twin device '{id}'"))
     }
@@ -190,6 +222,11 @@ impl Twin {
 
     /// Everything one device has received, oldest first.
     pub fn seen(&self, id: &str) -> Vec<Seen> {
+        if let Some(sim) = self.urs.get(id) {
+            // a UR twin writes down commands, not OSC: each is shown as one message whose address is the command text
+            let at = now_ms();
+            return sim.seen().into_iter().map(|c| Seen { at_ms: at, acted_ms: Some(at), address: c, args: Vec::new() }).collect();
+        }
         self.devs.lock().unwrap().get(id).map(|d| d.seen.clone()).unwrap_or_default()
     }
 
@@ -199,6 +236,9 @@ impl Twin {
     }
 
     pub fn clear(&self) {
+        for sim in self.urs.values() {
+            sim.with(|s| s.seen.clear());
+        }
         for d in self.devs.lock().unwrap().values_mut() {
             d.seen.clear();
         }
@@ -211,7 +251,13 @@ impl Twin {
     /// Every device with its state, as JSON (the twin's own report).
     pub fn json(&self) -> Value {
         let g = self.devs.lock().unwrap();
-        json!(g.iter().map(|(id, d)| json!({"id": id, "label": d.label, "type": d.kind, "dept": d.dept, "fault": d.fault.text(), "received": d.seen.len(), "acted": d.seen.iter().filter(|s| s.acted_ms.is_some()).count()})).collect::<Vec<_>>())
+        json!(g.iter().map(|(id, d)| match self.urs.get(id) {
+            Some(sim) => {
+                let st = sim.snapshot();
+                json!({"id": id, "label": d.label, "type": d.kind, "dept": d.dept, "fault": if st.down { "down".to_string() } else if st.safety != "NORMAL" { st.safety.to_lowercase().replace('_', "-") } else if !st.remote { "local-control".to_string() } else if st.refuse_play { "refuse-play".to_string() } else { "healthy".to_string() }, "received": st.seen.len(), "acted": st.seen.len(), "program": st.program, "loaded": st.loaded})
+            }
+            None => json!({"id": id, "label": d.label, "type": d.kind, "dept": d.dept, "fault": d.fault.text(), "received": d.seen.len(), "acted": d.seen.iter().filter(|s| s.acted_ms.is_some()).count()}),
+        }).collect::<Vec<_>>())
     }
 
     /// Say, to a runtime, that a department is standing by (or on hold), as the person at that desk would.
@@ -256,7 +302,7 @@ mod tests {
     use pchi_showchart::Action;
 
     fn dev(id: &str, kind: &str) -> Device {
-        Device { id: id.into(), label: id.into(), kind: kind.into(), dept: crate::rig::dept_of_type(kind).unwrap().into(), host: Some("10.9.9.9".into()), port: Some(1), listen_port: Some(9999), profile: None, universe: None, patch: None, password: None }
+        Device { id: id.into(), label: id.into(), kind: kind.into(), dept: crate::rig::dept_of_type(kind).unwrap().into(), host: Some("10.9.9.9".into()), port: Some(1), listen_port: Some(9999), profile: None, universe: None, patch: None, password: None, programs: None }
     }
 
     #[test]
