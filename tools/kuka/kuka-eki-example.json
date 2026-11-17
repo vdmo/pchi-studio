@@ -1,0 +1,54 @@
+{
+  "id": "kuka-eki-example",
+  "name": "KUKA via EthernetKRL (EXAMPLE: adapt to the site)",
+  "transport": "tcp-text",
+  "dept": "motion",
+  "kinds": ["motion.run", "motion.pause", "motion.stop"],
+  "value": "[A-Z][A-Z0-9_]{0,31}",
+  "needs_programs": true,
+  "hint": "the name of a program the robot's receiver knows (upper case letters, digits and _): it must also be on the device's list of allowed programs",
+  "request_end": "",
+  "reply_until": "</Reply>",
+  "never": ["power", "brake", "reset", "acknowledge", "ack_fault", "mode", "override", "ov_pro", "ext_start", "bypass", "safety"],
+  "actions": {
+    "motion.run": {
+      "steps": [
+        {"send": "<Cmd><Run>{0}</Run></Cmd>", "expect": "<Reply><Ack>OK</Ack></Reply>", "fail": "the robot would not run {0}: {reply}"}
+      ],
+      "confirm": {"send": "<Cmd><Status/></Cmd>", "expect": ".*<State>RUNNING</State>.*", "within_ms": 3000, "every_ms": 250}
+    },
+    "motion.pause": {
+      "steps": [{"send": "<Cmd><Pause/></Cmd>", "expect": "<Reply><Ack>OK</Ack></Reply>", "fail": "the robot would not pause: {reply}"}],
+      "confirm": {"send": "<Cmd><Status/></Cmd>", "expect": ".*<State>PAUSED</State>.*", "within_ms": 2000, "every_ms": 250}
+    },
+    "motion.stop": {
+      "steps": [{"send": "<Cmd><Stop/></Cmd>", "expect": "<Reply><Ack>OK</Ack></Reply>", "fail": "the robot would not stop: {reply}"}],
+      "confirm": {"send": "<Cmd><Status/></Cmd>", "expect": ".*<State>IDLE</State>.*", "within_ms": 3000, "every_ms": 250}
+    }
+  },
+  "status": {
+    "poll_ms": 1000,
+    "reads": [
+      {
+        "send": "<Cmd><Status/></Cmd>",
+        "expect": "<Reply>.*</Reply>",
+        "extract": {
+          "remote": "<Remote>(\\w+)</Remote>",
+          "safety": "<Safety>([^<]*)</Safety>",
+          "state": "<State>(\\w+)</State>"
+        }
+      }
+    ],
+    "ready_when": [
+      {"var": "remote", "equals": "true", "why": "it is not accepting commands from outside"},
+      {"var": "safety", "equals": "OK", "why": "its safety status is {value}"},
+      {"var": "state", "one_of": ["IDLE", "RUNNING", "PAUSED"], "why": "its state is {value}"}
+    ]
+  },
+  "stop": [
+    {"send": "<Cmd><Stop/></Cmd>", "expect": "<Reply><Ack>OK</Ack></Reply>", "fail": "the robot did not acknowledge the stop request: {reply}"}
+  ],
+  "basis": "memory",
+  "source": "PCHI's own message contract (docs/kuka.md), NOT a KUKA format. EthernetKRL lets a program on the robot exchange XML with an outside system, and the XML is defined by that site's own configuration: this is what a receiver written for PCHI would have to send and accept.",
+  "notes": "An EXAMPLE. It does nothing until the robot's programmer has written a receiver that speaks this contract and has validated every program it can run, and the commands, element names and states here have been agreed with them. Not tested against any KUKA robot, simulator or controller: only against a pretend XML device in the runtime's tests. A PCHI stop is a software request over a network, NOT an emergency stop."
+}

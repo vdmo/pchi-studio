@@ -34,10 +34,12 @@ The point of a file and not code: a robot's command language belongs to the robo
 - **`value`** is the pattern the cue's value (the program name) must match completely. It is the only part of a command a cue can influence, and it goes into `{0}`. Use a strict pattern: no spaces, no punctuation you do not need.
 - **`needs_programs`**: the value must also be on the device's own `programs` list (a rig node parameter). The default for a robot is that nothing may be run.
 - **`steps`** run in order, each: `send` (a template; `{0}` is the only placeholder, and a command is one line), `expect` (a pattern the **whole reply** must match; if not, the request is `refused` with `fail`, where `{reply}` is what the device said, and **nothing further is sent**), `store` (keep the reply, or its first group, as a variable), `skip_if` (skip this step if a stored variable matches).
+- **`request_end`** and **`reply_until`** (for a device that frames its own messages, such as XML): `request_end` is what is appended to a request (`"\n"` by default, `"\r\n"`, or `""` for nothing); `reply_until` is the text that ends a reply (`"</Reply>"`), read however it arrives in pieces, up to 64 KB. Without it a reply is one line.
+- **A status read** may use `"extract": {"state": "<State>(\w+)</State>", ...}` to take several variables out of one reply, instead of `var`.
 - **`confirm`**: a read-back repeated until it matches (`running`) or time runs out (`accepted`, honestly "not seen").
 - **`status`**: reads about every `poll_ms` while the runtime is sending. `ready_when` rules say when the device is ready; the first that fails gives the reason shown to people.
 - **`stop`**: what STOP MOTION sends.
-- **`never`**: commands this profile must never contain (compared in lower case, as a whole command or its first words). **A profile with a step that could send one is refused when it is loaded**, so an edit that adds `power on` cannot get in unnoticed.
+- **`never`**: commands this profile must never contain (compared in lower case, as a whole command or its first words). **A profile with a step that could send one is refused when it is loaded** (for XML commands too: `<Power>` or `<Brake .../>` is caught by a `never` entry `power` or `brake`), so an edit that adds `power on` cannot get in unnoticed.
 
 ## What the runtime guarantees
 

@@ -70,9 +70,14 @@ struct RawAction {
 
 #[derive(Deserialize)]
 struct RawRead {
-    var: String,
+    /// Take the first group of `expect` (or the whole reply) as this variable.
+    #[serde(default)]
+    var: Option<String>,
     send: String,
     expect: String,
+    /// Take several values out of the one reply: variable name -> a pattern whose first group is the value (searched anywhere in the reply).
+    #[serde(default)]
+    extract: BTreeMap<String, String>,
 }
 
 #[derive(Deserialize)]
@@ -110,6 +115,12 @@ struct RawLink {
     hint: String,
     #[serde(default)]
     never: Vec<String>,
+    /// What ends a request on the wire: "\n" (the default), "\r\n", or "" for a device that frames its own messages (XML).
+    #[serde(default)]
+    request_end: Option<String>,
+    /// For a device whose replies are not one line (XML): the text that ends a reply, for example "</Reply>". Without it a reply is one line.
+    #[serde(default)]
+    reply_until: Option<String>,
     actions: BTreeMap<String, RawAction>,
     #[serde(default)]
     status: Option<RawStatus>,
@@ -141,9 +152,31 @@ struct Action2 {
 }
 
 struct Read {
-    var: String,
+    var: Option<String>,
     send: String,
     expect: Regex,
+    extract: Vec<(String, Regex)>,
+}
+
+impl Read {
+    /// The variables this reply gives, each `? (reply)` when it is not in the expected form.
+    fn values(&self, reply: &str) -> BTreeMap<String, String> {
+        let mut out = BTreeMap::new();
+        if let Some(var) = &self.var {
+            let v = self.expect.captures(reply).map(|c| c.get(1).map_or(reply.to_string(), |g| g.as_str().to_string()));
+            out.insert(var.clone(), v.unwrap_or_else(|| format!("? ({reply})")));
+        }
+        for (name, re) in &self.extract {
+            let v = re.captures(reply).and_then(|c| c.get(1)).map(|g| g.as_str().trim().to_string());
+            out.insert(name.clone(), v.unwrap_or_else(|| format!("? ({reply})")));
+        }
+        out
+    }
+
+    /// Whether the reply is in the form expected: the whole-reply pattern matches, and every extraction found its value.
+    fn matches(&self, reply: &str) -> bool {
+        self.expect.is_match(reply) && self.extract.iter().all(|(_, re)| re.captures(reply).is_some_and(|c| c.get(1).is_some()))
+    }
 }
 
 struct Ready {
@@ -171,10 +204,12 @@ pub struct LinkProfile {
     ready_when: Vec<Ready>,
     poll: Duration,
     stop: Vec<Step>,
+    request_end: String,
+    reply_until: Option<String>,
 }
 
 fn full(p: &str) -> Result<Regex, String> {
-    regex::RegexBuilder::new(&format!("^(?:{p})$")).size_limit(1 << 20).build().map_err(|e| format!("pattern '{p}': {e}"))
+    regex::RegexBuilder::new(&format!("^(?:{p})$")).dot_matches_new_line(true).size_limit(1 << 20).build().map_err(|e| format!("pattern '{p}': {e}"))
 }
 
 /// A command template: printable text, with `{0}` as its only placeholder.
@@ -239,6 +274,17 @@ impl LinkProfile {
             }
         }
         let value = full(&raw.value).map_err(|e| format!("{id} value: {e}"))?;
+        let request_end = match raw.request_end.as_deref() {
+            None | Some("\n") => "\n".to_string(),
+            Some("\r\n") => "\r\n".to_string(),
+            Some("") => String::new(),
+            Some(other) => return Err(format!("{id}: request_end must be \"\\n\", \"\\r\\n\" or \"\", not {other:?}")),
+        };
+        let reply_until = match raw.reply_until.as_deref() {
+            None => None,
+            Some(u) if !u.is_empty() && u.len() <= 64 && !u.chars().any(|c| c.is_control()) => Some(u.to_string()),
+            Some(u) => return Err(format!("{id}: reply_until {u:?} must be 1 to 64 printable characters")),
+        };
         let never: Vec<String> = raw.never.iter().map(|n| n.trim().to_ascii_lowercase()).filter(|n| !n.is_empty()).collect();
         let mut sent: Vec<(String, String)> = Vec::new(); // (where, command)
         let mut actions = BTreeMap::new();
@@ -285,10 +331,18 @@ impl LinkProfile {
                     return Err(format!("{at}: a status read has no program name to put in"));
                 }
                 sent.push((at.clone(), r.send.clone()));
-                reads.push(Read { var: r.var.clone(), send: r.send.clone(), expect: full(&r.expect).map_err(|e| format!("{at}: {e}"))? });
+                if r.var.is_none() && r.extract.is_empty() {
+                    return Err(format!("{at}: give a var, or extract"));
+                }
+                let mut extract = Vec::new();
+                for (name, pat) in &r.extract {
+                    let re = regex::RegexBuilder::new(pat).dot_matches_new_line(true).size_limit(1 << 20).build().map_err(|e| format!("{at} extract '{name}': {e}"))?;
+                    extract.push((name.clone(), re));
+                }
+                reads.push(Read { var: r.var.clone(), send: r.send.clone(), expect: full(&r.expect).map_err(|e| format!("{at}: {e}"))?, extract });
             }
             for r in &st.ready_when {
-                if !st.reads.iter().any(|x| x.var == r.var) {
+                if !st.reads.iter().any(|x| x.var.as_deref() == Some(r.var.as_str()) || x.extract.contains_key(&r.var)) {
                     return Err(format!("{id} ready_when: '{}' is not read by any status read", r.var));
                 }
                 if r.equals.is_none() && r.one_of.is_none() {
@@ -300,7 +354,8 @@ impl LinkProfile {
         // the never list: nothing the profile can send may begin with a forbidden command
         for (at, cmd) in &sent {
             let c = cmd.trim().to_ascii_lowercase();
-            if let Some(bad) = never.iter().find(|n| c == **n || c.starts_with(&format!("{n} "))) {
+            // a command is forbidden if it IS the phrase, begins with it, or (for XML) has it as an element: <power> or <power ...>
+            if let Some(bad) = never.iter().find(|n| c == **n || c.starts_with(&format!("{n} ")) || c.contains(&format!("<{n}>")) || c.contains(&format!("<{n} ")) || c.contains(&format!("<{n}/"))) {
                 return Err(format!("{at}: '{cmd}' is a command this profile says it must never send ('{bad}')"));
             }
         }
@@ -322,6 +377,8 @@ impl LinkProfile {
             ready_when,
             poll,
             stop,
+            request_end,
+            reply_until,
         })
     }
 
@@ -502,6 +559,43 @@ pub struct Outcome {
     pub target: String,
 }
 
+/// Send one request: the command, then the profile's terminator (a line end, or nothing for a device that frames its own messages).
+async fn write_request(r: &mut BufReader<TcpStream>, cmd: &str, end: &str) -> Result<(), String> {
+    r.get_mut().write_all(format!("{cmd}{end}").as_bytes()).await.map_err(|e| format!("could not send: {e}"))
+}
+
+/// Read one reply: a line, or (with `until`) everything up to and including that text. Bounded, so a device that never stops talking
+/// cannot fill memory. An empty connection close is an error.
+async fn read_reply(r: &mut BufReader<TcpStream>, until: Option<&str>) -> Result<String, String> {
+    match until {
+        None => {
+            let mut line = String::new();
+            match r.read_line(&mut line).await {
+                Ok(0) => Err("the device closed the connection".into()),
+                Ok(_) => Ok(line.trim().to_string()),
+                Err(e) => Err(format!("could not read: {e}")),
+            }
+        }
+        Some(u) => {
+            let last = *u.as_bytes().last().ok_or("empty reply_until")?;
+            let mut buf: Vec<u8> = Vec::new();
+            loop {
+                match r.read_until(last, &mut buf).await {
+                    Ok(0) => return Err("the device closed the connection".into()),
+                    Ok(_) => {}
+                    Err(e) => return Err(format!("could not read: {e}")),
+                }
+                if buf.ends_with(u.as_bytes()) {
+                    return Ok(String::from_utf8_lossy(&buf).trim().to_string());
+                }
+                if buf.len() > 64 * 1024 {
+                    return Err("the reply was longer than 64 KB without ending: not a reply this profile expects".into());
+                }
+            }
+        }
+    }
+}
+
 // ---- a read-only look at a real device, to compare what it says with what the profile assumes ----
 
 /// One status read, as the device answered it.
@@ -552,23 +646,18 @@ pub async fn probe(profile: &LinkProfile, addr: &str) -> Result<Probe, String> {
     let mut reads = Vec::new();
     let mut vars: BTreeMap<String, String> = BTreeMap::new();
     for rd in &profile.reads {
-        let mut item = ProbeRead { var: rd.var.clone(), send: rd.send.clone(), reply: None, matched: false, value: None, error: None };
+        let mut item = ProbeRead { var: rd.var.clone().unwrap_or_else(|| rd.extract.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>().join(",")), send: rd.send.clone(), reply: None, matched: false, value: None, error: None };
         let go = async {
-            r.get_mut().write_all(format!("{}\n", rd.send).as_bytes()).await.map_err(|e| format!("could not send: {e}"))?;
-            let mut line = String::new();
-            match r.read_line(&mut line).await {
-                Ok(0) => Err("the device closed the connection".to_string()),
-                Ok(_) => Ok(line.trim().to_string()),
-                Err(e) => Err(format!("could not read: {e}")),
-            }
+            write_request(&mut r, &rd.send, &profile.request_end).await?;
+            read_reply(&mut r, profile.reply_until.as_deref()).await
         };
         match tokio::time::timeout(REPLY, go).await {
             Ok(Ok(reply)) => {
-                if let Some(c) = rd.expect.captures(&reply) {
+                if rd.matches(&reply) {
                     item.matched = true;
-                    let v = c.get(1).map_or(reply.clone(), |m| m.as_str().to_string());
-                    vars.insert(rd.var.clone(), v.clone());
-                    item.value = Some(v);
+                    let got = rd.values(&reply);
+                    item.value = Some(if got.len() == 1 { got.values().next().cloned().unwrap_or_default() } else { got.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(", ") });
+                    vars.extend(got);
                 }
                 item.reply = Some(reply);
                 reads.push(item);
@@ -664,13 +753,8 @@ impl Link {
         self.connect(conn).await?;
         let r = conn.stream.as_mut().ok_or("not connected")?;
         let go = async {
-            r.get_mut().write_all(format!("{cmd}\n").as_bytes()).await.map_err(|e| format!("could not send to {}: {e}", self.addr))?;
-            let mut line = String::new();
-            match r.read_line(&mut line).await {
-                Ok(0) => Err(format!("{} closed the connection", self.addr)),
-                Ok(_) => Ok(line.trim().to_string()),
-                Err(e) => Err(format!("could not read from {}: {e}", self.addr)),
-            }
+            write_request(r, cmd, &self.profile.request_end).await.map_err(|e| format!("{e} ({})", self.addr))?;
+            read_reply(r, self.profile.reply_until.as_deref()).await.map_err(|e| format!("{e} ({})", self.addr))
         };
         match tokio::time::timeout(REPLY, go).await {
             Ok(Ok(l)) => Ok(l),
@@ -781,10 +865,7 @@ impl Link {
         let mut vars = BTreeMap::new();
         for r in &self.profile.reads {
             match self.exchange(&mut conn, &r.send).await {
-                Ok(reply) => {
-                    let v = r.expect.captures(&reply).map(|c| c.get(1).map_or(reply.clone(), |m| m.as_str().to_string()));
-                    vars.insert(r.var.clone(), v.unwrap_or_else(|| format!("? ({reply})")));
-                }
+                Ok(reply) => vars.extend(r.values(&reply)),
                 Err(e) => {
                     let mut s = self.state.lock().unwrap();
                     s.state = if self.was_linked.load(std::sync::atomic::Ordering::Relaxed) { "lost" } else { "silent" };
@@ -868,7 +949,7 @@ impl TextLinks {
             // a fresh read, even though the watcher also reads: a test says what the device says now
             for r in &l.profile.reads {
                 let reply = l.exchange(&mut conn, &r.send).await.map_err(LinkError::Failed)?;
-                if r.expect.captures(&reply).is_none() {
+                if !r.matches(&reply) {
                     return Err(LinkError::Refused(format!("the device answered \"{}\" with \"{reply}\", which is not what {} expects", r.send, l.profile.name)));
                 }
             }
@@ -1162,6 +1243,133 @@ mod tests {
         assert_eq!(r.greeting, None, "no greeting is reported as none");
         assert!(!r.all_matched() && r.reads[0].reply.as_deref() == Some("unexpected words") && r.ready.is_none(), "{r:?}");
         assert!(probe(&p, "127.0.0.1:1").await.is_err());
+    }
+
+    /// A pretend robot that frames its own messages: XML, no line ends, replies written in two pieces.
+    async fn xml_robot(programs: &'static [&'static str]) -> (u16, Arc<Mutex<Vec<String>>>, Arc<Mutex<(String, String)>>) {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+        let state: Arc<Mutex<(String, String)>> = Arc::new(Mutex::new(("OK".into(), "IDLE".into()))); // (safety, state)
+        let (s2, st2) = (Arc::clone(&seen), Arc::clone(&state));
+        tokio::spawn(async move {
+            loop {
+                let Ok((sock, _)) = l.accept().await else { continue };
+                let (seen, state) = (Arc::clone(&s2), Arc::clone(&st2));
+                tokio::spawn(async move {
+                    let (rd, mut wr) = sock.into_split();
+                    let mut rd = tokio::io::BufReader::new(rd);
+                    loop {
+                        let mut buf = Vec::new();
+                        // a request ends at its closing </Cmd>
+                        loop {
+                            let mut b = Vec::new();
+                            match rd.read_until(b'>', &mut b).await {
+                                Ok(0) | Err(_) => return,
+                                Ok(_) => buf.extend(b),
+                            }
+                            if buf.ends_with(b"</Cmd>") {
+                                break;
+                            }
+                        }
+                        let req = String::from_utf8_lossy(&buf).to_string();
+                        seen.lock().unwrap().push(req.clone());
+                        let (safety, st) = state.lock().unwrap().clone();
+                        let reply = if req.contains("<Status/>") {
+                            format!("<Reply><Remote>true</Remote><Safety>{safety}</Safety><State>{st}</State></Reply>")
+                        } else if let Some(name) = req.split("<Run>").nth(1).and_then(|r| r.split("</Run>").next()) {
+                            if programs.contains(&name) && safety == "OK" {
+                                state.lock().unwrap().1 = "RUNNING".into();
+                                "<Reply><Ack>OK</Ack></Reply>".to_string()
+                            } else {
+                                format!("<Reply><Nack>cannot run {name}</Nack></Reply>")
+                            }
+                        } else if req.contains("<Stop/>") {
+                            state.lock().unwrap().1 = "IDLE".into();
+                            "<Reply><Ack>OK</Ack></Reply>".to_string()
+                        } else {
+                            "<Reply><Nack>unknown</Nack></Reply>".to_string()
+                        };
+                        // two pieces, with no newline anywhere: a reader that waits for a line would hang
+                        let (a, b) = reply.split_at(reply.len() / 2);
+                        let _ = wr.write_all(a.as_bytes()).await;
+                        tokio::time::sleep(Duration::from_millis(30)).await;
+                        let _ = wr.write_all(b.as_bytes()).await;
+                    }
+                });
+            }
+        });
+        (port, seen, state)
+    }
+
+    const XML_PROFILE: &str = r#"{"id":"xml-arm","name":"XML Arm","transport":"tcp-text","dept":"motion","kinds":["motion.run","motion.stop"],
+        "value":"[A-Z_]{1,32}","needs_programs":true,"request_end":"","reply_until":"</Reply>",
+        "never":["power","brake","reset","mode"],
+        "actions":{
+          "motion.run":{"steps":[{"send":"<Cmd><Run>{0}</Run></Cmd>","expect":"<Reply><Ack>OK</Ack></Reply>","fail":"the arm said {reply}"}],
+                        "confirm":{"send":"<Cmd><Status/></Cmd>","expect":".*<State>RUNNING</State>.*","within_ms":1500,"every_ms":100}},
+          "motion.stop":{"steps":[{"send":"<Cmd><Stop/></Cmd>","expect":"<Reply><Ack>OK</Ack></Reply>"}]}},
+        "status":{"poll_ms":500,"reads":[{"send":"<Cmd><Status/></Cmd>","expect":"<Reply>.*</Reply>","extract":{"safety":"<Safety>(\\w+)</Safety>","state":"<State>(\\w+)</State>","remote":"<Remote>(\\w+)</Remote>"}}],
+                  "ready_when":[{"var":"remote","equals":"true","why":"not remote"},{"var":"safety","equals":"OK","why":"safety is {value}"}]},
+        "stop":[{"send":"<Cmd><Stop/></Cmd>","expect":"<Reply><Ack>OK</Ack></Reply>"}]}"#;
+
+    #[tokio::test]
+    async fn a_device_that_frames_its_own_xml_messages_is_driven_with_no_line_ends_at_all() {
+        let p = Arc::new(LinkProfile::from_json(XML_PROFILE, false).unwrap());
+        registry().write().unwrap().insert("xml-arm".into(), Arc::clone(&p));
+        let (port, seen, state) = xml_robot(&["OPEN_ARM"]).await;
+        let mut d = dev(port, "OPEN_ARM");
+        d.kind = "xml-arm".into();
+        let links = TextLinks::default();
+        // a run: a request is sent with no newline, the reply (in two pieces, no newline) is read to its end, and it is read back
+        let o = links.apply(&d, &run("OPEN_ARM")).await.unwrap();
+        assert_eq!(o.status, "running", "{}", o.note);
+        assert_eq!(seen.lock().unwrap()[0], "<Cmd><Run>OPEN_ARM</Run></Cmd>", "no line end was added");
+        // a no is a no, in the device's words
+        let e = links.apply(&d, &run("OPEN_ARM")).await;
+        assert!(e.is_ok());
+        state.lock().unwrap().0 = "FAULT".into();
+        let e = links.apply(&d, &run("OPEN_ARM")).await.err().unwrap();
+        assert_eq!(e.status(), "refused");
+        assert!(e.text().contains("<Nack>cannot run OPEN_ARM</Nack>"), "{}", e.text());
+        // several values out of one reply, and the readiness rule reads them
+        let r = probe(&p, &format!("127.0.0.1:{port}")).await.unwrap();
+        assert!(r.all_matched(), "{r:?}");
+        assert_eq!(r.ready, Some(false));
+        assert_eq!(r.note, "safety is FAULT");
+        assert!(r.reads[0].value.as_deref().unwrap().contains("state=IDLE") || r.reads[0].value.as_deref().unwrap().contains("state=RUNNING"), "{:?}", r.reads[0].value);
+        state.lock().unwrap().0 = "OK".into();
+        let o = links.stop(&d).await.unwrap();
+        assert_eq!(o.status, "accepted");
+        registry().write().unwrap().remove("xml-arm");
+    }
+
+    #[test]
+    fn the_kuka_example_profile_loads_and_cannot_send_the_things_it_forbids() {
+        let p = LinkProfile::from_json(include_str!("../../../tools/kuka/kuka-eki-example.json"), false).expect("the example profile is valid");
+        assert_eq!((p.id.as_str(), p.dept.as_str(), p.basis.as_str(), p.port), ("kuka-eki-example", "motion", "memory", None));
+        let cmds = p.commands();
+        assert_eq!(cmds, ["<Cmd><Pause/></Cmd>", "<Cmd><Run>{0}</Run></Cmd>", "<Cmd><Status/></Cmd>", "<Cmd><Stop/></Cmd>"], "the example can send exactly four commands");
+        for c in &cmds {
+            let l = c.to_ascii_lowercase();
+            assert!(!["power", "brake", "reset", "mode", "override"].iter().any(|n| l.contains(&format!("<{n}"))), "{c}");
+        }
+        assert!(p.notes.contains("NOT an emergency stop") && p.source.contains("NOT a KUKA format"));
+    }
+
+    #[test]
+    fn the_never_list_also_catches_a_forbidden_command_written_as_an_xml_element() {
+        let mk = |cmd: &str| XML_PROFILE.replace("<Cmd><Stop/></Cmd>\",\"expect\":\"<Reply><Ack>OK</Ack></Reply>\"}]}", &format!("{cmd}\",\"expect\":\"<Reply><Ack>OK</Ack></Reply>\"}}]}}"));
+        assert!(LinkProfile::from_json(XML_PROFILE, false).is_ok());
+        let _ = mk;
+        for bad in ["<Cmd><Power>on</Power></Cmd>", "<Cmd><Brake release=\"1\"/></Cmd>", "<Cmd><Mode>T1</Mode></Cmd>", "<Cmd><RESET/></Cmd>"] {
+            let text = XML_PROFILE.replace("\"stop\":[{\"send\":\"<Cmd><Stop/></Cmd>\"", &format!("\"stop\":[{{\"send\":{}", serde_json::to_string(bad).unwrap()));
+            let e = LinkProfile::from_json(&text, false).err().unwrap_or_else(|| panic!("{bad} should be refused"));
+            assert!(e.contains("must never send"), "{bad}: {e}");
+        }
+        // request_end and reply_until are checked
+        assert!(LinkProfile::from_json(&XML_PROFILE.replace("\"request_end\":\"\"", "\"request_end\":\"x\""), false).err().unwrap().contains("request_end"));
+        assert!(LinkProfile::from_json(&XML_PROFILE.replace("\"reply_until\":\"</Reply>\"", "\"reply_until\":\"\""), false).err().unwrap().contains("reply_until"));
     }
 
     #[test]

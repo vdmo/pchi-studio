@@ -37,6 +37,7 @@ This is the map. Start with the first section that fits you.
 - [capture.md](capture.md): capture what a tool sends
 - [industry-tools.md](industry-tools.md): where PCHI sits next to other tools
 - [ur.md](ur.md): Universal Robots: run named programs, read state, with refusals and faults handled honestly (only run against a pretend UR so far)
+- [kuka.md](kuka.md): KUKA: what is built (XML framing, an example profile, the contract a receiver must meet), what is not, and what I need to go further
 - [ursim-check.md](ursim-check.md): the procedure for checking the UR driver against URSim and then a real robot, starting read-only
 - [link-profiles.md](link-profiles.md): describe a device driven by lines of text over TCP in a file, with a list of commands it must never send
 - [motion.md](motion.md): the motion department: robots and moving rigs, armed like lasers, with their own stop (step 1 of the robotics plan; no real robot driver yet)
