@@ -338,7 +338,7 @@ button.go:disabled { background: #1b1d25; color: #7a7f92; border-color: #2f323e;
 .live-tl > header .fold { padding: 0 8px; min-width: 28px; font-size: 13px; }
 .live-tl-body { display: flex; flex-direction: column; }
 .live-lane { flex: 1 0 32px; max-height: 76px; height: auto; }
-.live-tl-body { overflow-x: hidden; } /* the playhead at 100% must not add a horizontal scrollbar */
+.live-tl-body { overflow-x: auto; } /* sideways only when zoomed in: the inner box is exactly as wide as the body when it fits */
 
 /* --- logo --- */
 .logo { display: inline-flex; align-items: center; gap: 8px; color: #f3e6da; line-height: 1; white-space: nowrap; user-select: none; }
@@ -708,3 +708,37 @@ button.go:disabled { background: #1b1d25; color: #7a7f92; border-color: #2f323e;
 .set-h { margin: 12px 0 0; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: #8a8fa3; }
 @media print { .float-ai, .more { display: none !important; } }
 .proposal button:disabled, .float-ai button:disabled, .side button.primary:disabled { opacity: .4; cursor: not-allowed; }
+
+/* ───────── timeline strip: ruler, readout, zoom, in-place editing ───────── */
+.live-tl-inner { position: relative; min-width: 100%; display: flex; flex-direction: column; flex: 1 0 auto; overflow-x: clip; } /* the last tick and the playhead sit on the right edge: they must not add a scrollbar */
+.live-tl-inner .lname { position: sticky; left: 0; z-index: 4; }
+.live-ruler { position: sticky; top: 0; z-index: 6; display: flex; height: 22px; flex: 0 0 22px; background: #171921; border-bottom: 1px solid #2a2e3a; }
+.live-ruler .rspace { background: #171921; border-left-color: transparent; }
+.rtrack { overflow: visible; cursor: default; }
+.rtick { position: absolute; bottom: 0; width: 1px; height: 5px; background: #3a3f4f; }
+.rtick.major { height: 10px; background: #6b7084; }
+.rtick i { position: absolute; left: 3px; top: -13px; font: normal 10px/1 ui-monospace, Menlo, Consolas, monospace; color: #8a8fa3; white-space: nowrap; user-select: none; }
+.rread { position: absolute; top: 1px; transform: translateX(-50%); padding: 1px 6px; border-radius: 5px; background: #2b3040; color: #e8e9ee; font: 11px/16px ui-monospace, Menlo, Consolas, monospace; white-space: nowrap; pointer-events: none; z-index: 8; }
+.rread.drag { background: #3b82f6; color: #fff; }
+.live-hair { position: absolute; top: 22px; bottom: 0; width: 0; border-left: 1px solid #ffffff40; z-index: 2; pointer-events: none; }
+.live-hair.drag { border-left-color: #3b82f6; }
+.lcue .ltxt { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.lcue .lt { flex: 0 0 auto; margin-left: 8px; padding-right: 6px; font: 10px ui-monospace, Menlo, Consolas, monospace; color: #9aa0b4; }
+.lcue.edit { cursor: grab; touch-action: none; user-select: none; padding-right: 0; }
+.lcue.edit.moving { cursor: grabbing; z-index: 5; box-shadow: 0 4px 14px rgba(0,0,0,.45); }
+.lcue.edit:focus-visible, .lcue.sel { outline: 2px solid #3b82f6; outline-offset: 1px; z-index: 4; }
+.lgrip { align-self: stretch; flex: 0 0 8px; margin-left: 2px; cursor: ew-resize; background: linear-gradient(to right, transparent, rgba(255,255,255,.28)); }
+.ltrack.editable { cursor: cell; }
+.strip-tools { display: inline-flex; align-items: center; gap: 10px; }
+.strip-snap, .strip-time { flex-direction: row; margin-bottom: 0; white-space: nowrap; } /* the global label style stacks a label above its field */
+.strip-snap { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: #9aa0b4; }
+.strip-snap select { font-size: 12px; padding: 1px 4px; }
+.strip-zoom { display: inline-flex; border: 1px solid #2f323e; border-radius: 7px; overflow: hidden; }
+.strip-zoom button { border: 0; border-radius: 0; background: none; padding: 1px 9px; font-size: 12px; min-width: 28px; }
+.strip-zoom button:disabled { opacity: .35; cursor: default; }
+.strip-edit { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 5px 12px; font-size: 12px; background: #1a1d26; border-bottom: 1px solid #20232c; }
+.strip-edit button { padding: 2px 10px; font-size: 12px; }
+.strip-time { display: inline-flex; align-items: center; gap: 6px; color: #9aa0b4; }
+.strip-time input { width: 78px; font: 12px ui-monospace, Menlo, Consolas, monospace; color: #e8e9ee; background: #0e1014; border: 1px solid #2f323e; border-radius: 6px; padding: 3px 6px; }
+.strip-time.bad input { border-color: #ef4444; }
+@media print { .strip-tools, .strip-edit { display: none !important; } }

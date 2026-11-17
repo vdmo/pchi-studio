@@ -37,6 +37,19 @@ The graph of the show. Each node is a **scene**; each arrow is a **transition**.
 
 The **start screen** on an empty show offers templates (Festival set, Theatre show, Installation) and a text brief that *drafts* commands for you to read before pressing **Build it**. Nothing is built from a brief until you do.
 
+### The timeline strip under the canvas
+
+Select a scene on the Show tab and its timeline shows under the canvas (drag its top edge to resize it). It has the same cues as the Timeline tab and you can edit them **without leaving the Show tab**:
+
+- **A ruler with real time marks** (`m:ss`), a readout of the time under the pointer (the grid line a click would land on), and each cue labelled with its exact start time. Times are written exactly as stored: a cue at 12 250 ms reads `0:12.25`, never a rounded `0:12.3`.
+- **Move a cue** by dragging it; **change its length** by dragging its right edge. Both snap to the **Snap** grid (0.1, 0.25, 0.5 or 1 s, or none; the default is 0.25 s, remembered in this browser). Hold **Alt** to place freely. The exact time follows the pointer while you drag.
+- **Type an exact time:** click the cue and type in its **Time** field (`12.5` or `0:12.5`), then Enter. Esc cancels, and anything that is not a time is marked and refused, never applied. **Length** works the same way (empty means none).
+- **Nudge** the focused cue with ← and → (to the next grid line, so an off-grid cue lands on the grid) or Shift + ← → (one second).
+- **Add** a cue by double-clicking a lane; **remove** the focused cue with Delete (or Remove). Every change is one step of the normal undo.
+- **Zoom:** Ctrl + scroll or the − / + buttons; **Fit** shows the whole scene. Zoomed in, the ruler shows finer marks (down to tenths of a second) and the strip scrolls sideways.
+
+What it does not do: moving a cue to another lane, and choosing what a cue does (its value) are still done on the Timeline tab or the Cue sheet; a cue added here starts with no value, and the Checks panel says so. On the **Live** tab the strip has the ruler, readout and zoom but is read-only.
+
 ## Timeline tab: cues inside a scene
 
 Pick a scene; its **lanes** appear, one per department (visual, lighting, laser, audio, other). Cues sit at an offset from entering the scene.

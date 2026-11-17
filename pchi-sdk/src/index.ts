@@ -664,3 +664,4 @@ export * from './follow'
 
 export * from './validations'
 export * from './assist'
+export * from './timescale'
