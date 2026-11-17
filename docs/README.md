@@ -22,6 +22,7 @@ This is the map. Start with the first section that fits you.
 
 **Building a show**
 - [library.md](library.md): save and plan shows on the server, share them with a team
+- [side-panel.md](side-panel.md): the Checks, Code and AI panel in Studio (problems found as you edit, the show as text, an AI that can only propose)
 - [command-bar.md](command-bar.md): build and edit by typing or speaking
 - [scene-minimum.md](scene-minimum.md): a scene that must run before it can be moved on
 - [fixtures.md](fixtures.md): DMX fixture files, so a cue can say `wash1=blue`

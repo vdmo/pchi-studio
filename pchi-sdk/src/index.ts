@@ -661,3 +661,6 @@ export function scheduledCues(t?: ShowTimeline): { at_ms: number; lane: string; 
 }
 export * from './replay'
 export * from './follow'
+
+export * from './validations'
+export * from './assist'

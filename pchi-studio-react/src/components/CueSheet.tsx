@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { DEPTS, buildCueSheet, cueSheetCsv, cueTime, deptOf, duplicateCueNumbers, laneDevice, removeCue, updateCue, type PchiNode, type Showchart } from '@pchi/sdk'
+import { DEPTS, buildCueSheet, cueSheetCsv, cueTime, deptOf, duplicateCueNumbers, laneDevice, removeCue, updateCue, validateShow, validationIndex, type PchiNode, type Showchart } from '@pchi/sdk'
 import type { History } from './useHistory'
 
 interface Props {
@@ -33,6 +33,7 @@ export default function CueSheet({ chart, history, scene, onScene, onOpenTimelin
   const [q, setQ] = useState('')
   const blocks = useMemo(() => buildCueSheet(chart), [chart])
   const dups = useMemo(() => duplicateCueNumbers(chart), [chart])
+  const flagged = useMemo(() => validationIndex(validateShow(chart, nodes)).cue, [chart, nodes])
   const total = blocks.reduce((n, b) => n + b.rows.length, 0)
 
   const match = (r: { dept: string; label: string; kind: string; value: string; laneName: string }) => {
@@ -136,6 +137,11 @@ export default function CueSheet({ chart, history, scene, onScene, onOpenTimelin
                     return (
                       <tr key={`${r.scene}-${r.cueId ?? `${r.source}-${i}`}`} className={`cs-row ${r.source}`} style={{ ['--dept' as string]: d.color }}>
                         <td className="c-q">
+                          {r.cueId && flagged.get(r.cueId) && (
+                            <span className={`flag ${flagged.get(r.cueId)!.error ? 'bad' : 'warn'}`} title="This cue has a problem: see the Checks panel" role="img" aria-label="This cue has a problem">
+                              {flagged.get(r.cueId)!.error ? '⛔' : '⚠'}
+                            </span>
+                          )}
                           {editable ? (
                             <label className={dups.has(r.num ?? -1) ? 'dup' : ''} title={dups.has(r.num ?? -1) ? 'Another cue has this number' : 'Cue number: kept when cues are added, moved or deleted. Use 12.5 to slot one in.'}>
                               Q

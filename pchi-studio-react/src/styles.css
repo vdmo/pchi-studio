@@ -647,3 +647,38 @@ button.go:disabled { background: #1b1d25; color: #7a7f92; border-color: #2f323e;
 .mem-list.compact li { padding: 4px 2px; font-size: 13px; }
 .mem-conflict { color: #fbbf24; font-size: 12px; }
 .rt-notes-plain { font-size: 13px; }
+
+/* ───────── side panel (checks, code, AI) and problem badges ───────── */
+.app.with-side { padding-right: 400px; }
+.app.with-side > .topbar { margin-right: -400px; }
+.side { position: fixed; z-index: 30; top: 48px; right: 0; bottom: 0; width: 400px; display: flex; flex-direction: column; background: #13151a; border-left: 1px solid #262a33; }
+.side > header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; border-bottom: 1px solid #262a33; }
+.side-tabs { display: inline-flex; background: #1b1d25; border: 1px solid #2f323e; border-radius: 10px; padding: 3px; gap: 2px; }
+.side-tabs button { border: 0; background: none; border-radius: 7px; padding: 4px 14px; font-size: 13px; color: #b6bac7; }
+.side-tabs button.on { background: #2b3040; color: #fff; }
+.side-body { flex: 1; min-height: 0; overflow: auto; padding: 4px 14px 16px; font-size: 13px; }
+.side-body h4 { margin: 14px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: #8a8fa3; }
+.side-note { color: #9aa0b4; font-size: 12px; line-height: 1.5; margin: 10px 0; }
+.side-ok { color: #34d399; margin: 16px 0; }
+.side-err { color: #f87171; font-size: 12px; line-height: 1.5; margin: 10px 0; }
+.side-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.side-list li { line-height: 1.45; }
+.vrow { display: flex; gap: 8px; width: 100%; text-align: left; padding: 7px 9px; background: #1b1d25; border: 1px solid #2a2e3a; border-radius: 8px; color: #dfe2ec; font-size: 12.5px; line-height: 1.45; cursor: pointer; }
+.vrow:hover { border-color: #3f4558; }
+.vrow.error { border-left: 3px solid #ef4444; }
+.vrow.warn { border-left: 3px solid #f59e0b; }
+.side-bar { display: flex; gap: 8px; align-items: center; margin: 10px 0; }
+.side-field { display: grid; gap: 4px; margin: 10px 0; font-size: 12px; color: #9aa0b4; }
+.side-field input, .side-field textarea { font: inherit; font-size: 13px; color: #e8e9ee; background: #1b1d25; border: 1px solid #2f323e; border-radius: 8px; padding: 7px 9px; resize: vertical; }
+.side-code { margin: 0; padding: 10px; background: #0e1014; border: 1px solid #262a33; border-radius: 8px; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #cdd2e0; overflow: auto; white-space: pre; max-height: calc(100vh - 230px); }
+.proposal { margin-top: 14px; padding: 4px 12px 12px; border: 1px solid #3b82f688; border-radius: 10px; background: #1a2030; }
+.checks-btn { position: relative; }
+.checks-btn .count { margin-left: 6px; padding: 0 6px; border-radius: 9px; font-size: 11px; background: #f59e0b; color: #1b1d25; }
+.checks-btn.bad .count { background: #ef4444; color: #fff; }
+.flag { margin-right: 4px; font-size: 12px; }
+@media (max-width: 900px) {
+  .app.with-side { padding-right: 0; }
+  .app.with-side > .topbar { margin-right: 0; }
+  .side { width: 100%; }
+}
+@media print { .side { display: none !important; } .app.with-side { padding-right: 0; } }

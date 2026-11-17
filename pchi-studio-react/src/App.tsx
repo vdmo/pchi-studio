@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { captureCueWith, clearDevice, deptOf, ensureCueNumbers, rigCheck, newShow, newShowchart, type PchiEvent, type PchiShowFile, type Showchart } from '@pchi/sdk'
+import { captureCueWith, clearDevice, deptOf, ensureCueNumbers, rigCheck, newShow, newShowchart, validateShow, type PchiEvent, type PchiShowFile, type Showchart, type Validation } from '@pchi/sdk'
 import ShowchartPanel from './components/ShowchartPanel'
 import TimelinePanel from './components/TimelinePanel'
 import CueSheet from './components/CueSheet'
@@ -10,6 +10,7 @@ import { useHistory } from './components/useHistory'
 import Logo from './components/Logo'
 import ShortcutsDialog from './components/ShortcutsDialog'
 import LibraryDialog, { type ServerRef } from './components/LibraryDialog'
+import SidePanel, { type SideTab } from './components/SidePanel'
 
 const AUTOSAVE = 'pchi.autosave'
 interface Autosave {
@@ -66,6 +67,17 @@ export default function App() {
   const history = useHistory(showchart, setChart)
   const rigIssues = useMemo(() => rigCheck(showchart, rig.nodes), [showchart, rig.nodes])
   const [help, setHelp] = useState(false)
+  // the drawer on the right: Checks, Code, AI. The count on its button is the problems in the show right now.
+  const [side, setSide] = useState<SideTab | null>(null)
+  const problems = useMemo(() => validateShow(showchart, rig.nodes), [showchart, rig.nodes])
+  const nErr = problems.filter((p) => p.level === 'error').length
+  const gotoProblem = (v: Validation) => {
+    if (v.device && !v.scene) return setMode('rig')
+    if (v.scene) {
+      setScene(v.scene)
+      setMode(v.cueId ? 'cues' : v.laneId ? 'timeline' : 'show')
+    }
+  }
   // the show library on the server: which saved show (and version) this one was opened from or last saved as
   const [lib, setLib] = useState<'open' | 'save' | null>(null)
   const [serverRef, setServerRef] = useState<ServerRef | null>(null)
@@ -153,7 +165,7 @@ export default function App() {
   }
 
   return (
-    <div className="app">
+    <div className={`app ${side ? 'with-side' : ''}`}>
       <header className="topbar">
         <Logo />
         <nav className="tabs" role="tablist" aria-label="Views">
@@ -173,6 +185,14 @@ export default function App() {
         )}
         <button className="icon-btn" onClick={() => setHelp(true)} aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)">?</button>
         {serverRef && <span className="pill online" title={`Opened from, and saved to, the server library as “${serverRef.name}”`}>server v{serverRef.version}</span>}
+        <button
+          className={`checks-btn ${nErr ? 'bad' : problems.length ? 'warn' : ''}`}
+          aria-pressed={side !== null}
+          onClick={() => setSide((s) => (s ? null : 'checks'))}
+          title="Checks, show code and the AI helper"
+        >
+          Checks{problems.length > 0 && <b className="count">{problems.length}</b>}
+        </button>
         <button onClick={() => setLib('open')} title="Shows saved on the server: open, plan and share them">Library</button>
         <button onClick={save} title="Download a .pchi file">Save</button>
         <label className="btn">
@@ -210,6 +230,7 @@ export default function App() {
         </div>
       )}
       {help && <ShortcutsDialog onClose={() => setHelp(false)} />}
+      {side && <SidePanel tab={side} onTab={setSide} onClose={() => setSide(null)} chart={showchart} nodes={rig.nodes} history={history} scene={scene} getFile={buildFile} onGoto={gotoProblem} />}
       {lib && (
         <LibraryDialog
           start={lib}
