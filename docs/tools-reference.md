@@ -11,6 +11,7 @@ Every binary in the workspace, what it is for, and where it is explained. All ac
 | [`pchi-gearcheck`](#pchi-gearcheck) | prove each tool, one at a time | on the real rig |
 | [`pchi-netcheck`](#pchi-netcheck) | measure the network and rehearse a takeover | before doors, with a standby |
 | [`pchi-venueday`](#pchi-venueday) | run all of the above into one folder | the day at the venue |
+| [`pchi-linkcheck`](#pchi-linkcheck) | read a robot or simulator (read-only) and compare its replies with a link profile | before the gear check, on a new robot |
 | [`pchi-twin`](#pchi-twin) | stand-in devices for the rig, that can be made to fail | testing without gear |
 | [`pchi-bench`](#pchi-bench) | give an agent jobs and grade what it did | developing and comparing agents |
 | [`pchi-witness`](#pchi-witness), [`pchi-follow`](#pchi-follow) | failover helpers | with a standby |
@@ -78,6 +79,15 @@ pchi-venueday my-show.pchi --runtime 10.0.0.5:3100 \
 ```
 
 Runs the preflight, the drill, the gear check, the network check and the report in order, into one folder with an `index.md` (results, what was **not** tried, tool versions). `--skip` takes `preflight,drill,gear,failover,report`. See [real-gear-day.md](real-gear-day.md).
+
+## pchi-linkcheck
+
+```bash
+pchi-linkcheck ur --commands                          # every command the profile can ever send; connects to nothing
+pchi-linkcheck ur --host 10.0.0.30 --out readings.json   # READ-ONLY: only the profile's status reads
+```
+
+Connects to a robot (or URSim) and sends only status reads. Prints each reply next to what the profile expects, whether it greeted on connect, and whether the profile reads it as ready. `DIFFERENT` on a line means the profile and the device disagree. Exit 0 all as expected, 1 a reply was not, 2 not reachable. See [ursim-check.md](ursim-check.md).
 
 ## pchi-twin
 

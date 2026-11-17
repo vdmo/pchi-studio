@@ -502,6 +502,105 @@ pub struct Outcome {
     pub target: String,
 }
 
+// ---- a read-only look at a real device, to compare what it says with what the profile assumes ----
+
+/// One status read, as the device answered it.
+#[derive(Debug, Clone)]
+pub struct ProbeRead {
+    pub var: String,
+    pub send: String,
+    /// What the device said, exactly.
+    pub reply: Option<String>,
+    /// Whether the reply matches what the profile expects.
+    pub matched: bool,
+    /// The value the profile would take from it.
+    pub value: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Probe {
+    pub addr: String,
+    /// A line the device sent on connect, before any command (some do, some do not).
+    pub greeting: Option<String>,
+    pub reads: Vec<ProbeRead>,
+    /// What the profile's `ready_when` rules make of those replies.
+    pub ready: Option<bool>,
+    pub note: String,
+}
+
+impl Probe {
+    /// Every read answered, in the form the profile expects.
+    pub fn all_matched(&self) -> bool {
+        !self.reads.is_empty() && self.reads.iter().all(|r| r.matched)
+    }
+}
+
+/// Connect to `addr` and send ONLY the profile's status reads: nothing that could start, stop or change anything. Says what the device
+/// actually replied, so a profile written from a manual can be checked against the real thing (or a simulator). Never sends an action.
+pub async fn probe(profile: &LinkProfile, addr: &str) -> Result<Probe, String> {
+    let s = tokio::time::timeout(CONNECT, TcpStream::connect(addr)).await.map_err(|_| format!("{addr} did not answer within {} s", CONNECT.as_secs()))?.map_err(|e| format!("cannot reach {addr}: {e}"))?;
+    let _ = s.set_nodelay(true);
+    let mut r = BufReader::new(s);
+    // wait a little longer than a normal connect for a greeting, so "none" really means none
+    let mut greeting = String::new();
+    let g = tokio::time::timeout(Duration::from_millis(1500), r.read_line(&mut greeting)).await;
+    let greeting = match g {
+        Ok(Ok(n)) if n > 0 => Some(greeting.trim().to_string()),
+        _ => None,
+    };
+    let mut reads = Vec::new();
+    let mut vars: BTreeMap<String, String> = BTreeMap::new();
+    for rd in &profile.reads {
+        let mut item = ProbeRead { var: rd.var.clone(), send: rd.send.clone(), reply: None, matched: false, value: None, error: None };
+        let go = async {
+            r.get_mut().write_all(format!("{}\n", rd.send).as_bytes()).await.map_err(|e| format!("could not send: {e}"))?;
+            let mut line = String::new();
+            match r.read_line(&mut line).await {
+                Ok(0) => Err("the device closed the connection".to_string()),
+                Ok(_) => Ok(line.trim().to_string()),
+                Err(e) => Err(format!("could not read: {e}")),
+            }
+        };
+        match tokio::time::timeout(REPLY, go).await {
+            Ok(Ok(reply)) => {
+                if let Some(c) = rd.expect.captures(&reply) {
+                    item.matched = true;
+                    let v = c.get(1).map_or(reply.clone(), |m| m.as_str().to_string());
+                    vars.insert(rd.var.clone(), v.clone());
+                    item.value = Some(v);
+                }
+                item.reply = Some(reply);
+                reads.push(item);
+            }
+            Ok(Err(e)) => {
+                item.error = Some(e);
+                reads.push(item);
+                break; // a connection that failed once is not asked again
+            }
+            Err(_) => {
+                item.error = Some(format!("no answer within {} s", REPLY.as_secs()));
+                reads.push(item);
+                break;
+            }
+        }
+    }
+    let (mut ready, mut note) = (None, String::new());
+    if !profile.ready_when.is_empty() && reads.iter().all(|r| r.matched) && reads.len() == profile.reads.len() {
+        let mut ok = true;
+        for rule in &profile.ready_when {
+            let v = vars.get(&rule.var).cloned().unwrap_or_default();
+            if !(rule.equals.as_ref().map_or(true, |e| *e == v) && (rule.one_of.is_empty() || rule.one_of.contains(&v))) {
+                ok = false;
+                note = rule.why.replace("{value}", &v);
+                break;
+            }
+        }
+        ready = Some(ok);
+    }
+    Ok(Probe { addr: addr.to_string(), greeting, reads, ready, note })
+}
+
 // ---- the live link to one device ----
 
 /// What is known about a device from reading it: whether it answers, its values, whether it is ready, and why not.
@@ -1026,6 +1125,43 @@ mod tests {
         let e = crate::profiles::load_dir(&dir).unwrap_err();
         assert!(e.contains("must never send"), "{e}");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn the_probe_sends_only_reads_and_reports_what_the_device_really_said() {
+        let sim = UrSim::start(&["A"]).await.unwrap();
+        let p = get("ur").unwrap();
+        let addr = format!("127.0.0.1:{}", sim.port);
+        let r = probe(&p, &addr).await.unwrap();
+        assert_eq!(r.greeting.as_deref(), Some("Connected: Universal Robots Dashboard Server"));
+        assert!(r.all_matched(), "{r:?}");
+        assert_eq!(r.ready, Some(true));
+        let seen = sim.seen();
+        assert_eq!(seen, ["is in remote control", "safetystatus", "robotmode", "programState"], "a probe sends only the profile's status reads");
+        assert!(!seen.iter().any(|c| matches!(c.as_str(), "play" | "pause" | "stop") || c.starts_with("load")));
+        // a faulted robot is read as not ready, with its reason
+        sim.fault("protective-stop").unwrap();
+        let r = probe(&p, &addr).await.unwrap();
+        assert_eq!((r.ready, r.note.as_str()), (Some(false), "its safety status is PROTECTIVE_STOP"));
+        // a device that answers in a form the profile does not expect is flagged, with its exact words
+        let odd = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = odd.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((sock, _)) = odd.accept().await else { continue };
+                tokio::spawn(async move {
+                    let (rd, mut wr) = sock.into_split();
+                    let mut lines = tokio::io::BufReader::new(rd).lines();
+                    while let Ok(Some(_)) = lines.next_line().await {
+                        let _ = wr.write_all(b"unexpected words\n").await;
+                    }
+                });
+            }
+        });
+        let r = probe(&p, &format!("127.0.0.1:{port}")).await.unwrap();
+        assert_eq!(r.greeting, None, "no greeting is reported as none");
+        assert!(!r.all_matched() && r.reads[0].reply.as_deref() == Some("unexpected words") && r.ready.is_none(), "{r:?}");
+        assert!(probe(&p, "127.0.0.1:1").await.is_err());
     }
 
     #[test]

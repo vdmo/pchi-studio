@@ -77,7 +77,7 @@ Faults for the pretend UR: `protective-stop`, `local-control` (out of Remote Con
 
 ## What is not proven
 
-- **No real UR and no URSim.** The pretend UR is written from UR's manual, so it shares any mistake in my reading of it. Run `pchi-gearcheck` against URSim first, then the robot, with its programmer present and its area clear.
+- **No real UR and no URSim.** The pretend UR is written from UR's manual, so it shares any mistake in my reading of it. [ursim-check.md](ursim-check.md) is the procedure: read it with `pchi-linkcheck` (read-only) first, then `pchi-gearcheck` against URSim, then the robot, with its programmer present and its area clear.
 - **Two details are from memory, not the manual page**: that the controller sends a greeting line when you connect, and that `programState` may carry the program name after the state. The profile accepts both present or absent.
 - **CB-series robots** have a separate Dashboard document that I have not read. Treat them as untested.
 - `load` is documented to fail if the installation needs a safety confirmation; PCHI reports that as `refused`, and a person must confirm on the pendant.

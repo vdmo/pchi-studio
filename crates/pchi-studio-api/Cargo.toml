@@ -46,6 +46,10 @@ name = "pchi-netcheck"
 path = "src/bin/netcheck.rs"
 
 [[bin]]
+name = "pchi-linkcheck"
+path = "src/bin/linkcheck.rs"
+
+[[bin]]
 name = "pchi-twin"
 path = "src/bin/twin.rs"
 
