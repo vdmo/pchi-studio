@@ -11,7 +11,7 @@ Ports and addresses change between versions: always confirm against the version 
 | Protocol | What it is | Used for |
 |---|---|---|
 | OSC (UDP/TCP) | Open Sound Control: address + typed arguments | Almost everything below. PCHI already sends generic OSC. |
-| MIDI / MIDI Show Control (MSC) | Notes, CCs, SysEx cues over USB/DIN/network | Lighting desks, playback software, controllers |
+| MIDI / MIDI Show Control (MSC) | Notes, CCs, SysEx cues over USB/DIN/network | Lighting desks, playback software, controllers. **PCHI now sends notes, program changes, controllers and MSC, and reads MSC and MIDI notes (needs `--features midi`; the port code has never run)** |
 | Art-Net / sACN (E1.31) | DMX lighting data over Ethernet | Fixtures and nodes directly; some lasers and media servers |
 | NDI | Video over IP | Visual distribution (already a rig node type) |
 | Timecode (LTC / MTC / Ableton Link) | Shared clock | Syncing to a DJ or playback source |
@@ -61,7 +61,7 @@ arm/disarm and a hard stop before it is used with real hardware.
 | Behringer / Midas X32 and M32 | The most widespread digital mixer in small and mid-size venues | OSC over UDP, port 10023 (X-Air series: 10024); the mixer replies to the port the request came from; the protocol is documented unofficially (Patrick-Gilles Maillot) and subscriptions must be renewed with `/xremote`; *checked (secondary sources)* | The official spec is thin: verify on a real desk or an emulator. |
 | Behringer Wing, Allen & Heath SQ / dLive, Yamaha CL / QL / Rivage, DiGiCo | Mid to large venues, touring | OSC, MIDI or TCP depending on the brand; *from memory* | One adapter per family. |
 | Q-SYS | Installed sound, themed venues | JSON-RPC (QRC) over TCP; *from memory* | |
-| Reaper | Playback / recording | OSC; *from memory* | |
+| Reaper | Playback / recording | OSC; *from memory*, now a profile whose rules are marked community (second-hand) | |
 
 ## Picking a few
 
@@ -81,9 +81,9 @@ Strobe stays as it is until it can be checked against the real thing.
 
 ## Status
 
-Built (first version): the five profiles in the picks above, **QLab** and **ChamSys MagicQ** added after, plus laser arm/disarm and a hard stop.
+Built (first version): the five profiles in the picks above, **QLab** and **ChamSys MagicQ** added after, plus laser arm/disarm and a hard stop. Since then, as data files and small transports ([protocol-roadmap.md](protocol-roadmap.md) is the current list): **AbletonOSC**, **Millumin**, **Bitfocus Companion** (OSC, and its HTTP button API), **REAPER**, **PJLink** projectors, **MIDI output**, **MIDI Show Control** out and in, and **HTTP** requests from a profile file.
 
-**TouchDesigner** needs no profile: you define its OSC addresses yourself, so the generic `/pchi/...` messages (e.g. `/pchi/scene/activate`) can be received with an OSC In node. **Ableton Live** is controlled by MIDI or an add-on, and PCHI has no MIDI output yet, so it is not covered. See
+**TouchDesigner** needs no profile: you define its OSC addresses yourself, so the generic `/pchi/...` messages (e.g. `/pchi/scene/activate`) can be received with an OSC In node. **Ableton Live** is covered through the AbletonOSC add-on (OSC), not through Ableton Link or MIDI clock, which are not built. The "from memory" marks in the tables above are from the first writing of this page and were not all re-checked: where a tool now has a profile, its profile file states what each rule rests on. See
 "Tool profiles" and "Laser safety" in `connecting-systems.md` for what each sends and which addresses are
 confirmed. **None has been tried against the real tools yet.**
 

@@ -55,8 +55,8 @@ Candidates, each needing a source check before its basis is set above `memory`: 
 
 In this order, because each is testable without gear by checking bytes:
 
-1. **MIDI output**, then **MIDI Show Control** out and in. Notes, program change and controller, and MSC cues to lighting and sound desks. It extends `midi.rs`, behind `--features midi`.
-2. **HTTP/REST output** for Companion, PTZ cameras and webhooks. A closed list of URL templates in a profile, like the OSC ones; no free-form URLs from a cue.
+1. **MIDI output**, then **MIDI Show Control** out and in. *(Done.)* Notes, program change and controller, and MSC cues to lighting and sound desks. It extends `midi.rs`, behind `--features midi`.
+2. *(Done.)* **HTTP/REST output** for Companion, PTZ cameras and webhooks. A closed list of URL templates in a profile, like the OSC ones; no free-form URLs from a cue.
 3. **JSON-RPC over TCP** (the style used by Q-SYS and some media servers).
 4. **MQTT publish** (installations, sensors, building systems), with a topic allow-list.
 5. **Serial RS-232/RS-485**, behind a feature flag because it needs a system library.
@@ -74,12 +74,14 @@ Each slice ends with a commit and push, so progress is visible and nothing sits 
 
 | # | Slice | Ends with |
 |---|---|---|
-| 1 | Source-check and add the first Tranche A dialects (Reaper, Companion, Millumin, AbletonOSC) | **Built, not yet committed.** Ableton, Millumin and Companion rest on documents that were read; REAPER rests on search results quoting its config file. Byte tests pass; nothing tried on a real tool |
-| 2 | PJLink and the generic fixed-line profile (Tranche B) | **Built, not yet committed.** PJLink class 1 as a link profile (power on only, input, mute), with four small engine changes it needed: carriage-return line ends, per-action values with `{1}` to `{9}`, a greeting that can refuse a device, and replies ended by a carriage return. The fixed-line device is a documented recipe, not a built-in. No password support; not tried on a real projector |
-| 3 | MIDI output and notes/program/controller (Tranche C1) | **Built, not yet committed.** A `midi-out` device with a closed set of words (note, pc, cc, panic); byte tests; Doors check; compiles with `--features midi`. **The port-writing code has never run:** the machine had no MIDI sequencer, so there was no port to send to |
-| 4 | MIDI Show Control out and in | **Built, not yet committed.** `msc` values on a MIDI output (seven commands, four formats, one device; groups, all-call and pyro refused) and `msc` bindings on a MIDI input that press an event. Byte tests and read-back tests pass; the layout is from memory of the specification; never tried on a real desk |
-| 5 | HTTP/REST output with URL templates (C2) | **Built, not yet committed.** Profiles of `GET`/`POST`/`PUT` templates over plain http, a built-in Companion profile (route from memory), a documented camera/webhook recipe; a stand-in server tests the request and the outcomes. No TLS, no authentication, no answer body; never tried on a real device |
-| 6 | Update this page, [industry-tools.md](industry-tools.md) and [positioning.md](positioning.md) to the new truth | commit |
+| 1 | Source-check and add the first Tranche A dialects (Reaper, Companion, Millumin, AbletonOSC) | **Done, `471500d`.** Ableton, Millumin and Companion rest on documents that were read; REAPER rests on search results quoting its config file. Byte tests pass; nothing tried on a real tool |
+| 2 | PJLink and the generic fixed-line profile (Tranche B) | **Done, `4a99288`.** PJLink class 1 as a link profile (power on only, input, mute), with four small engine changes it needed: carriage-return line ends, per-action values with `{1}` to `{9}`, a greeting that can refuse a device, and replies ended by a carriage return. The fixed-line device is a documented recipe, not a built-in. No password support; not tried on a real projector |
+| 3 | MIDI output and notes/program/controller (Tranche C1) | **Done, `b33d508`.** A `midi-out` device with a closed set of words (note, pc, cc, panic); byte tests; Doors check; compiles with `--features midi`. **The port-writing code has never run:** the machine had no MIDI sequencer, so there was no port to send to |
+| 4 | MIDI Show Control out and in | **Done, `61688c6`.** `msc` values on a MIDI output (seven commands, four formats, one device; groups, all-call and pyro refused) and `msc` bindings on a MIDI input that press an event. Byte tests and read-back tests pass; the layout is from memory of the specification; never tried on a real desk |
+| 5 | HTTP/REST output with URL templates (C2) | **Done, `219613e`.** Profiles of `GET`/`POST`/`PUT` templates over plain http, a built-in Companion profile (route from memory), a documented camera/webhook recipe; a stand-in server tests the request and the outcomes. No TLS, no authentication, no answer body; never tried on a real device |
+| 6 | Update this page, [industry-tools.md](industry-tools.md) and [positioning.md](positioning.md) to the new truth | **Done.** Protocol rows, the "Not built" line and the positioning claim about protocol reach now match the code |
+
+**Next, in order:** JSON-RPC over TCP, MQTT publish with a topic allow-list, serial RS-232/485 behind a feature flag, then SMPTE/LTC output and Ableton Link. Before any of those, the larger gap is not protocols: nothing here has run against a real tool.
 
 If a slice finds a source I cannot confirm, the rules go in as `memory` and the Doors check will say so. The schedule slips before the honesty does.
 
