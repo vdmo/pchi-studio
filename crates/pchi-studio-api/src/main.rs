@@ -155,6 +155,9 @@ async fn main() -> anyhow::Result<()> {
         for d in devs {
             println!("{d}");
         }
+        for d in pchi_studio_api::ltcout::list_devices() {
+            println!("out: {d}");
+        }
         return Ok(());
     }
     if cli.serial_ports {
@@ -414,6 +417,11 @@ async fn start_inputs(show: &std::sync::Arc<Show>, cli: &Cli) -> anyhow::Result<
     for spec in file.ltc {
         let input = pchi_studio_api::ltc::start(show, spec).map_err(anyhow::Error::msg)?;
         println!("input: {} reading LTC ({})", input.spec.name, pchi_studio_api::inputs::InputInfo::json(&*input)["listen"].as_str().unwrap_or(""));
+    }
+    for spec in file.ltc_out {
+        let out = pchi_studio_api::ltcout::start(show, spec).map_err(anyhow::Error::msg)?;
+        println!("output: {} writing LTC ({})", out.spec.name, if out.spec.follow { "following the show's timecode" } else { "free-running" });
+        std::mem::forget(out); // the output runs for the life of the runtime
     }
     for spec in file.midi {
         let n = spec.bindings.len();

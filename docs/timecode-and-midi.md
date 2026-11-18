@@ -52,6 +52,23 @@ LTC is an 80-bit biphase-mark signal on an audio track, once per video frame. PC
 - The position it reports is the time at the end of the frame it just read, the same moment MTC reports. After a gap, the first frame is spent finding the bit rate again.
 - `pchi-studio-api --audio-devices` lists what a `--features audio` build can see. Like MIDI, building for audio devices needs the system audio library (`libasound2-dev` on Linux).
 
+## LTC output
+
+The runtime can put LTC on an audio channel so other gear (a playback machine, a recorder, a desk) can chase it. In the inputs file, next to `ltc` (input):
+
+```json
+{"ltc_out": [
+  {"name": "Master", "file": "/tmp/ltc.raw", "start": "01:00:00:00", "fps": 25, "sample_rate": 48000, "format": "s16le", "channels": 2, "channel": 0},
+  {"name": "Relay", "device": "Scarlett", "follow": true, "fps": 25}
+]}
+```
+
+- **Where the numbers come from (give exactly one):** `start` free-runs from that timecode from the moment the runtime starts (write `;` before the frames for drop-frame, with `"fps": 29.97, "drop": true`); `follow` re-generates the timecode the show is receiving (MTC, OSC or LTC input). While that timecode runs the output carries it, and a locate on the input is a locate on the output. **While it is stopped, or has never been heard, the output is silent**, so a chasing machine stops rather than being fed a frozen or invented number.
+- **Where the audio goes (give exactly one):** `file` is raw audio written at the speed it plays, to a regular file or a named pipe that `aplay`, `ffmpeg` or `sox` reads; `device` plays on an audio output device whose name contains the text (a build with `--features audio`; `pchi-studio-api --audio-devices` lists outputs as `out:`). `channel` is the one that carries the LTC; the others are silent.
+- Frame rates 23.976, 24, 25, 29.97 (non-drop or drop) and 30. Level `amplitude` 0.05 to 1.0 (default 0.5).
+- **The signal is a square wave at a fixed level**, not shaped to the rise time the standard describes. A strict hardware reader may need it through a line driver or a low-pass.
+- There is no status for it in Studio yet; a problem (a file that cannot be opened, a pipe that closed) is kept on the output and not shown. The output thread stops writing and the show goes on.
+
 ## MIDI input
 
 In the inputs file (`--inputs`), next to OSC inputs:
@@ -144,5 +161,6 @@ It sends `F0 7F <device> 02 <format> <command> [cue [00 list]] F7`, the cue and 
 - **MIDI output:** the words, the exact bytes (every channel, the limits, what is refused, and that no accepted value can make anything but a note, controller or program change), the descriptions and the Doors check are tested. The code that writes to a port compiles with `--features midi` but could not be run: the machine it was built on had no MIDI sequencer, so it has never sent a message to a port, real or virtual.
 - **Compiled but not run:** the MIDI port code (`--features midi`) and the audio device code (`--features audio`) compile against the real `midir` and `cpal` libraries on Linux, but have
   not been run against a MIDI device, a sound card or a playback machine. Treat them as unproven until you have sent them real MTC or LTC. The LTC **decoder** is tested with synthetic LTC (every rate, level, polarity, speed, noise, chunking, a start in the middle) and a file driving a locked scene.
+- **LTC output:** the frame bits (time, flags, sync, the polarity bit that keeps the zero count even), that every frame starts at the same polarity, that length never drifts, and that the encoder's audio is read back correctly by the LTC decoder at 23.976, 24, 25, 29.97 (both kinds) and 30 fps and at 44.1, 48 and 96 kHz, including across a drop-frame minute and the 24-hour wrap. A free-running output wrote a real file at the speed it plays, and a following output went silent once its timecode stopped. **That is a test of the code agreeing with itself:** the encoder and decoder were written together, and the polarity-bit position (27, or 59 at 25 fps) is from memory of the standard. Nothing has been checked against another maker's LTC reader, and the audio device path compiles but has never played a sound.
 - **Not covered:** LTC on a real sound card and a real playback machine (a real signal may be dirtier than the synthetic ones), timecode in `rehearse` (a rehearsal replays presses, not timecode), and timecode restored after
   `--resume` (it is heard again from the source).

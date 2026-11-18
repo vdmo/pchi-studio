@@ -63,6 +63,7 @@ pub mod links;
 pub mod memory_api;
 pub mod obs;
 pub mod ltc;
+pub mod ltcout;
 pub mod output;
 pub mod preflight;
 pub mod profiles;
@@ -1551,6 +1552,14 @@ impl Show {
             None => {}
         }
         Ok(json!({"ok": true, "total": t.total}))
+    }
+
+    /// The running timecode as `(position in ms now, frame rate)`, carried forward from when it was last heard; `None` when it is stopped or
+    /// has never been heard. What an LTC output follows.
+    pub fn timecode_running(&self) -> Option<(f64, Fps)> {
+        let c = self.tc.lock().unwrap();
+        let st = c.status(now_ms());
+        (st.state == "running").then(|| (st.position_ms + st.heard_ms_ago.unwrap_or(0) as f64, st.fps)).and_then(|(p, f)| f.map(|f| (p, f)))
     }
 
     /// What the timecode is doing, for clients: {state: none|running|stopped, position, fps, source, heard_ms_ago}.
@@ -4874,6 +4883,36 @@ mod tests {
         drop.timeline.as_mut().unwrap().tc_start = Some("00:01:05:00".into());
         c.transitions.push(pchi_showchart::Transition::on("INTRO", "DROP", "tc:00:01:05:00"));
         c
+    }
+
+    /// A plain show for the tests of other modules that only need a running `Show`.
+    pub(crate) fn plain_show_for_ltc_out() -> Showchart {
+        quick()
+    }
+
+    /// Following: the output carries the timecode the show is hearing, and is silent once it stops.
+    #[tokio::test]
+    async fn an_ltc_output_following_the_show_regenerates_its_timecode_and_stops_with_it() {
+        let show = Show::start(quick(), EventStore::open_in_memory().unwrap()).unwrap();
+        assert!(show.timecode_running().is_none(), "nothing heard yet");
+        show.timecode_update(3_600_000.0, Fps::F25, "test");
+        let (ms, fps) = show.timecode_running().unwrap();
+        assert!(ms >= 3_600_000.0 && ms < 3_700_000.0 && fps == Fps::F25, "{ms}");
+        let path = std::env::temp_dir().join(format!("pchi-ltc-follow-{}.raw", std::process::id()));
+        let s: ltcout::LtcOutSpec = serde_json::from_str(&format!(r#"{{"name":"Out","file":{},"follow":true,"fps":25}}"#, serde_json::to_string(path.to_str().unwrap()).unwrap())).unwrap();
+        let out = ltcout::start(&show, s).unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let bytes = std::fs::read(&path).unwrap();
+        let samples: Vec<f32> = bytes.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0).collect();
+        let got = ltc::LtcDecoder::new(48_000, Fps::F25).push(&samples);
+        assert!(got.len() >= 5 && got[0].h == 1, "the show's 01:00:00:00 is on the output: {got:?}");
+        // once the heard timecode is no longer running, the output falls silent
+        tokio::time::sleep(Duration::from_millis(1_300)).await;
+        let all = std::fs::read(&path).unwrap();
+        let tail: Vec<i16> = all[all.len().saturating_sub(48_000)..].chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect();
+        assert!(tail.iter().filter(|s| **s != 0).count() < tail.len() / 3, "mostly silent after the timecode stopped");
+        drop(out);
+        let _ = std::fs::remove_file(&path);
     }
 
     fn cue_ids(rx: &mut broadcast::Receiver<Value>) -> Vec<String> {
