@@ -67,7 +67,7 @@ The runtime can put LTC on an audio channel so other gear (a playback machine, a
 - **Where the audio goes (give exactly one):** `file` is raw audio written at the speed it plays, to a regular file or a named pipe that `aplay`, `ffmpeg` or `sox` reads; `device` plays on an audio output device whose name contains the text (a build with `--features audio`; `pchi-studio-api --audio-devices` lists outputs as `out:`). `channel` is the one that carries the LTC; the others are silent.
 - Frame rates 23.976, 24, 25, 29.97 (non-drop or drop) and 30. Level `amplitude` 0.05 to 1.0 (default 0.5).
 - **The signal is a square wave at a fixed level**, not shaped to the rise time the standard describes. A strict hardware reader may need it through a line driver or a low-pass.
-- There is no status for it in Studio yet; a problem (a file that cannot be opened, a pipe that closed) is kept on the output and not shown. The output thread stops writing and the show goes on.
+- Studio shows it on the Live tab beside the inputs: `LTC out · name · free-running or follows the show timecode · where it writes · frames written`, with a problem (a file that cannot be opened, a pipe that closed) in the same line. A problem stops the output thread and the show goes on. The frame count is what the output has handed to its file, pipe or device; it does not say anyone is reading it.
 
 ## MIDI input
 

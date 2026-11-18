@@ -3,6 +3,7 @@ import { apiBase, feedToken, signedInSession } from './liveFeed'
 import { clearSaid, peekSaid } from './said'
 import RunReplay from './RunReplay'
 import MemoryPanel from './MemoryPanel'
+import ProfilesPanel from './ProfilesPanel'
 
 const KEY = 'pchi.editkey'
 /** The operator key lives in this tab's session only: closing the tab forgets it. */
@@ -75,6 +76,7 @@ export default function RuntimeTools({ getFile, locked = false, undoDepth = 0 }:
   const [keyText, setKeyText] = useState('')
   const [replayOpen, setReplayOpen] = useState(false)
   const [memoryOpen, setMemoryOpen] = useState(false)
+  const [profilesOpen, setProfilesOpen] = useState(false)
   const [doors, setDoors] = useState<{ summary?: { go: boolean; fail: number; warn: number; ok: number }; checks?: DoorCheck[]; error?: string; busy?: boolean } | null>(null)
   type Rehearsal = { run: { length_ms: number; inputs: number; edited_live: number }; recorded_path: string[]; rehearsed_path: string[]; summary: { different: boolean; verdict: string; lines: string[] } }
   const [rehearse, setRehearse] = useState<{ r?: Rehearsal; error?: string; busy?: boolean } | null>(null)
@@ -161,12 +163,18 @@ export default function RuntimeTools({ getFile, locked = false, undoDepth = 0 }:
         <button onClick={openReport} title="How the run went: cue timing, failed sends, edits made mid-show">Run report</button>
         <button onClick={openPage} title="The whole run as one page to read and hand over: where the show went, timing, failed sends, interruptions, who decided what, the signed record">Hand-over page</button>
         <button onClick={() => setMemoryOpen(true)} title="What the show remembers: ask it, and review what the run left for a person to verify">Memory</button>
+        <button onClick={() => setProfilesOpen(true)} title="Every tool the runtime can drive, how it is reached, and what each command rests on">Tool profiles</button>
         <button onClick={() => setReplayOpen(true)} title="Go back through the run: drag through it, or open a recording saved earlier">Replay a run</button>
       </div>
 
       {memoryOpen && (
         <Dialog title="Memory" onClose={() => setMemoryOpen(false)}>
           <MemoryPanel />
+        </Dialog>
+      )}
+      {profilesOpen && (
+        <Dialog title="Tool profiles" onClose={() => setProfilesOpen(false)}>
+          <ProfilesPanel />
         </Dialog>
       )}
       {replayOpen && (
@@ -457,7 +465,7 @@ export async function testFire(id: string): Promise<{ status: string; error?: st
   return { status: String(r.body?.status), error: r.body?.error }
 }
 
-export type OscInput = { name: string; listen: string; bindings: number; received: number; pressed: number; unlisted_sender: number; unbound: number; dropped: number; refused: number; heard_ms_ago: number | null; last_address: string }
+export type OscInput = { kind?: string; mode?: string; frames?: number; problem?: string; name: string; listen: string; bindings: number; received: number; pressed: number; unlisted_sender: number; unbound: number; dropped: number; refused: number; heard_ms_ago: number | null; last_address: string }
 
 /** The OSC inputs the runtime is listening on (Stream Deck, tablet, button box) and what they have done. */
 export async function getInputs(): Promise<OscInput[]> {

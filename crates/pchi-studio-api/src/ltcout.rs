@@ -289,6 +289,25 @@ impl LtcOut {
     }
 }
 
+impl crate::inputs::InputInfo for LtcOut {
+    /// Shown in the Live tab beside the inputs: what this output is doing, and any problem it hit.
+    fn json(&self) -> serde_json::Value {
+        let to = match (&self.spec.file, &self.spec.device) {
+            (Some(f), _) => format!("file {f}"),
+            (_, Some(d)) => format!("device {d}"),
+            _ => String::new(),
+        };
+        let problem = self.status();
+        serde_json::json!({
+            "kind": "ltc-out", "name": self.spec.name,
+            "listen": format!("LTC out {to}"), "mode": if self.spec.follow { "follows the show timecode" } else { "free-running" },
+            "frames": self.frames_written(), "problem": problem,
+            "bindings": 0, "received": 0, "pressed": 0, "unlisted_sender": 0, "unbound": 0, "dropped": 0, "refused": 0,
+            "heard_ms_ago": serde_json::Value::Null, "last_address": problem,
+        })
+    }
+}
+
 impl Drop for LtcOut {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
@@ -663,6 +682,12 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(700)).await;
         assert!(out.status().is_empty(), "{}", out.status());
         let n = out.frames_written();
+        let j = crate::inputs::InputInfo::json(&out);
+        assert_eq!(j["kind"], "ltc-out");
+        assert_eq!(j["mode"], "free-running");
+        assert!(j["listen"].as_str().unwrap().starts_with("LTC out file "));
+        assert!(j["frames"].as_u64().unwrap() >= n.min(1));
+        assert_eq!(j["problem"], "");
         drop(out);
         let bytes = std::fs::read(&path).unwrap();
         let _ = std::fs::remove_file(&path);

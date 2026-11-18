@@ -434,7 +434,8 @@ async fn start_inputs(show: &std::sync::Arc<Show>, cli: &Cli) -> anyhow::Result<
     for spec in file.ltc_out {
         let out = pchi_studio_api::ltcout::start(show, spec).map_err(anyhow::Error::msg)?;
         println!("output: {} writing LTC ({})", out.spec.name, if out.spec.follow { "following the show's timecode" } else { "free-running" });
-        std::mem::forget(out); // the output runs for the life of the runtime
+        // the show keeps the output (and shows it in the Live tab) for the life of the runtime
+        show.add_input(std::sync::Arc::new(out));
     }
     for spec in file.midi {
         let n = spec.bindings.len();

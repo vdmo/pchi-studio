@@ -739,7 +739,11 @@ export default function LivePanel({ onFeed, onStatus, rig = [], getFile, onAddCa
             </p>
           )
         })()}
-        {oscIn.map((i) => (
+        {oscIn.map((i) => i.kind === 'ltc-out' ? (
+          <p key={i.name} className={`muted gov-badge ${i.problem ? 'tc-warn' : ''}`} title="Timecode this runtime sends out as audio. It follows the show's own timecode, or counts on its own.">
+            LTC out · <b>{i.name}</b> · {i.mode} · {i.listen.replace('LTC out ', '')} · {i.frames ?? 0} frame{i.frames === 1 ? '' : 's'} written{i.problem ? ` · problem: ${i.problem}` : ''}
+          </p>
+        ) : (
           <p key={i.name} className="muted gov-badge" title="Presses arriving by OSC. It can only press GO and the show's own events, set a value, or hit STOP LASERS.">
             OSC in · <b>{i.name}</b> {i.listen.split(':').pop() ? ':' + i.listen.split(':').pop() : ''} · {i.bindings} binding{i.bindings === 1 ? '' : 's'} ·{' '}
             {i.heard_ms_ago === null ? 'nothing heard yet' : `last ${i.last_address} ${Math.round(i.heard_ms_ago / 1000)} s ago`} · {i.pressed} pressed
