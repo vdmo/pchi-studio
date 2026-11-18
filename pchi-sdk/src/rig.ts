@@ -159,3 +159,31 @@ export function deviceForProfile(p: ProfileInfo, existing: PchiNode[], position:
   const dept = (RIG_DEPTS as readonly string[]).includes(p.dept) ? p.dept : undefined
   return { id, type: 'osc', label: p.name, dept, position, params }
 }
+
+/** What a cue to a device may be: the kinds its profile takes, and what a value must look like. */
+export interface ProfileKinds {
+  id: string
+  name: string
+  hint?: string
+  kinds: string[]
+}
+
+/** The profile a rig device is driven by: the one its settings name, else the one with its type's id (a built-in tool). */
+export function profileForDevice<T extends { id: string }>(node: Pick<PchiNode, 'type' | 'params'> | undefined, profiles: T[]): T | undefined {
+  if (!node) return undefined
+  const named = typeof node.params?.profile === 'string' ? node.params.profile.trim() : ''
+  return profiles.find((p) => p.id === named) ?? profiles.find((p) => p.id === node.type)
+}
+
+/**
+ * The action a new cue to this device starts as. With a profile that takes some kinds, a kind it takes (the department's usual kind if the
+ * profile takes it, else the first one it lists) with an empty value; otherwise the department's usual kind. The value's field name
+ * does not matter to the runtime, which reads the first value.
+ */
+export function startingAction(deptKind: string, deptField: string, profile?: ProfileKinds): { kind: string; payload: Record<string, string> } {
+  if (profile && profile.kinds.length > 0) {
+    const kind = profile.kinds.includes(deptKind) ? deptKind : profile.kinds[0]
+    return { kind, payload: { [kind === deptKind ? deptField : 'value']: '' } }
+  }
+  return { kind: deptKind, payload: { [deptField]: '' } }
+}

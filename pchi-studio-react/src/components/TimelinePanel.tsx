@@ -3,6 +3,7 @@ import Card from './Card'
 import ActionList from './ActionList'
 import CommandBar from './CommandBar'
 import { sceneInfo } from './sceneInfo'
+import { fetchProfiles, type Profile } from '../lib/profiles'
 import type { History } from './useHistory'
 import {
   DEPTS,
@@ -12,6 +13,9 @@ import {
   quantizeCues,
   deptOf,
   devicesFor,
+  laneDevice,
+  profileForDevice,
+  startingAction,
   setLaneDevice,
   type PchiNode,
   type RigState,
@@ -85,6 +89,12 @@ export default function TimelinePanel({ chart, history, note, scene, onScene, no
   const [playing, setPlaying] = useState(false)
   const [t, setT] = useState(0)
   const [drag, setDrag] = useState<Drag | null>(null)
+  // what the runtime's profiles say each device takes, so a cue to it can start as a kind it understands (blank when the runtime is not running)
+  const [profiles, setProfiles] = useState<Profile[]>([])
+  useEffect(() => {
+    fetchProfiles().then(setProfiles).catch(() => setProfiles([]))
+  }, [])
+  const profileOfLane = (lane: ShowLane | undefined) => (lane ? profileForDevice(laneDevice(nodes, lane), profiles) : undefined)
 
   // ── rehearsal: play the scene and tap to drop cues where they belong ──
   const [rehearse, setRehearse] = useState(false)
@@ -121,7 +131,7 @@ export default function TimelinePanel({ chart, history, note, scene, onScene, no
     const lane = tl.lanes.find((l) => l.id === laneId)
     if (!lane) return
     const d = deptOf(lane.dept)
-    const cue: ShowCue = { id: newId('c'), at_ms: snap(at), length_ms: 2000, action: { kind: d.kind, payload: { [d.field]: '' } } }
+    const cue: ShowCue = { id: newId('c'), at_ms: snap(at), length_ms: 2000, action: startingAction(d.kind, d.field, profileOfLane(lane)) }
     patchLane(laneId, { cues: [...lane.cues, cue] })
     setSel({ lane: laneId, cue: cue.id })
   }
@@ -607,7 +617,7 @@ export default function TimelinePanel({ chart, history, note, scene, onScene, no
               />
             </label>
           </div>
-          <ActionList title="Action" actions={[selCue.action]} onChange={(a) => a[0] && patchCue(sel.lane, sel.cue, { action: a[0] }, `cx:${sel.cue}`)} />
+          <ActionList title="Action" profile={profileOfLane(selLane)} actions={[selCue.action]} onChange={(a) => a[0] && patchCue(sel.lane, sel.cue, { action: a[0] }, `cx:${sel.cue}`)} />
           <p className="muted">Fires once, {fmt(selCue.at_ms)} after {stateId} starts. “Lasts” only changes how it looks here.</p>
           <button className="danger" onClick={() => deleteCue(sel.lane, sel.cue)}>Delete cue</button>
         </Card>

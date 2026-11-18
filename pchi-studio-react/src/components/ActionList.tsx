@@ -1,4 +1,4 @@
-import type { ShowAction } from '@pchi/sdk'
+import type { ProfileKinds, ShowAction } from '@pchi/sdk'
 
 /**
  * Edits a state's actions without raw JSON: a kind (suggestions use the PIP
@@ -31,17 +31,20 @@ export default function ActionList({
   title,
   actions,
   onChange,
+  profile,
 }: {
   title: string
   actions: ShowAction[] | undefined
   onChange: (a: ShowAction[]) => void
+  /** The profile of the device these actions go to: its kinds are suggested, and its hint says what a value looks like. */
+  profile?: ProfileKinds
 }) {
   const list = actions ?? []
   const set = (i: number, a: ShowAction) => onChange(list.map((x, j) => (j === i ? a : x)))
 
   const changeKind = (i: number, kind: string) => {
     const a = list[i]
-    const field = ACTION_KINDS[kind]
+    const field = ACTION_KINDS[kind] ?? (profile?.kinds.includes(kind) ? 'value' : undefined)
     const untouched = !a.payload || Object.keys(a.payload).length === 0 || (isFlat(a.payload) && Object.values(a.payload).every((v) => v === ''))
     set(i, { ...a, kind, payload: untouched ? (field ? { [field]: '' } : {}) : a.payload })
   }
@@ -53,9 +56,15 @@ export default function ActionList({
       {list.map((a, i) => (
         <div className="action" key={i}>
           <div className="arow">
-            <input list="action-kinds" value={a.kind} onChange={(e) => changeKind(i, e.target.value)} aria-label="Action kind" placeholder="kind, e.g. scene.activate" />
+            <input list={profile && profile.kinds.length > 0 ? 'action-kinds-profile' : 'action-kinds'} value={a.kind} onChange={(e) => changeKind(i, e.target.value)} aria-label="Action kind" placeholder="kind, e.g. scene.activate" />
             <button className="x" aria-label="Remove action" onClick={() => onChange(list.filter((_, j) => j !== i))}>×</button>
           </div>
+          {profile && profile.kinds.length > 0 && (
+            <p className="muted" title="From the profile of the device this cue goes to">
+              {profile.name} takes {profile.kinds.join(', ')}.{profile.kinds.includes(a.kind) ? '' : ' This kind is not one of them.'}
+              {profile.hint ? ` ${profile.hint}` : ''}
+            </p>
+          )}
           {isFlat(a.payload) || !a.payload ? (
             <>
               {Object.entries(a.payload ?? {}).map(([k, v]) => (
@@ -101,6 +110,11 @@ export default function ActionList({
         </div>
       ))}
       <button onClick={() => onChange([...list, { kind: 'scene.activate', payload: { scene: '' } }])}>+ action</button>
+      <datalist id="action-kinds-profile">
+        {(profile?.kinds ?? []).map((k) => (
+          <option key={k} value={k} />
+        ))}
+      </datalist>
       <datalist id="action-kinds">
         {Object.keys(ACTION_KINDS).map((k) => (
           <option key={k} value={k} />

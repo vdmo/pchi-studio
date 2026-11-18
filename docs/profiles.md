@@ -11,6 +11,8 @@ files too: `crates/pchi-studio-api/profiles/*.json`. `GET /profiles` lists every
 3. In Studio's Rig tab, press **Add a system** and pick the profile under **From a tool profile** (the list is the runtime's own, so the runtime must be running and started with the folder). That adds a device with the profile's id, department and port already set; set its **host** (a serial profile's host is the port name). By hand: add a device (type **OSC**, or any), set its **host** and **port**, and add a parameter `profile` with
    the profile's id. A device that names a profile also takes its **department** from it, unless you set one.
 
+**Cues to a profile's device.** On the Timeline, a new cue in a lane whose device has a profile starts as a kind that profile takes (the department's usual kind if the profile takes it, else the profile's first), and the cue editor suggests the profile's kinds and shows the profile's hint beside the value, with a note when the kind is not one the profile takes. This reads the runtime's profile list, so it needs the runtime running; without it the editor works as before. The device a lane uses is the one chosen on the lane, or the only device for its department.
+
 A profile file with a built-in's `id` **replaces** it. If any file in the folder is wrong, the runtime refuses to start and names
 the file and the problem, rather than quietly leaving a tool on its old mapping.
 

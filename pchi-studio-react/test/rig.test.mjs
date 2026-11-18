@@ -146,3 +146,23 @@ test('only profiles with no entry of their own are offered, and odd ids are neve
   const types = ['x32', 'qsys', 'osc']
   assert.deepEqual(profilesWithoutEntry(ps, types).map((p) => p.id), ['stage-box'])
 })
+
+test('a cue to a profile-driven device starts as a kind its profile takes', () => {
+  const { profileForDevice, startingAction } = sdk
+  const profiles = [
+    { id: 'qsys', name: 'Q-SYS', kinds: ['audio.control', 'audio.snapshot'], hint: 'Main Gain=-10' },
+    { id: 'stage-box', name: 'Box', kinds: ['lighting.cue', 'lighting.blackout'] },
+  ]
+  // a built-in is found by its type, a device from a profile by the profile named in its settings
+  assert.equal(profileForDevice(node('q', 'qsys'), profiles).id, 'qsys')
+  assert.equal(profileForDevice(node('b', 'osc', { params: { profile: ' stage-box ' } }), profiles).id, 'stage-box')
+  assert.equal(profileForDevice(node('x', 'osc'), profiles), undefined)
+  assert.equal(profileForDevice(undefined, profiles), undefined)
+  // the department's usual kind is kept when the profile takes it
+  assert.deepEqual(startingAction('audio.snapshot', 'snapshot', profiles[0]), { kind: 'audio.snapshot', payload: { snapshot: '' } })
+  // otherwise the profile's first kind, with a plain value field
+  assert.deepEqual(startingAction('lighting.look', 'look', profiles[1]), { kind: 'lighting.cue', payload: { value: '' } })
+  // no profile, or one with no kinds: the department's usual
+  assert.deepEqual(startingAction('lighting.look', 'look'), { kind: 'lighting.look', payload: { look: '' } })
+  assert.deepEqual(startingAction('lighting.look', 'look', { id: 'p', name: 'P', kinds: [] }), { kind: 'lighting.look', payload: { look: '' } })
+})
