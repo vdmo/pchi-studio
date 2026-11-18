@@ -43,7 +43,8 @@ impl Device {
 
     /// Devices that are reached by their own protocol (DMX, OBS) rather than by OSC messages.
     pub fn is_direct(&self) -> bool {
-        Self::is_direct_kind(&self.kind) || self.is_link()
+        // a device of a generic type (osc) that names a profile is reached by that profile's protocol, not by OSC
+        Self::is_direct_kind(&self.kind) || self.is_link() || self.is_http() || self.is_rpc() || self.is_mqtt() || self.is_serial() || self.is_udp()
     }
 
     pub fn is_direct_kind(kind: &str) -> bool {

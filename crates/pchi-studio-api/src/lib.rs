@@ -133,6 +133,23 @@ fn session_id(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
 }
 
+/// The kind (and the field that carries its value) a one-off "try a cue" uses for a device: the department's usual one, unless the
+/// device's profile takes kinds and not that one, in which case the profile's first.
+fn try_kind(dev: &rig::Device) -> (String, &'static str) {
+    let (kind, field) = match dev.dept.as_str() {
+        "visual" => ("scene.activate", "scene"),
+        "lighting" => ("lighting.look", "look"),
+        "laser" => ("laser.cue", "cue"),
+        "motion" => ("motion.run", "program"),
+        _ => ("audio.snapshot", "snapshot"),
+    };
+    let kinds = profiles::kinds_for(dev.profile_key());
+    if !kinds.is_empty() && !kinds.iter().any(|k| k == kind) {
+        return (kinds[0].clone(), "value");
+    }
+    (kind.to_string(), field)
+}
+
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1322,14 +1339,8 @@ impl Show {
         if value.is_empty() || value.len() > 200 {
             return Err("give a value, for example a cue number".into());
         }
-        let (kind, field) = match dev.dept.as_str() {
-            "visual" => ("scene.activate", "scene"),
-            "lighting" => ("lighting.look", "look"),
-            "laser" => ("laser.cue", "cue"),
-            "motion" => ("motion.run", "program"),
-            _ => ("audio.snapshot", "snapshot"),
-        };
-        let action = Action::new(kind, json!({ field: value }));
+        let (kind, field) = try_kind(&dev);
+        let action = Action::new(&kind, json!({ field: value }));
         let sent_as: Vec<Value> = output::wire_lines(&dev, &action)?.into_iter().map(|(a, args)| json!({"address": a, "args": args})).collect();
         let packets = if dev.is_direct() { Vec::new() } else { output::packets_for(&dev, &action)? };
         let mut m = json!({"type": "delivery", "ts": now_ms(), "kind": kind, "lane": null, "cue": null, "device": dev.id, "label": dev.label, "dept": dev.dept, "target": dev.address(), "sent_as": sent_as, "manual": true});
@@ -1366,6 +1377,20 @@ impl Show {
         }
         self.report(m.clone());
         Ok(m)
+    }
+
+    /// What a cue of this kind and value would send to this device, or why it would be refused. Sends nothing and changes nothing,
+    /// so the editor can ask while a person types.
+    pub fn check_cue(&self, id: &str, kind: &str, value: &str) -> Result<Value, String> {
+        let out = self.output.lock().unwrap().clone().ok_or("this show has no rig")?;
+        let dev = out.devices().iter().find(|d| d.id == id).cloned().ok_or_else(|| format!("no device '{id}' in the rig"))?;
+        let kind = kind.trim();
+        if kind.is_empty() || kind.len() > 60 || value.len() > 200 {
+            return Err("give a cue kind (up to 60 characters) and a value (up to 200)".into());
+        }
+        let action = Action::new(kind, json!({ "value": value.trim() }));
+        let lines: Vec<Value> = output::wire_lines(&dev, &action)?.into_iter().map(|(a, args)| json!({"address": a, "args": args})).collect();
+        Ok(json!({"ok": true, "device": dev.id, "label": dev.label, "sent_as": lines, "note": "nothing was sent"}))
     }
 
     pub fn current_state(&self) -> String {
@@ -2229,6 +2254,7 @@ pub fn router_with_token(show: Arc<Show>, token: Option<String>) -> Router {
         .route("/proposals/:id/:verb", post(post_decide))
         .route("/governance/export", get(get_governance))
         .route("/devices/:id/try", post(post_try))
+        .route("/devices/:id/check", post(post_check))
         .route("/laser/stop", post(post_laser_stop))
         .route("/motion/stop", post(post_motion_stop))
         .route("/devices/:id/arm", post(post_arm))
@@ -2671,6 +2697,18 @@ async fn post_try(State(a): State<App>, Path(id): Path<String>, q: Query<HashMap
             (StatusCode::OK, Json(v))
         }
         Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"error": e}))),
+    }
+}
+
+/// `POST /devices/:id/check` {kind, value}: what that cue would send to the device, or why it would be refused. Sends nothing and
+/// changes nothing, so it needs only the feed token (if any), like the other read-only calls.
+async fn post_check(State(a): State<App>, Path(id): Path<String>, q: Query<HashMap<String, String>>, h: HeaderMap, Json(body): Json<Value>) -> impl IntoResponse {
+    if !authorized(&a.token, &q, &h) {
+        return unauthorized();
+    }
+    match a.show.check_cue(&id, body["kind"].as_str().unwrap_or(""), body["value"].as_str().unwrap_or("")) {
+        Ok(v) => (StatusCode::OK, Json(v)),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "error": e}))),
     }
 }
 
@@ -4230,6 +4268,47 @@ mod tests {
         assert_eq!(http(addr, "POST", "/devices/e1/try", r#"{"value":"1"}"#, "").await.0, 403);
         let (st, v) = http(addr, "POST", "/devices/e1/try", r#"{"value":"1"}"#, "X-Pchi-Edit-Key: k\r\n").await;
         assert_eq!((st, v["sent_as"][0]["address"].as_str()), (200, Some("/eos/cue/1/fire")));
+    }
+
+    #[tokio::test]
+    async fn a_profile_device_is_tried_with_a_kind_its_profile_takes_and_a_cue_can_be_checked_without_sending() {
+        let _ = udpout::load_values(vec![json!({"id":"lib-udp","name":"Lib box","transport":"udp","dept":"lighting","port":9,"kinds":["lighting.cue"],"actions":{"lighting.cue":{"value":"([1-9][0-9]{0,2})","send":"GO {1}","end":"lf","basis":"vendor","source":"t"}}})], "t").unwrap();
+        let rx = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = rx.local_addr().unwrap().port();
+        let mut d = device("u1", "qlab", port);
+        d.kind = "osc".into();
+        d.dept = "lighting".into();
+        d.profile = Some("lib-udp".into());
+        let live = Show::start_with(quick(), EventStore::open_in_memory().unwrap(), Some(Output::new(vec![d], true))).unwrap();
+        // "try a cue" used the department's kind (lighting.look), which this profile does not take: now it uses the profile's
+        let m = live.try_cue("u1", "7").await.unwrap();
+        assert_eq!(m["status"], "sent", "{m}");
+        assert_eq!(m["kind"], "lighting.cue");
+        let mut buf = [0u8; 32];
+        let (n, _) = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv_from(&mut buf)).await.unwrap().unwrap();
+        assert_eq!(&buf[..n], b"GO 7
+");
+        // a check says what would be sent, and sends nothing
+        let c = live.check_cue("u1", "lighting.cue", "12").unwrap();
+        assert_eq!(c["ok"], true);
+        assert!(c["sent_as"][0]["address"].as_str().unwrap().ends_with("GO 12\\n"), "{c}");
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv_from(&mut buf)).await.is_err(), "a check sends nothing");
+        // and says why not
+        assert!(live.check_cue("u1", "lighting.cue", "0").unwrap_err().contains("not a value"));
+        assert!(live.check_cue("u1", "lighting.look", "1").unwrap_err().contains("does not take"));
+        assert!(live.check_cue("nope", "lighting.cue", "1").unwrap_err().contains("no device"));
+        assert!(live.check_cue("u1", "", "1").is_err());
+        // over HTTP it needs no key
+        live.set_edit_key(Some("k".into()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = router_with_token(Arc::clone(&live), None);
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (st, v) = http(addr, "POST", "/devices/u1/check", r#"{"kind":"lighting.cue","value":"5"}"#, "").await;
+        assert_eq!((st, v["ok"].clone()), (200, json!(true)), "{v}");
+        let (st, v) = http(addr, "POST", "/devices/u1/check", r#"{"kind":"lighting.cue","value":"x"}"#, "").await;
+        assert_eq!(st, 400);
+        assert!(v["error"].as_str().unwrap().contains("not a value"));
     }
 
     #[tokio::test]

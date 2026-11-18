@@ -530,6 +530,22 @@ pub fn capture(device_profile: &str, address: &str) -> Option<(String, String, B
 }
 
 /// Every profile and what each rule rests on, for `GET /profiles` and the docs.
+/// The cue kinds a profile of any transport takes (empty when there is no such profile, or it names none).
+pub fn kinds_for(id: &str) -> Vec<String> {
+    if let Some(p) = get(id) {
+        return p.kinds.clone();
+    }
+    if let Some(p) = crate::textlink::get(id) {
+        return p.kinds().to_vec();
+    }
+    crate::httpout::get(id).map(|p| p.kinds.clone())
+        .or_else(|| crate::jsonrpc::get(id).map(|p| p.kinds.clone()))
+        .or_else(|| crate::mqttout::get(id).map(|p| p.kinds.clone()))
+        .or_else(|| crate::serialout::get(id).map(|p| p.kinds.clone()))
+        .or_else(|| crate::udpout::get(id).map(|p| p.kinds.clone()))
+        .unwrap_or_default()
+}
+
 /// The profile-driven outputs that are not OSC (text link, web, JSON-RPC, MQTT, serial, UDP), in the same listing: what each takes, and what it rests on.
 fn outputs() -> Vec<Value> {
     use serde_json::json;

@@ -1,4 +1,6 @@
+import { useEffect, useState } from 'react'
 import type { ProfileKinds, ShowAction } from '@pchi/sdk'
+import { checkCue, type CueCheck } from '../lib/profiles'
 
 /**
  * Edits a state's actions without raw JSON: a kind (suggestions use the PIP
@@ -27,17 +29,42 @@ const isFlat = (p: unknown): p is Record<string, Primitive> =>
 
 const coerce = (v: string): Primitive => (/^-?\d+(\.\d+)?$/.test(v) ? Number(v) : v)
 
+/**
+ * Asks the runtime, a moment after typing stops, what this cue would send to its device, and shows that or the reason it would be
+ * refused. Nothing is sent. When the runtime does not know the device yet (the rig has not been sent), it says so and checks nothing.
+ */
+function CueChecker({ deviceId, kind, value }: { deviceId: string; kind: string; value: string }) {
+  const [res, setRes] = useState<CueCheck | null>(null)
+  useEffect(() => {
+    setRes(null)
+    if (!kind.trim()) return
+    let live = true
+    const t = setTimeout(() => checkCue(deviceId, kind, value).then((r) => live && setRes(r)), 400)
+    return () => {
+      live = false
+      clearTimeout(t)
+    }
+  }, [deviceId, kind, value])
+  if (!res) return null
+  if (res.ok) return <p className="muted" role="status" title="What the runtime would send for this cue. Nothing was sent.">Would send: {res.lines.join(' · ')}</p>
+  if (res.unknown) return <p className="muted" role="status">Not checked: {res.error}. Send the show to the runtime to check this cue against the device.</p>
+  return <p className="muted tc-warn" role="status">The device would refuse this: {res.error}</p>
+}
+
 export default function ActionList({
   title,
   actions,
   onChange,
   profile,
+  deviceId,
 }: {
   title: string
   actions: ShowAction[] | undefined
   onChange: (a: ShowAction[]) => void
   /** The profile of the device these actions go to: its kinds are suggested, and its hint says what a value looks like. */
   profile?: ProfileKinds
+  /** The rig device these actions go to: when given, each action is checked against it as it is typed. */
+  deviceId?: string
 }) {
   const list = actions ?? []
   const set = (i: number, a: ShowAction) => onChange(list.map((x, j) => (j === i ? a : x)))
@@ -65,6 +92,7 @@ export default function ActionList({
               {profile.hint ? ` ${profile.hint}` : ''}
             </p>
           )}
+          {deviceId && <CueChecker deviceId={deviceId} kind={a.kind} value={isFlat(a.payload) ? String(Object.values(a.payload)[0] ?? '') : ''} />}
           {isFlat(a.payload) || !a.payload ? (
             <>
               {Object.entries(a.payload ?? {}).map(([k, v]) => (

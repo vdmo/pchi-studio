@@ -617,7 +617,7 @@ export default function TimelinePanel({ chart, history, note, scene, onScene, no
               />
             </label>
           </div>
-          <ActionList title="Action" profile={profileOfLane(selLane)} actions={[selCue.action]} onChange={(a) => a[0] && patchCue(sel.lane, sel.cue, { action: a[0] }, `cx:${sel.cue}`)} />
+          <ActionList title="Action" profile={profileOfLane(selLane)} deviceId={selLane ? laneDevice(nodes, selLane)?.id : undefined} actions={[selCue.action]} onChange={(a) => a[0] && patchCue(sel.lane, sel.cue, { action: a[0] }, `cx:${sel.cue}`)} />
           <p className="muted">Fires once, {fmt(selCue.at_ms)} after {stateId} starts. “Lasts” only changes how it looks here.</p>
           <button className="danger" onClick={() => deleteCue(sel.lane, sel.cue)}>Delete cue</button>
         </Card>

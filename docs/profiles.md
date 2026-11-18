@@ -13,6 +13,8 @@ files too: `crates/pchi-studio-api/profiles/*.json`. `GET /profiles` lists every
 
 **Cues to a profile's device.** On the Timeline, a new cue in a lane whose device has a profile starts as a kind that profile takes (the department's usual kind if the profile takes it, else the profile's first), and the cue editor suggests the profile's kinds and shows the profile's hint beside the value, with a note when the kind is not one the profile takes. This reads the runtime's profile list, so it needs the runtime running; without it the editor works as before. The device a lane uses is the one chosen on the lane, or the only device for its department.
 
+**Checking a cue as you type.** Under a cue's kind and value the editor asks the runtime (`POST /devices/<id>/check` with `{kind, value}`) what that cue would send to the device, and shows it (`Would send: …`), or the reason it would be refused, in the profile's own words. Nothing is sent and nothing changes, so it needs only the feed token. The runtime knows a device only after the show has been sent to it; until then the editor says `Not checked` and why. It checks what the runtime's profile says, which is the same check the Doors check and a real send use, but a pass is not proof the device understands it. "Try a cue" on a device added from a profile now uses a kind that profile takes (before, it used the department's usual kind and a UDP, web, MQTT or serial device refused it or got an OSC message).
+
 A profile file with a built-in's `id` **replaces** it. If any file in the folder is wrong, the runtime refuses to start and names
 the file and the problem, rather than quietly leaving a tool on its old mapping.
 
