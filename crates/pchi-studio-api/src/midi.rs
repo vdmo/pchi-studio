@@ -31,6 +31,17 @@ pub struct MidiBinding {
     pub pc: Option<u8>,
     #[serde(default)]
     pub timecode: Option<String>,
+    /// Trigger: a MIDI Show Control command heard (go, stop, resume, load, all-off, restore, reset), optionally narrowed by cue, list, device (0 to 111; all-call also matches) and format.
+    #[serde(default)]
+    pub msc: Option<String>,
+    #[serde(default)]
+    pub cue: Option<String>,
+    #[serde(default)]
+    pub list: Option<String>,
+    #[serde(default)]
+    pub device: Option<u8>,
+    #[serde(default)]
+    pub format: Option<String>,
     /// Effect: send this event, set this context key (from a controller), or "laser.stop".
     #[serde(default)]
     pub event: Option<String>,
@@ -68,9 +79,37 @@ pub fn check(specs: &[MidiSpec]) -> Result<(), String> {
             return Err(format!("{name}: no bindings"));
         }
         for b in &s.bindings {
-            let triggers = b.note.is_some() as u8 + b.cc.is_some() as u8 + b.pc.is_some() as u8 + b.timecode.is_some() as u8;
+            let triggers = b.note.is_some() as u8 + b.cc.is_some() as u8 + b.pc.is_some() as u8 + b.timecode.is_some() as u8 + b.msc.is_some() as u8;
             if triggers != 1 {
-                return Err(format!("{name}: each binding needs exactly one of note, cc, pc or timecode"));
+                return Err(format!("{name}: each binding needs exactly one of note, cc, pc, msc or timecode"));
+            }
+            if b.msc.is_none() && (b.cue.is_some() || b.list.is_some() || b.device.is_some() || b.format.is_some()) {
+                return Err(format!("{name}: cue, list, device and format belong to an msc binding"));
+            }
+            if let Some(cmd) = &b.msc {
+                if crate::msc::Command::from_name(cmd).is_none() {
+                    return Err(format!("{name}: msc '{cmd}' is not one of go, stop, resume, load, all-off, restore, reset"));
+                }
+                if b.channel.is_some() {
+                    return Err(format!("{name}: an msc binding has a device, not a channel"));
+                }
+                if b.device.is_some_and(|d| d > 111) {
+                    return Err(format!("{name}: msc device is 0 to 111"));
+                }
+                if let Some(f) = &b.format {
+                    if crate::msc::Format::from_name(f).is_none() {
+                        return Err(format!("{name}: msc format '{f}' is not one of lighting, moving-lights, sound, video"));
+                    }
+                }
+                for (what, v) in [("cue", &b.cue), ("list", &b.list)] {
+                    if v.as_deref().is_some_and(|v| !crate::msc::valid_number(v)) {
+                        return Err(format!("{name}: msc {what} must be a number such as 5 or 12.5"));
+                    }
+                }
+                if b.event.is_none() || b.context.is_some() || b.action.is_some() {
+                    return Err(format!("{name}: an msc binding presses an event; it cannot set a context value or stop anything"));
+                }
+                continue;
             }
             if let Some(c) = b.channel {
                 if !(1..=16).contains(&c) {
@@ -203,11 +242,58 @@ fn describe(m: &Msg) -> String {
     }
 }
 
+/// Which binding an MSC message matches: the command, the device (ours, or all-call), and any cue, list or format it names.
+pub fn msc_binding<'a>(specs: &'a [MidiBinding], m: &crate::msc::Msc) -> Option<&'a MidiBinding> {
+    specs.iter().find(|b| {
+        b.msc.as_deref().and_then(crate::msc::Command::from_name) == Some(m.command)
+            && (m.device == 0x7F || m.device == b.device.unwrap_or(0))
+            && b.format.as_deref().is_none_or(|f| crate::msc::Format::from_name(f) == Some(m.format))
+            && b.cue.as_ref().is_none_or(|c| m.cue.as_ref() == Some(c))
+            && b.list.as_ref().is_none_or(|l| m.list.as_ref() == Some(l))
+    })
+}
+
+/// Act on one MIDI Show Control message: it presses the binding's event, as a note would.
+fn handle_msc(show: &Arc<Show>, input: &MidiInput, m: &crate::msc::Msc) {
+    if !input.spec.bindings.iter().any(|b| b.msc.is_some()) {
+        return; // the input did not ask for MSC: a sysex is ignored as before
+    }
+    input.received.fetch_add(1, Ordering::Relaxed);
+    input.last_ms.store(now_ms(), Ordering::Relaxed);
+    let what = m.words();
+    *input.last.lock().unwrap() = what.clone();
+    let Some(event) = msc_binding(&input.spec.bindings, m).and_then(|b| b.event.clone()) else {
+        input.unbound.fetch_add(1, Ordering::Relaxed);
+        return;
+    };
+    let actor = input.actor();
+    if !show.allow(&actor, Perm::Go, None) {
+        show.receipt("show.go", "DENY", &actor, &format!("refused: this input may not press ({what}); it needs a place on the roster"));
+        return;
+    }
+    input.pressed.fetch_add(1, Ordering::Relaxed);
+    match show.apply_checked(&format!("midi:{}", input.spec.name), &event) {
+        Applied::Moved => {
+            show.receipt("show.go", "ALLOW", &actor, &format!("{what} sent '{event}': moved the show to {}", show.current_state()));
+        }
+        held @ Applied::Held { .. } => {
+            show.receipt("show.go", "DENY", &actor, &format!("{what} sent '{event}' {}", held.held_text().unwrap_or_default()));
+        }
+        Applied::Ignored => {}
+    }
+}
+
 /// Act on one MIDI message.
 pub fn handle(show: &Arc<Show>, input: &MidiInput, bytes: &[u8]) {
     let msg = parse(bytes);
     if msg == Msg::Other {
         return;
+    }
+    if let Msg::SysEx(b) = &msg {
+        if let Some(m) = crate::msc::decode(b) {
+            handle_msc(show, input, &m);
+            return;
+        }
     }
     // timecode first: quarter frames come four a frame and must not be counted as presses
     let tc = match &msg {
@@ -363,6 +449,37 @@ mod tests {
         assert!(matches!(parse(&[0xF0, 0x7F, 0x7F, 0x01, 0x01, 0, 0, 0, 0, 0xF7]), Msg::SysEx(_)));
         assert_eq!(parse(&[0xF8]), Msg::Other, "clock ticks are ignored");
         assert_eq!(parse(&[]), Msg::Other);
+    }
+
+    #[test]
+    fn an_msc_binding_is_checked_and_matches_by_command_device_cue_and_format() {
+        use crate::msc::{decode, from_words};
+        let specs = |t: &str| serde_json::from_str::<Vec<MidiSpec>>(&format!(r#"[{{"name":"Desk","bindings":[{t}]}}]"#)).unwrap();
+        let w = |s: &str| s.split_whitespace().map(str::to_string).collect::<Vec<_>>();
+        let heard = |s: &str| decode(&from_words(&w(s)).unwrap().encode().unwrap()).unwrap();
+        let s = specs(r#"{"msc":"go","cue":"5","event":"FIVE"},{"msc":"go","device":3,"format":"sound","event":"SND"},{"msc":"stop","event":"HALT"}"#);
+        assert!(check(&s).is_ok());
+        let b = &s[0].bindings;
+        let ev = |m: &str| msc_binding(b, &heard(m)).and_then(|x| x.event.clone());
+        assert_eq!(ev("go 5"), Some("FIVE".into()));
+        assert_eq!(ev("go 6"), None, "a binding for cue 5 does not take cue 6");
+        assert_eq!(ev("go 5 dev 4"), None, "another device's message is not ours");
+        assert_eq!(ev("go dev 3 fmt sound"), Some("SND".into()));
+        assert_eq!(ev("go dev 3"), None, "lighting, not sound");
+        assert_eq!(ev("stop 9"), Some("HALT".into()), "a binding with no cue takes any");
+        assert_eq!(ev("resume"), None);
+        let all_call = decode(&[0xF0, 0x7F, 0x7F, 0x02, 0x01, 0x02, 0xF7]).unwrap();
+        assert_eq!(msc_binding(b, &all_call).and_then(|x| x.event.clone()), Some("HALT".into()), "all-call is heard");
+        let bad = |t: &str| check(&specs(t)).err().unwrap_or_default();
+        assert!(bad(r#"{"msc":"fire","event":"X"}"#).contains("not one of go"));
+        assert!(bad(r#"{"msc":"go","action":"laser.stop"}"#).contains("presses an event"));
+        assert!(bad(r#"{"msc":"go","context":"c","event":"X"}"#).contains("cannot set a context"));
+        assert!(bad(r#"{"msc":"go","device":112,"event":"X"}"#).contains("0 to 111"));
+        assert!(bad(r#"{"msc":"go","format":"pyro","event":"X"}"#).contains("not one of lighting"));
+        assert!(bad(r#"{"msc":"go","cue":"a","event":"X"}"#).contains("number"));
+        assert!(bad(r#"{"msc":"go","channel":2,"event":"X"}"#).contains("device, not a channel"));
+        assert!(bad(r#"{"note":60,"cue":"1","event":"X"}"#).contains("belong to an msc"));
+        assert!(bad(r#"{"msc":"go","note":60,"event":"X"}"#).contains("exactly one of"));
     }
 
     #[test]

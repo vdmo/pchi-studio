@@ -26,13 +26,15 @@ Counting a protocol that fails these would make the list longer and the claim wo
 | Out | Text over TCP from a profile file: Universal Robots Dashboard, a KUKA example | built, pretend robot only | `textlink.rs`, `profiles/link/` |
 | Out | Modbus TCP (a PLC route) | built, simulated PLC only | `modbus.rs`, `plcsim.rs` |
 | Out | MIDI note, program change, controller, all-notes-off (needs `--features midi`) | built; the port-writing code has never run | `midiout.rs` |
+| Out | MIDI Show Control: go, stop, resume, load, all-off, restore, reset | built; layout from memory, never tried on a desk | `msc.rs` |
 | In | HTTP, WebSocket | built | `lib.rs` |
 | In | OSC (Stream Deck, tablets, button boxes) | built | `inputs.rs` |
 | In | MIDI notes, controllers and MIDI Time Code (needs `--features midi`) | built; the transport is not tested on real MIDI hardware | `midi.rs` |
+| In | MIDI Show Control commands (needs `--features midi`) | built; byte-tested only | `msc.rs`, `midi.rs` |
 | In | LTC timecode from an audio input (needs `--features audio`) | built | `ltc.rs` |
 | Import | CSV, QLab 4 cue lists | built | `import.rs` |
 
-**Not built:** MIDI Show Control (plain MIDI output is slice 3), HTTP/REST output, serial (RS-232/RS-485), GPIO, MQTT, PJLink, JSON-RPC, UDP/TCP raw-text send other than through a TCP link profile, NDI control, SMPTE/LTC *output*, Ableton Link, MIDI Show Control *input*. A search of the code for `serialport`, `reqwest`, `mqtt`, `pjlink` and `visca` finds none of them.
+**Not built:** HTTP/REST output, serial (RS-232/RS-485), GPIO, MQTT, PJLink, JSON-RPC, UDP/TCP raw-text send other than through a TCP link profile, NDI control, SMPTE/LTC *output*, Ableton Link. A search of the code for `serialport`, `reqwest`, `mqtt`, `pjlink` and `visca` finds none of them.
 
 ## Order of work, cheapest and most useful first
 
@@ -74,7 +76,7 @@ Each slice ends with a commit and push, so progress is visible and nothing sits 
 | 1 | Source-check and add the first Tranche A dialects (Reaper, Companion, Millumin, AbletonOSC) | **Built, not yet committed.** Ableton, Millumin and Companion rest on documents that were read; REAPER rests on search results quoting its config file. Byte tests pass; nothing tried on a real tool |
 | 2 | PJLink and the generic fixed-line profile (Tranche B) | **Built, not yet committed.** PJLink class 1 as a link profile (power on only, input, mute), with four small engine changes it needed: carriage-return line ends, per-action values with `{1}` to `{9}`, a greeting that can refuse a device, and replies ended by a carriage return. The fixed-line device is a documented recipe, not a built-in. No password support; not tried on a real projector |
 | 3 | MIDI output and notes/program/controller (Tranche C1) | **Built, not yet committed.** A `midi-out` device with a closed set of words (note, pc, cc, panic); byte tests; Doors check; compiles with `--features midi`. **The port-writing code has never run:** the machine had no MIDI sequencer, so there was no port to send to |
-| 4 | MIDI Show Control out and in | tests against the MSC byte layout; commit |
+| 4 | MIDI Show Control out and in | **Built, not yet committed.** `msc` values on a MIDI output (seven commands, four formats, one device; groups, all-call and pyro refused) and `msc` bindings on a MIDI input that press an event. Byte tests and read-back tests pass; the layout is from memory of the specification; never tried on a real desk |
 | 5 | HTTP/REST output with URL templates (C2) | tests, a stand-in server; commit |
 | 6 | Update this page, [industry-tools.md](industry-tools.md) and [positioning.md](positioning.md) to the new truth | commit |
 

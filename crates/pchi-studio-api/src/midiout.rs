@@ -75,14 +75,15 @@ fn channel(words: &mut Vec<String>) -> Result<u8, String> {
 
 /// Turn a cue's value into the messages it sends, or say what is wrong with it.
 pub fn parse(value: &str) -> Result<Vec<Step>, String> {
-    if value.chars().any(|c| c.is_control()) || value.len() > 40 {
+    if value.chars().any(|c| c.is_control()) || value.len() > 70 {
         return Err("a MIDI value is a few plain words, such as note 60 or pc 12 ch 2".into());
     }
     let mut words: Vec<String> = value.split_whitespace().map(|w| w.to_ascii_lowercase()).collect();
     let verb = if words.is_empty() { return Err("no MIDI value: write note 60, pc 12, cc 7 64 or panic".into()) } else { words.remove(0) };
     let step = |wait_ms: u64, bytes: Vec<u8>| Step { wait_ms, bytes };
-    let hint = || format!("'{value}' is not one of: note N [VEL], pc N, cc N V, panic, each optionally followed by ch C");
+    let hint = || format!("'{value}' is not one of: note N [VEL], pc N, cc N V, panic (each optionally followed by ch C), or msc go|stop|resume|load|all-off|restore|reset [cue]");
     match verb.as_str() {
+        "msc" => Ok(vec![step(0, crate::msc::from_words(&words)?.encode()?)]),
         "note" => {
             let ch = channel(&mut words)? - 1;
             if words.is_empty() || words.len() > 2 {
@@ -124,6 +125,9 @@ pub fn check(action: &Action) -> Result<(), String> {
 /// What a message is, in words (for a person reading what would be sent).
 pub fn words(bytes: &[u8]) -> String {
     use crate::midi::{parse, Msg};
+    if let Some(m) = crate::msc::decode(bytes) {
+        return m.words();
+    }
     match parse(bytes) {
         Msg::NoteOn { ch, note, vel } => format!("note on {note} velocity {vel} channel {ch}"),
         Msg::NoteOff { ch, note } => format!("note off {note} channel {ch}"),
@@ -246,6 +250,24 @@ mod tests {
         assert!(parse("start").unwrap_err().contains("is not one of"));
         assert!(parse("note 128").unwrap_err().contains("0 to 127"));
         assert!(parse(&"note 60 ".repeat(10)).is_err(), "too long");
+    }
+
+    #[test]
+    fn show_control_is_one_sysex_message_and_nothing_else_sysex_gets_through() {
+        let one = |v: &str| { let s = parse(v).unwrap(); assert_eq!(s.len(), 1); s[0].bytes.clone() };
+        assert_eq!(one("msc go 5"), [0xF0, 0x7F, 0, 2, 1, 1, 0x35, 0xF7]);
+        assert_eq!(one("MSC LOAD 2.5 list 1 dev 4 fmt video"), [0xF0, 0x7F, 4, 2, 0x30, 5, b'2', b'.', b'5', 0, b'1', 0xF7]);
+        for bad in ["msc", "msc fire 1", "msc go dev 127", "msc go fmt pyro", "msc go 1' or", "sysex f0 7f 7f 02 01 01 f7", "f0 7f 7f 02 01 01 f7", "msc timed-go 1"] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
+        // whatever "msc" accepts is an MSC message to one device: F0 7F dev 02 fmt cmd .. F7, data bytes 7-bit
+        for cmd in ["go", "stop", "resume 3", "load 3", "all-off", "restore", "reset"] {
+            for dev in [0, 50, 111] {
+                let b = one(&format!("msc {cmd} dev {dev}"));
+                assert_eq!((b[0], b[1], b[3], *b.last().unwrap()), (0xF0, 0x7F, 0x02, 0xF7), "{cmd}");
+                assert!(b[2] <= 111 && b[1..b.len() - 1].iter().all(|x| *x < 0x80));
+            }
+        }
     }
 
     #[test]

@@ -101,12 +101,38 @@ The cue's value says what to send, in a closed set of words:
 | `pc 12 ch 3` | program change |
 | `cc 7 64 ch 1` | controller 7 set to 64 |
 | `panic` | controller 123 (all notes off) on all 16 channels |
+| `msc go 5`, `msc load 12.5 list 2 dev 3 fmt sound`, `msc all-off` | one MIDI Show Control message (below) |
 
 - Numbers are sent as written, 0 to 127. A device that counts programs from 1 will show one more than you wrote. Channels are 1 to 16 (1 if not said). Velocity is 1 to 127, because velocity 0 means note off.
 - **Nothing else can be sent:** no system-exclusive, no clock, no start or stop, no free bytes. A cue, an agent or the command bar cannot put its own bytes on the wire. Anything not in the table is refused, and the Doors check shows the refusal before the show.
 - **MIDI has no acknowledgement.** "sent" means the message was handed to the port, not that the device acted on it. The Doors check says so.
 - It needs a runtime built with `--features midi` (the same system library as MIDI input). Without it the Doors check marks the device as failing, and a cue says so instead of pretending.
-- Not built yet: MIDI Show Control, system-exclusive, MIDI clock and timecode output.
+- Not built yet: free system-exclusive, MIDI clock and timecode output.
+
+### MIDI Show Control
+
+MIDI Show Control (MSC) is the standard message a lighting or sound desk takes to GO, STOP or load a cue. **Out:** a MIDI output cue value that starts with `msc`:
+
+```
+msc <go|stop|resume|load|all-off|restore|reset> [cue] [list N] [dev N] [fmt lighting|moving-lights|sound|video]
+```
+
+It sends `F0 7F <device> 02 <format> <command> [cue [00 list]] F7`, the cue and list as ASCII digits and dots. Defaults: device 0, format lighting. `load` needs a cue; `all-off`, `restore` and `reset` take none; `go`, `stop` and `resume` may name one (without one, the desk acts on its own current cue).
+
+- **Closed set:** only those seven commands and four formats. Pyrotechnics, machinery, rigging, lasers, timed go, set, fire and go-off are not built. Device is 0 to 111: a group or all-call message is refused, because it could move every desk at once. A cue cannot put other bytes on the wire.
+- **No reply.** MSC has none, so "sent" means handed to the port.
+- **Basis: memory.** The layout and codes are from memory of the MSC specification; no copy of the document was to hand. Nothing here has been seen to move a real desk. Check one against your desk's manual before relying on it: some desks count device ids from 1, and some need a cue list.
+
+**In:** an input binding with `msc` presses an event, like a note:
+
+```json
+{"midi": [{"name": "Desk", "port": "loopMIDI", "bindings": [
+  {"msc": "go", "cue": "5", "event": "NEXT"},
+  {"msc": "stop", "device": 3, "event": "HOLD"}
+]}]}
+```
+
+`cue`, `list`, `device` (default 0; an all-call message also matches) and `format` narrow what it takes; leave one out to take any. It can only press an event: not set a context value, not stop lasers or motion. It needs a place on the roster, like any press, and a scene's minimum holds it with a receipt. A sysex that is not plain MSC is ignored as before.
 
 ## What is tested, and what is not
 
@@ -114,6 +140,7 @@ The cue's value says what to send, in a closed set of words:
   jump rules, cues, `tc:` transitions and the minimum bypass, the OSC forms of timecode, MIDI parsing and bindings, and MTC
   driving a locked scene. OSC timecode was also played into a real runtime over real UDP at 25 fps: the cues fired at the right
   timecodes and the scene changed on its `tc:` transition.
+- **MIDI Show Control:** the exact bytes of every command and format, the refusals (groups, all-call, pyro and other formats, bad cue numbers), reading back what was built, and which binding a heard message matches. Not run against a real desk or a real MSC sender.
 - **MIDI output:** the words, the exact bytes (every channel, the limits, what is refused, and that no accepted value can make anything but a note, controller or program change), the descriptions and the Doors check are tested. The code that writes to a port compiles with `--features midi` but could not be run: the machine it was built on had no MIDI sequencer, so it has never sent a message to a port, real or virtual.
 - **Compiled but not run:** the MIDI port code (`--features midi`) and the audio device code (`--features audio`) compile against the real `midir` and `cpal` libraries on Linux, but have
   not been run against a MIDI device, a sound card or a playback machine. Treat them as unproven until you have sent them real MTC or LTC. The LTC **decoder** is tested with synthetic LTC (every rate, level, polarity, speed, noise, chunking, a start in the middle) and a file driving a locked scene.
