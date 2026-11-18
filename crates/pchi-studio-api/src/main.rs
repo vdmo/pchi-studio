@@ -15,7 +15,7 @@ use pchi_studio_api::{output::Output, rig, router_with_token, Show};
 #[command(version, about)]
 struct Cli {
     /// Show file: a Studio .pchi file (showchart + rig) or a bare showchart (.pchi.json).
-    #[arg(required_unless_present_any = ["midi_ports", "audio_devices", "new_roster_entry", "replay", "export_run"])]
+    #[arg(required_unless_present_any = ["midi_ports", "serial_ports", "audio_devices", "new_roster_entry", "replay", "export_run"])]
     file: Option<String>,
     /// Record to this SQLite file (default: in memory, lost on exit).
     #[arg(long)]
@@ -40,6 +40,9 @@ struct Cli {
     /// List the MIDI input ports this machine has (needs a build with --features midi) and exit.
     #[arg(long)]
     midi_ports: bool,
+    /// List the serial ports this machine reports (needs a build with --features serial) and exit.
+    #[arg(long)]
+    serial_ports: bool,
     /// A folder of tool profile files (*.json) to add to the built-in ones: how an action becomes the OSC a tool understands. A file with a built-in's id replaces it. See docs/profiles.md.
     #[arg(long, value_name = "DIR", env = "PCHI_PROFILES")]
     profiles: Option<String>,
@@ -151,6 +154,16 @@ async fn main() -> anyhow::Result<()> {
         }
         for d in devs {
             println!("{d}");
+        }
+        return Ok(());
+    }
+    if cli.serial_ports {
+        let ports = pchi_studio_api::serialout::list_ports();
+        if ports.is_empty() {
+            println!("no serial ports found (or this build has no serial support: build with --features serial)");
+        }
+        for p in ports {
+            println!("{p}");
         }
         return Ok(());
     }

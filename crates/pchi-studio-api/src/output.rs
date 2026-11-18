@@ -47,6 +47,7 @@ pub struct Output {
     textlinks: Arc<crate::textlink::TextLinks>,
     /// MIDI output devices: their open ports. Shared across live edits.
     midiout: Arc<crate::midiout::MidiOut>,
+    serial: Arc<crate::serialout::Serial>,
 }
 
 /// What came of delivering an action, honestly: `sent` (it left; nothing more is known), `accepted` (the device said yes), `running` (a
@@ -75,7 +76,7 @@ pub enum Plan {
 
 impl Output {
     pub fn new(devices: Vec<Device>, send: bool) -> Self {
-        Self { devices, send: std::sync::atomic::AtomicBool::new(send), armed: Mutex::new(BTreeSet::new()), links: Arc::new(Links::default()), probe_every: Duration::from_secs(5), link_timeout: Duration::from_secs(15), dmx: Arc::new(crate::dmx::Dmx::default()), obs: Arc::new(crate::obs::Obs::default()), textlinks: Arc::default(), midiout: Arc::default() }
+        Self { devices, send: std::sync::atomic::AtomicBool::new(send), armed: Mutex::new(BTreeSet::new()), links: Arc::new(Links::default()), probe_every: Duration::from_secs(5), link_timeout: Duration::from_secs(15), dmx: Arc::new(crate::dmx::Dmx::default()), obs: Arc::new(crate::obs::Obs::default()), textlinks: Arc::default(), midiout: Arc::default(), serial: Arc::default() }
     }
 
     /// Change how often devices are probed and when silence counts as lost (the defaults are 5 s and 15 s).
@@ -128,7 +129,7 @@ impl Output {
     /// The same output with a new device list (after a live edit), keeping the armed state of lasers that are still there.
     pub fn with_devices(&self, devices: Vec<Device>) -> Self {
         let keep: BTreeSet<String> = self.armed.lock().unwrap().iter().filter(|id| devices.iter().any(|d| &d.id == *id && crate::rig::is_armable(&d.dept))).cloned().collect();
-        Self { devices, send: std::sync::atomic::AtomicBool::new(self.sending()), armed: Mutex::new(keep), links: Arc::clone(&self.links), probe_every: self.probe_every, link_timeout: self.link_timeout, dmx: Arc::clone(&self.dmx), obs: Arc::clone(&self.obs), textlinks: Arc::clone(&self.textlinks), midiout: Arc::clone(&self.midiout) }
+        Self { devices, send: std::sync::atomic::AtomicBool::new(self.sending()), armed: Mutex::new(keep), links: Arc::clone(&self.links), probe_every: self.probe_every, link_timeout: self.link_timeout, dmx: Arc::clone(&self.dmx), obs: Arc::clone(&self.obs), textlinks: Arc::clone(&self.textlinks), midiout: Arc::clone(&self.midiout), serial: Arc::clone(&self.serial) }
     }
 
     pub fn is_armed(&self, id: &str) -> bool {
@@ -250,6 +251,9 @@ impl Output {
 
     /// Like `deliver`, but says how far it got: `sent`, `accepted` or `running`; or `refused` / `failed` with the reason.
     pub async fn deliver_detail(&self, dev: &Device, action: &Action) -> Result<Delivered, Undelivered> {
+        if dev.is_serial() {
+            return self.serial.apply(dev, action).await.map(|o| Delivered { target: o.target, status: o.status, note: Some(o.note) }).map_err(|e| Undelivered { status: e.status(), error: e.text().to_string() });
+        }
         if dev.is_mqtt() {
             return crate::mqttout::apply(dev, action).await.map(|o| Delivered { target: o.target, status: o.status, note: Some(o.note) }).map_err(|e| Undelivered { status: e.status(), error: e.text().to_string() });
         }
@@ -274,6 +278,9 @@ impl Output {
     pub async fn deliver(&self, dev: &Device, action: &Action) -> Result<String, String> {
         if dev.is_dmx() {
             return self.dmx.apply(dev, action).await;
+        }
+        if dev.is_serial() {
+            return self.serial.apply(dev, action).await.map(|o| o.target).map_err(|e| e.to_string());
         }
         if dev.is_mqtt() {
             return crate::mqttout::apply(dev, action).await.map(|o| o.target).map_err(|e| e.to_string());
@@ -320,6 +327,9 @@ pub fn wire_lines(dev: &Device, action: &Action) -> Result<Vec<(String, Vec<Valu
         let summary = crate::dmx::describe(dev, action)?;
         let proto = crate::dmx::proto_of(&dev.kind).ok_or("not a DMX device")?;
         return Ok(vec![(format!("{} universe {}", proto.name(), dev.universe.unwrap_or(proto.default_universe())), vec![Value::String(crate::dmx::value_of(action)), Value::String(summary)])]);
+    }
+    if dev.is_serial() {
+        return crate::serialout::describe(dev, action);
     }
     if dev.is_mqtt() {
         return crate::mqttout::describe(dev, action);

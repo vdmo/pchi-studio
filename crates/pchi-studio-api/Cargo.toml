@@ -81,13 +81,17 @@ rand = "0.8"
 primeswarm-pchi = { path = "../../primeswarm-pchi" }
 midir = { version = "0.10", optional = true }
 cpal = { version = "0.15", optional = true }
+serialport = { version = "4", default-features = false, optional = true }
 
 [features]
 # Read MIDI ports (notes, controllers, MIDI Time Code). Needs the system MIDI library: libasound2-dev on Linux.
 midi = ["dep:midir"]
 # Read LTC timecode from an audio input device. Needs the system audio library: libasound2-dev on Linux.
 audio = ["dep:cpal"]
+# Write to serial ports (RS-232, and RS-485 through an adapter). No system library needed: port names are given, not searched for.
+serial = ["dep:serialport"]
 
 [dev-dependencies]
+libc = "0.2"
 tokio = { version = "1.34", features = ["test-util"] }
 tokio-tungstenite = "0.24"

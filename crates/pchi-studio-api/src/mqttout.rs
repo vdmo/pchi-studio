@@ -251,6 +251,12 @@ pub fn publish_for(p: &MqttProfile, action: &Action) -> Result<Publish, String> 
     Ok(Publish { topic: render(&a.topic, &v, &caps, Enc::Text), payload: render(&a.payload, &v, &caps, if a.json { Enc::Json } else { Enc::Text }), qos: a.qos, retain: a.retain })
 }
 
+/// The Doors check's note when this device's rules do not all rest on the vendor's document.
+pub fn basis_note(dev: &Device) -> Option<String> {
+    let p = get(dev.profile_key())?;
+    crate::httpout::weak_note(&dev.label, &p.name, p.actions.values().map(|a| a.basis.as_str()))
+}
+
 fn profile_of(dev: &Device) -> Result<Arc<MqttProfile>, String> {
     get(dev.profile_key()).ok_or_else(|| format!("{} has no MQTT profile", dev.label))
 }

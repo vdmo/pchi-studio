@@ -272,6 +272,12 @@ pub fn request_for(p: &RpcProfile, action: &Action, id: u64) -> Result<Value, St
     Ok(req)
 }
 
+/// The Doors check's note when this device's rules do not all rest on the vendor's document.
+pub fn basis_note(dev: &Device) -> Option<String> {
+    let p = get(dev.profile_key())?;
+    crate::httpout::weak_note(&dev.label, &p.name, p.actions.values().map(|a| a.basis.as_str()))
+}
+
 fn profile_of(dev: &Device) -> Result<Arc<RpcProfile>, String> {
     get(dev.profile_key()).ok_or_else(|| format!("{} has no JSON-RPC profile", dev.label))
 }

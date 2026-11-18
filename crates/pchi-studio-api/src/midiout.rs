@@ -292,6 +292,10 @@ mod tests {
         assert!(check(&a("pc 400")).is_err());
         assert!(check(&Action::new("lighting.look", json!({}))).unwrap_err().contains("no MIDI value"));
         let dev = Device { id: "m1".into(), label: "Desk MIDI".into(), kind: KIND.into(), dept: "lighting".into(), host: Some("loopMIDI".into()), port: None, listen_port: None, profile: None, universe: None, patch: None, password: None, programs: None };
+        assert_eq!(dev.address().as_deref(), Some("MIDI port 'loopMIDI'"), "a MIDI port has an address of its own, so the Doors check does not call it a missing host and port");
+        let mut blank = dev.clone();
+        blank.host = None;
+        assert_eq!(blank.address().as_deref(), Some("the first MIDI output port"));
         let lines = describe(&dev, &a("note 60 90 ch 2")).unwrap();
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].0, "MIDI out to loopMIDI: note on 60 velocity 90 channel 2");

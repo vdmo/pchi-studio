@@ -30,6 +30,7 @@ Counting a protocol that fails these would make the list longer and the claim wo
 | Out | HTTP requests from a profile (GET, POST, PUT over plain http): Companion button API built in | built; stand-in server only; Companion route from memory | `httpout.rs`, `profiles/http/` |
 | Out | JSON-RPC 2.0 over TCP from a profile: Q-SYS QRC built in (Control.Set, Snapshot.Load) | built; stand-in device only; method names from memory | `jsonrpc.rs`, `profiles/jsonrpc/` |
 | Out | MQTT 3.1.1 publish (QoS 0 or 1) to a closed list of topics from a profile; no login, no TLS, no built-in profile | built; stand-in broker only | `mqttout.rs` |
+| Out | Serial lines (RS-232; RS-485 via adapter) from a profile, optional expected reply; needs `--features serial`; no built-in profile | built; the port code is tested against a pseudo-terminal, never real hardware | `serialout.rs` |
 | In | HTTP, WebSocket | built | `lib.rs` |
 | In | OSC (Stream Deck, tablets, button boxes) | built | `inputs.rs` |
 | In | MIDI notes, controllers and MIDI Time Code (needs `--features midi`) | built; the transport is not tested on real MIDI hardware | `midi.rs` |
@@ -37,7 +38,7 @@ Counting a protocol that fails these would make the list longer and the claim wo
 | In | LTC timecode from an audio input (needs `--features audio`) | built | `ltc.rs` |
 | Import | CSV, QLab 4 cue lists | built | `import.rs` |
 
-**Not built:** serial (RS-232/RS-485), GPIO, UDP/TCP raw-text send other than through a TCP link profile, NDI control, SMPTE/LTC *output*, Ableton Link. A search of the code for `serialport` and `visca` finds none of them; PJLink is a text-link profile, and HTTP and MQTT are small hand-written clients (no `reqwest`, no MQTT library, no TLS).
+**Not built:** GPIO, UDP/TCP raw-text send other than through a TCP link profile, NDI control, SMPTE/LTC *output*, Ableton Link. A search of the code for `visca` finds nothing; PJLink is a text-link profile, and HTTP and MQTT are small hand-written clients (no `reqwest`, no MQTT library, no TLS).
 
 ## Order of work, cheapest and most useful first
 
@@ -61,7 +62,7 @@ In this order, because each is testable without gear by checking bytes:
 2. *(Done.)* **HTTP/REST output** for Companion, PTZ cameras and webhooks. A closed list of URL templates in a profile, like the OSC ones; no free-form URLs from a cue.
 3. *(Done.)* **JSON-RPC over TCP** (the style used by Q-SYS and some media servers): built, Q-SYS from memory, no login.
 4. *(Done.)* **MQTT publish** (installations, sensors, building systems), with a topic allow-list.
-5. **Serial RS-232/RS-485**, behind a feature flag because it needs a system library.
+5. *(Done.)* **Serial RS-232/RS-485**, behind `--features serial` (no system library is needed; the flag keeps the dependency out of builds that do not want it).
 6. **SMPTE/LTC output** and **Ableton Link**, last, since they are clocks, not cues.
 
 *Done means:* encode tests, a stand-in receiver in the style of `ursim.rs` or `plcsim.rs`, a Rig tab entry, `gearcheck` coverage, a doc page that says what was and was not tried.
@@ -83,7 +84,7 @@ Each slice ends with a commit and push, so progress is visible and nothing sits 
 | 5 | HTTP/REST output with URL templates (C2) | **Done, `219613e`.** Profiles of `GET`/`POST`/`PUT` templates over plain http, a built-in Companion profile (route from memory), a documented camera/webhook recipe; a stand-in server tests the request and the outcomes. No TLS, no authentication, no answer body; never tried on a real device |
 | 6 | Update this page, [industry-tools.md](industry-tools.md) and [positioning.md](positioning.md) to the new truth | **Done.** Protocol rows, the "Not built" line and the positioning claim about protocol reach now match the code |
 
-**Next, in order:** serial RS-232/485 behind a feature flag, then SMPTE/LTC output and Ableton Link. Before any of those, the larger gap is not protocols: nothing here has run against a real tool.
+**Next, in order:** SMPTE/LTC output and Ableton Link. Before any of those, the larger gap is not protocols: nothing here has run against a real tool.
 
 If a slice finds a source I cannot confirm, the rules go in as `memory` and the Doors check will say so. The schedule slips before the honesty does.
 

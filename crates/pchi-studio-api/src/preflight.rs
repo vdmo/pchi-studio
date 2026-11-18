@@ -77,6 +77,18 @@ pub fn run(chart: &Showchart, output: Option<&Output>, readiness: &BTreeMap<Stri
                 dev("fail", "device", format!("{} is a MIDI output, and this runtime was built without MIDI (cargo build --features midi): its cues cannot be sent.", d.label));
             }
         }
+        // a serial device needs a build that can write to serial ports; a serial line gives no acknowledgement unless the profile expects a reply
+        if d.is_serial() {
+            if crate::serialout::BUILT {
+                dev("warn", "device", format!("{} is on a serial port: unless its profile expects a reply, a line that is written has left this machine and nothing says the device acted on it.", d.label));
+            } else {
+                dev("fail", "device", format!("{} is a serial device, and this runtime was built without serial (cargo build --features serial): its cues cannot be sent.", d.label));
+            }
+        }
+        // the profile-driven outputs (web, JSON-RPC, MQTT, serial): say when their rules rest on less than the vendor's own document
+        for note in [crate::httpout::basis_note(d), crate::jsonrpc::basis_note(d), crate::mqttout::basis_note(d), crate::serialout::weak_note(d)].into_iter().flatten() {
+            dev("warn", "device", note);
+        }
         // a DMX device's patch must make sense: fixtures that exist, addresses that fit, no channel used twice
         if d.is_dmx() {
             if let Some(text) = d.patch.as_deref().filter(|p| !p.trim().is_empty()) {
@@ -157,6 +169,15 @@ pub fn run(chart: &Showchart, output: Option<&Output>, readiness: &BTreeMap<Stri
             }
             if dev.kind == "obs" {
                 return match crate::obs::scene_of(action) {
+                    Err(e) => {
+                        *bad += 1;
+                        Some(("fail", format!("{what} to {}: {e}.", dev.label), Some(dev.id.clone())))
+                    }
+                    Ok(_) => None,
+                };
+            }
+            if dev.is_serial() {
+                return match crate::serialout::check_action(dev, action) {
                     Err(e) => {
                         *bad += 1;
                         Some(("fail", format!("{what} to {}: {e}.", dev.label), Some(dev.id.clone())))

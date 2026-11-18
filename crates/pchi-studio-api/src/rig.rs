@@ -47,7 +47,7 @@ impl Device {
     }
 
     pub fn is_direct_kind(kind: &str) -> bool {
-        kind == "obs" || kind == crate::midiout::KIND || crate::dmx::proto_of(kind).is_some() || crate::textlink::get(kind).is_some() || crate::httpout::get(kind).is_some() || crate::jsonrpc::get(kind).is_some() || crate::mqttout::get(kind).is_some()
+        kind == "obs" || kind == crate::midiout::KIND || crate::dmx::proto_of(kind).is_some() || crate::textlink::get(kind).is_some() || crate::httpout::get(kind).is_some() || crate::jsonrpc::get(kind).is_some() || crate::mqttout::get(kind).is_some() || crate::serialout::get(kind).is_some()
     }
 
     /// A device driven by a line of text over TCP, described by a link profile (see `textlink`): a robot's own command interface.
@@ -70,7 +70,19 @@ impl Device {
         crate::mqttout::get(self.profile_key()).is_some()
     }
 
+    /// A device on a serial port, from a profile (see `serialout`).
+    pub fn is_serial(&self) -> bool {
+        crate::serialout::get(self.profile_key()).is_some()
+    }
+
     pub fn address(&self) -> Option<String> {
+        // a MIDI output or a serial device is found by a port name, not by host and port
+        if self.kind == crate::midiout::KIND {
+            return Some(self.host.as_deref().map(str::trim).filter(|h| !h.is_empty()).map_or("the first MIDI output port".to_string(), |h| format!("MIDI port '{h}'")));
+        }
+        if self.is_serial() {
+            return self.host.as_deref().map(str::trim).filter(|h| !h.is_empty()).map(str::to_string);
+        }
         // an sACN device with no host sends to its universe's multicast address
         if let (Some(crate::dmx::Proto::Sacn), true) = (crate::dmx::proto_of(&self.kind), self.host.as_deref().map_or(true, |h| h.trim().is_empty())) {
             let u = self.universe.unwrap_or(1) as u16;

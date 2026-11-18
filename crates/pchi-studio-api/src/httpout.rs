@@ -254,6 +254,19 @@ pub fn summary() -> Value {
     )
 }
 
+/// The Doors check's note for a profile whose rules rest on anything but the vendor's own document: the basis words, said plainly.
+pub fn weak_note<'a>(label: &str, profile: &str, bases: impl Iterator<Item = &'a str>) -> Option<String> {
+    let all: Vec<&str> = bases.collect();
+    let mut weak: Vec<&str> = all.iter().copied().filter(|b| *b != "vendor").collect();
+    if weak.is_empty() {
+        return None;
+    }
+    let n = weak.len();
+    weak.sort();
+    weak.dedup();
+    Some(format!("{label}: {n} of {} rule(s) in the {profile} profile rest on {} rather than the vendor's documentation: prove them with pchi-gearcheck before relying on them.", all.len(), weak.join(" and ")))
+}
+
 // ---- building a request ----
 
 /// The first value in a cue's payload, as text.
@@ -333,6 +346,12 @@ pub fn request_for(p: &HttpProfile, action: &Action) -> Result<Request, String> 
     };
     let how = if a.content_type == Some("application/json") { Enc::Json } else { Enc::Text };
     Ok(Request { method: a.method, path: render(&a.path, &v, &caps, Enc::Path), body: a.body.as_ref().map(|b| render(b, &v, &caps, how)), content_type: a.content_type })
+}
+
+/// The Doors check's note when this device's rules do not all rest on the vendor's document.
+pub fn basis_note(dev: &Device) -> Option<String> {
+    let p = get(dev.profile_key())?;
+    weak_note(&dev.label, &p.name, p.actions.values().map(|a| a.basis.as_str()))
 }
 
 fn profile_of(dev: &Device) -> Result<Arc<HttpProfile>, String> {
