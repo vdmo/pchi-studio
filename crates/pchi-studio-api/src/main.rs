@@ -156,11 +156,15 @@ async fn main() -> anyhow::Result<()> {
     }
     if cli.midi_ports {
         let ports = pchi_studio_api::midi::list_ports();
-        if ports.is_empty() {
-            println!("no MIDI input ports found (or this build has no MIDI support: build with --features midi)");
+        let outs = pchi_studio_api::midiout::list_ports();
+        if ports.is_empty() && outs.is_empty() {
+            println!("no MIDI ports found (or this build has no MIDI support: build with --features midi)");
         }
         for p in ports {
-            println!("{p}");
+            println!("in:  {p}");
+        }
+        for p in outs {
+            println!("out: {p}");
         }
         return Ok(());
     }

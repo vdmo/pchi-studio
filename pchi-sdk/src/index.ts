@@ -48,7 +48,7 @@ export type NodeType =
   // venue
   | 'ghost-arcade' | 'projector' | 'led-wall' | 'audio-zone' | 'laser' | 'lighting-desk' | 'audio-console' | 'motion' | 'ur'
   // tool profiles (the exact OSC dialect of a popular tool)
-  | 'resolume' | 'grandma3' | 'eos' | 'x32' | 'beyond' | 'qlab' | 'magicq' | 'ableton' | 'reaper' | 'millumin' | 'companion' | 'pjlink' | 'artnet' | 'sacn' | 'obs'
+  | 'resolume' | 'grandma3' | 'eos' | 'x32' | 'beyond' | 'qlab' | 'magicq' | 'ableton' | 'reaper' | 'millumin' | 'companion' | 'pjlink' | 'midi-out' | 'artnet' | 'sacn' | 'obs'
   // intelligence
   | 'director-agent' | 'vision-agent' | 'audio-agent'
 
@@ -121,6 +121,9 @@ export const NODE_CATALOG: NodeSpec[] = [
   spec('venue', 'companion', 'Bitfocus Companion', { host: '127.0.0.1', port: 12321 }),
   // PJLink projectors listen on TCP 4352. A projector with a PJLink password is refused with that reason: turn authentication off on it.
   spec('venue', 'pjlink', 'Projector (PJLink)', { host: '127.0.0.1', port: 4352 }),
+  // MIDI output: the "host" is part of the MIDI output port's name (blank means the first port), and there is no port number. Cues say
+  // what to send: note 60, pc 12 ch 2, cc 7 64, panic. Needs a runtime built with --features midi. Serves audio unless you set another department.
+  spec('venue', 'midi-out', 'MIDI output', { host: '' }),
   // DMX over the network: the node's address (or a broadcast address) and the universe. Art-Net universes start at 0, sACN at 1;
   // an sACN device with no host sends to its universe's multicast address. "patch" names the fixtures on it, for example
   // "wash1=rgbw@1, wash2=rgbw@5, walls=wash1+wash2", so a cue can say wash1=blue instead of channel numbers.

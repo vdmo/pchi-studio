@@ -52,6 +52,7 @@ pub mod governance;
 pub mod inputs;
 pub mod mcp;
 pub mod midi;
+pub mod midiout;
 pub mod library;
 pub mod links;
 pub mod memory_api;

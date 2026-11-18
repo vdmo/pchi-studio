@@ -55,7 +55,7 @@ Every option with an environment variable can be set that way. A flag wins.
 | `--inputs FILE` | `PCHI_INPUTS` | OSC, MIDI and LTC inputs ([osc-input.md](osc-input.md), [timecode-and-midi.md](timecode-and-midi.md)) |
 | `--profiles DIR` | `PCHI_PROFILES` | Extra tool profiles (`*.json`). A built-in's id is replaced ([profiles.md](profiles.md)) |
 | `--fixtures DIR` | `PCHI_FIXTURES` | Extra DMX fixture files ([fixtures.md](fixtures.md)) |
-| `--midi-ports` | | List MIDI inputs and exit (build with `--features midi`) |
+| `--midi-ports` | | List MIDI input and output ports and exit (build with `--features midi`) |
 | `--audio-devices` | | List audio inputs and exit (build with `--features audio`) |
 
 ### Failover

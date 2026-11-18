@@ -154,7 +154,7 @@ async fn check_device(c: &mut dyn Console, out: &Output, dev: &Device, o: &Optio
         }
     }
     let (kind, field, hint) = what_for(dev);
-    let hint = if dev.is_dmx() { "levels (for example 1=255 or 1-3=50%)" } else if dev.kind == "obs" { "OBS scene (its exact name)" } else { hint };
+    let hint = if dev.is_dmx() { "levels (for example 1=255 or 1-3=50%)" } else if dev.kind == "obs" { "OBS scene (its exact name)" } else if dev.kind == crate::midiout::KIND { "MIDI message (note 60, pc 4, cc 7 64)" } else { hint };
     let value = c.ask(&format!("Which {hint} should it try? Pick a harmless one (Enter to skip):")).trim().to_string();
     if value.is_empty() {
         return r.skip("no value given");

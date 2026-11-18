@@ -89,12 +89,32 @@ cargo build --release -p pchi-studio-api --features midi
 On Linux that needs `libasound2-dev`. Without the feature, a `midi` input is refused at startup with that message and everything
 else works.
 
+## MIDI output
+
+A rig device of type **MIDI output** sends a short MIDI message when a cue reaches it, for a lighting desk that takes program changes, a sampler, a playback machine or a controller's lights. In the Rig tab add **MIDI output** and put part of the MIDI port's name in **host** (any case; blank means the first port). There is no port number. `pchi-studio-api --midi-ports` lists the input and output ports the machine has (`in:` and `out:`). It serves the audio department unless you set another one on the device.
+
+The cue's value says what to send, in a closed set of words:
+
+| Value | Sends |
+|---|---|
+| `note 60` or `note 60 100 ch 2` | note on (velocity 100 unless given), then note off 100 ms later |
+| `pc 12 ch 3` | program change |
+| `cc 7 64 ch 1` | controller 7 set to 64 |
+| `panic` | controller 123 (all notes off) on all 16 channels |
+
+- Numbers are sent as written, 0 to 127. A device that counts programs from 1 will show one more than you wrote. Channels are 1 to 16 (1 if not said). Velocity is 1 to 127, because velocity 0 means note off.
+- **Nothing else can be sent:** no system-exclusive, no clock, no start or stop, no free bytes. A cue, an agent or the command bar cannot put its own bytes on the wire. Anything not in the table is refused, and the Doors check shows the refusal before the show.
+- **MIDI has no acknowledgement.** "sent" means the message was handed to the port, not that the device acted on it. The Doors check says so.
+- It needs a runtime built with `--features midi` (the same system library as MIDI input). Without it the Doors check marks the device as failing, and a cue says so instead of pretending.
+- Not built yet: MIDI Show Control, system-exclusive, MIDI clock and timecode output.
+
 ## What is tested, and what is not
 
 - **Tested:** timecode maths at every rate (drop-frame included), the MTC decoder (every rate, lost messages, full frames), the
   jump rules, cues, `tc:` transitions and the minimum bypass, the OSC forms of timecode, MIDI parsing and bindings, and MTC
   driving a locked scene. OSC timecode was also played into a real runtime over real UDP at 25 fps: the cues fired at the right
   timecodes and the scene changed on its `tc:` transition.
+- **MIDI output:** the words, the exact bytes (every channel, the limits, what is refused, and that no accepted value can make anything but a note, controller or program change), the descriptions and the Doors check are tested. The code that writes to a port compiles with `--features midi` but could not be run: the machine it was built on had no MIDI sequencer, so it has never sent a message to a port, real or virtual.
 - **Compiled but not run:** the MIDI port code (`--features midi`) and the audio device code (`--features audio`) compile against the real `midir` and `cpal` libraries on Linux, but have
   not been run against a MIDI device, a sound card or a playback machine. Treat them as unproven until you have sent them real MTC or LTC. The LTC **decoder** is tested with synthetic LTC (every rate, level, polarity, speed, noise, chunking, a start in the middle) and a file driving a locked scene.
 - **Not covered:** LTC on a real sound card and a real playback machine (a real signal may be dirtier than the synthetic ones), timecode in `rehearse` (a rehearsal replays presses, not timecode), and timecode restored after

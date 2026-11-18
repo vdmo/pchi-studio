@@ -47,7 +47,7 @@ impl Device {
     }
 
     pub fn is_direct_kind(kind: &str) -> bool {
-        kind == "obs" || crate::dmx::proto_of(kind).is_some() || crate::textlink::get(kind).is_some()
+        kind == "obs" || kind == crate::midiout::KIND || crate::dmx::proto_of(kind).is_some() || crate::textlink::get(kind).is_some()
     }
 
     /// A device driven by a line of text over TCP, described by a link profile (see `textlink`): a robot's own command interface.
@@ -75,7 +75,7 @@ pub fn dept_of_type(t: &str) -> Option<&'static str> {
         "vork" | "unreal" | "touchdesigner" | "notch" | "projector" | "led-wall" | "resolume" | "obs" | "millumin" | "companion" | "pjlink" => "visual",
         "lighting" | "lighting-desk" | "grandma3" | "eos" | "magicq" | "artnet" | "sacn" => "lighting",
         "laser" | "beyond" => "laser",
-        "audio-zone" | "audio-console" | "audio-agent" | "x32" | "qlab" | "ableton" | "reaper" => "audio",
+        "audio-zone" | "audio-console" | "audio-agent" | "x32" | "qlab" | "ableton" | "reaper" | "midi-out" => "audio",
         "motion" | "ur" => "motion",
         _ => return None,
     })

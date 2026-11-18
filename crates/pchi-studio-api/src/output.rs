@@ -45,6 +45,8 @@ pub struct Output {
     obs: Arc<crate::obs::Obs>,
     /// Devices driven by a line of text over TCP (a robot's own command interface): their connections and what was last read from them.
     textlinks: Arc<crate::textlink::TextLinks>,
+    /// MIDI output devices: their open ports. Shared across live edits.
+    midiout: Arc<crate::midiout::MidiOut>,
 }
 
 /// What came of delivering an action, honestly: `sent` (it left; nothing more is known), `accepted` (the device said yes), `running` (a
@@ -73,7 +75,7 @@ pub enum Plan {
 
 impl Output {
     pub fn new(devices: Vec<Device>, send: bool) -> Self {
-        Self { devices, send: std::sync::atomic::AtomicBool::new(send), armed: Mutex::new(BTreeSet::new()), links: Arc::new(Links::default()), probe_every: Duration::from_secs(5), link_timeout: Duration::from_secs(15), dmx: Arc::new(crate::dmx::Dmx::default()), obs: Arc::new(crate::obs::Obs::default()), textlinks: Arc::default() }
+        Self { devices, send: std::sync::atomic::AtomicBool::new(send), armed: Mutex::new(BTreeSet::new()), links: Arc::new(Links::default()), probe_every: Duration::from_secs(5), link_timeout: Duration::from_secs(15), dmx: Arc::new(crate::dmx::Dmx::default()), obs: Arc::new(crate::obs::Obs::default()), textlinks: Arc::default(), midiout: Arc::default() }
     }
 
     /// Change how often devices are probed and when silence counts as lost (the defaults are 5 s and 15 s).
@@ -126,7 +128,7 @@ impl Output {
     /// The same output with a new device list (after a live edit), keeping the armed state of lasers that are still there.
     pub fn with_devices(&self, devices: Vec<Device>) -> Self {
         let keep: BTreeSet<String> = self.armed.lock().unwrap().iter().filter(|id| devices.iter().any(|d| &d.id == *id && crate::rig::is_armable(&d.dept))).cloned().collect();
-        Self { devices, send: std::sync::atomic::AtomicBool::new(self.sending()), armed: Mutex::new(keep), links: Arc::clone(&self.links), probe_every: self.probe_every, link_timeout: self.link_timeout, dmx: Arc::clone(&self.dmx), obs: Arc::clone(&self.obs), textlinks: Arc::clone(&self.textlinks) }
+        Self { devices, send: std::sync::atomic::AtomicBool::new(self.sending()), armed: Mutex::new(keep), links: Arc::clone(&self.links), probe_every: self.probe_every, link_timeout: self.link_timeout, dmx: Arc::clone(&self.dmx), obs: Arc::clone(&self.obs), textlinks: Arc::clone(&self.textlinks), midiout: Arc::clone(&self.midiout) }
     }
 
     pub fn is_armed(&self, id: &str) -> bool {
@@ -270,6 +272,9 @@ impl Output {
         if dev.kind == "obs" {
             return self.obs.apply(dev, action).await;
         }
+        if dev.kind == crate::midiout::KIND {
+            return self.midiout.apply(dev, action).await;
+        }
         self.send_packets(dev, packets_for(dev, action)?).await
     }
 
@@ -300,6 +305,9 @@ pub fn wire_lines(dev: &Device, action: &Action) -> Result<Vec<(String, Vec<Valu
     }
     if dev.is_link() {
         return crate::textlink::describe(dev, action);
+    }
+    if dev.kind == crate::midiout::KIND {
+        return crate::midiout::describe(dev, action);
     }
     if dev.kind == "obs" {
         let scene = crate::obs::scene_of(action)?;

@@ -69,6 +69,14 @@ pub fn run(chart: &Showchart, output: Option<&Output>, readiness: &BTreeMap<Stri
                 _ => dev("warn", "device", format!("{} gives no feedback: only its own READY or a test can show it is there.", d.label)),
             }
         }
+        // a MIDI output needs a build that can write to MIDI ports; MIDI has no acknowledgement either way
+        if d.kind == crate::midiout::KIND {
+            if crate::midiout::BUILT {
+                dev("warn", "device", format!("{} is a MIDI output: a message that is sent has left this machine for the port, and nothing says the device acted on it.", d.label));
+            } else {
+                dev("fail", "device", format!("{} is a MIDI output, and this runtime was built without MIDI (cargo build --features midi): its cues cannot be sent.", d.label));
+            }
+        }
         // a DMX device's patch must make sense: fixtures that exist, addresses that fit, no channel used twice
         if d.is_dmx() {
             if let Some(text) = d.patch.as_deref().filter(|p| !p.trim().is_empty()) {
@@ -137,6 +145,15 @@ pub fn run(chart: &Showchart, output: Option<&Output>, readiness: &BTreeMap<Stri
             if action.payload.as_object().is_some_and(|p| !p.is_empty() && p.values().all(|v| matches!(v, Value::String(x) if x.trim().is_empty()))) {
                 *bad += 1;
                 return Some(("fail", format!("{what}: the value is blank (set it in the Cue sheet)."), Some(dev.id.clone())));
+            }
+            if dev.kind == crate::midiout::KIND {
+                return match crate::midiout::check(action) {
+                    Err(e) => {
+                        *bad += 1;
+                        Some(("fail", format!("{what} to {}: {e}.", dev.label), Some(dev.id.clone())))
+                    }
+                    Ok(_) => None,
+                };
             }
             if dev.kind == "obs" {
                 return match crate::obs::scene_of(action) {
