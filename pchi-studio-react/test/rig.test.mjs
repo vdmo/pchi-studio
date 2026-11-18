@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 
 const sdk = createRequire(import.meta.url)('../.sdk-test/sdk.cjs')
-const { runCommandText, newShowchart, captureCue, rigDept, devicesFor, laneDevice, rigCheck, setLaneDevice, clearDevice, specOf } = sdk
+const { runCommandText, newShowchart, captureCue, rigDept, devicesFor, laneDevice, rigCheck, setLaneDevice, clearDevice, specOf, deviceForProfile, profilesWithoutEntry } = sdk
 
 const node = (id, type, extra = {}) => ({ id, type, label: id, position: { x: 0, y: 0 }, params: {}, ...extra })
 let n = 0
@@ -114,4 +114,35 @@ test('the tool profiles serve the departments they are for', () => {
   assert.equal(specOf('qlab').defaults.port, 53000)
   assert.equal(specOf('beyond').label, 'Pangolin BEYOND')
   assert.equal(specOf('resolume').defaults.port, 7000)
+})
+
+test('a profile the runtime loaded can be put on the rig as a device that names it', () => {
+  const udp = { id: 'stage-box', name: 'Stage relay box', dept: 'lighting', transport: 'udp', port: 7000 }
+  const d = deviceForProfile(udp, [], { x: 1, y: 2 })
+  assert.equal(d.type, 'osc')
+  assert.equal(d.label, 'Stage relay box')
+  assert.equal(d.dept, 'lighting')
+  assert.deepEqual(d.params, { host: '127.0.0.1', profile: 'stage-box', port: 7000 })
+  assert.equal(rigDept(d), 'lighting', 'the department comes from the profile')
+  assert.deepEqual(d.position, { x: 1, y: 2 })
+  // a second one gets its own id
+  const e = deviceForProfile(udp, [d], { x: 0, y: 0 })
+  assert.notEqual(e.id, d.id)
+  // a serial profile starts with a blank port name and no network port
+  const s = deviceForProfile({ id: 'proj-serial', name: 'Projector', dept: 'visual', transport: 'serial', port: null }, [], { x: 0, y: 0 })
+  assert.equal(s.params.host, '')
+  assert.equal('port' in s.params, false)
+  // a department the rig does not know is left unset, never invented
+  assert.equal(deviceForProfile({ id: 'x', name: 'X', dept: 'pyro', transport: 'udp' }, [], { x: 0, y: 0 }).dept, undefined)
+})
+
+test('only profiles with no entry of their own are offered, and odd ids are never offered', () => {
+  const ps = [
+    { id: 'x32', name: 'X32', dept: 'audio', transport: 'osc' },
+    { id: 'qsys', name: 'Q-SYS', dept: 'audio', transport: 'jsonrpc-tcp' },
+    { id: 'stage-box', name: 'Box', dept: 'lighting', transport: 'udp' },
+    { id: 'bad id!', name: 'Bad', dept: 'lighting', transport: 'udp' },
+  ]
+  const types = ['x32', 'qsys', 'osc']
+  assert.deepEqual(profilesWithoutEntry(ps, types).map((p) => p.id), ['stage-box'])
 })

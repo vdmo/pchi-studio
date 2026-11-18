@@ -8,7 +8,7 @@ files too: `crates/pchi-studio-api/profiles/*.json`. `GET /profiles` lists every
 
 1. Put one or more `*.json` files in a folder (each file is one profile, or a list of them).
 2. Start the runtime with `--profiles <folder>` (or `PCHI_PROFILES`). Run `pchi-gearcheck` with the same flag.
-3. In Studio's Rig tab, add a device (type **OSC**, or any), set its **host** and **port**, and add a parameter `profile` with
+3. In Studio's Rig tab, press **Add a system** and pick the profile under **From a tool profile** (the list is the runtime's own, so the runtime must be running and started with the folder). That adds a device with the profile's id, department and port already set; set its **host** (a serial profile's host is the port name). By hand: add a device (type **OSC**, or any), set its **host** and **port**, and add a parameter `profile` with
    the profile's id. A device that names a profile also takes its **department** from it, unless you set one.
 
 A profile file with a built-in's `id` **replaces** it. If any file in the folder is wrong, the runtime refuses to start and names

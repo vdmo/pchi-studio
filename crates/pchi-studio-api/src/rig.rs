@@ -156,7 +156,7 @@ pub fn load(text: &str) -> Result<(Showchart, Option<Vec<Device>>), String> {
     Ok((chart, None))
 }
 
-fn device_of(n: &Value) -> Option<Device> {
+pub(crate) fn device_of(n: &Value) -> Option<Device> {
     let kind = n.get("type")?.as_str()?.to_string();
     let params = n.get("params");
     // a profile named in the node's params (a tool the crew added a profile file for), if there is one

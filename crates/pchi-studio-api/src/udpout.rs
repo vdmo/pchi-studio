@@ -423,3 +423,27 @@ mod tests {
         assert!(weak_note(&dev("10.0.0.5", None)).is_none());
     }
 }
+
+#[cfg(test)]
+mod studio_rig_tests {
+    use super::*;
+
+    /// How Studio puts a profile on the rig: a generic `osc` device whose settings name the profile.
+    #[tokio::test]
+    async fn a_device_added_from_a_profile_in_studio_is_reached_by_its_profile() {
+        let _ = load_values(vec![serde_json::from_str(r#"{"id":"rig-udp","name":"Rig box","transport":"udp","dept":"lighting","port":7000,"kinds":["lighting.blackout"],"actions":{"lighting.blackout":{"send":"BO","end":"lf","basis":"vendor","source":"t"}}}"#).unwrap()], "t").unwrap();
+        let rx = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = rx.local_addr().unwrap().port();
+        let node = serde_json::json!({"nodes":[{"id":"rig-udp-1","type":"osc","label":"Rig box","dept":"lighting","position":{"x":0,"y":0},"params":{"host":"127.0.0.1","profile":"rig-udp","port":port}}]});
+        let devices = node["nodes"].as_array().unwrap().iter().filter_map(crate::rig::device_of).collect::<Vec<_>>();
+        let d = &devices[0];
+        assert!(d.is_udp());
+        assert_eq!(d.dept, "lighting");
+        assert_eq!(d.address().unwrap(), format!("127.0.0.1:{port}"));
+        let o = apply(d, &Action::new("lighting.blackout", serde_json::json!({}))).await.unwrap();
+        assert_eq!(o.status, "sent");
+        let mut buf = [0u8; 16];
+        let (n, _) = tokio::time::timeout(Duration::from_secs(2), rx.recv_from(&mut buf)).await.unwrap().unwrap();
+        assert_eq!(&buf[..n], b"BO\n");
+    }
+}

@@ -32,7 +32,10 @@ import {
   type ParamValue,
   type PchiEdge,
   type PchiNode,
+  deviceForProfile,
+  profilesWithoutEntry,
 } from '@pchi/sdk'
+import { fetchProfiles, type Profile } from '../lib/profiles'
 
 /**
  * The rig: which systems take part in the show (renderers, lighting, lasers,
@@ -94,6 +97,8 @@ function RigEditor({ rig, onChange, onRemoved, issues = [] }: RigProps) {
   const [selected, setSelected] = useState<string | null>(null)
   const [selectedEdge, setSelectedEdge] = useState<number | null>(null)
   const [library, setLibrary] = useState(false)
+  const [profiles, setProfiles] = useState<Profile[] | null>(null) // what the runtime has loaded, read when the list is opened
+  const [profilesError, setProfilesError] = useState('')
 
   const [nodes, setNodes, onNodesChange] = useNodesState<Node<RigNodeData>>([])
   useEffect(() => {
@@ -133,6 +138,18 @@ function RigEditor({ rig, onChange, onRemoved, issues = [] }: RigProps) {
     if (selected && !rig.nodes.some((n) => n.id === selected)) setSelected(null)
     if (selectedEdge !== null && selectedEdge >= rig.edges.length) setSelectedEdge(null)
   }, [rig, selected, selectedEdge])
+
+  useEffect(() => {
+    if (!library) return
+    fetchProfiles().then((p) => { setProfiles(p); setProfilesError('') }).catch((e) => setProfilesError(e instanceof Error ? e.message : 'the runtime did not answer'))
+  }, [library])
+
+  const addFromProfile = (p: Profile) => {
+    const n = deviceForProfile(p, rig.nodes, { x: 120 + rig.nodes.length * 40, y: 120 + (rig.nodes.length % 4) * 110 })
+    onChange({ ...rig, nodes: [...rig.nodes, n] })
+    setSelected(n.id)
+    setSelectedEdge(null)
+  }
 
   const addDevice = (type: NodeType) => {
     const s = specOf(type)
@@ -277,6 +294,25 @@ function RigEditor({ rig, onChange, onRemoved, issues = [] }: RigProps) {
                 </div>
               </div>
             ))}
+            <div>
+              <h5>From a tool profile</h5>
+              {profilesError ? (
+                <p className="muted">The runtime's profile list could not be read: {profilesError}. Start the runtime to add devices from its profiles.</p>
+              ) : !profiles ? (
+                <p className="muted">Reading the runtime's profiles…</p>
+              ) : (
+                <>
+                  <p className="muted">Tools the runtime has a profile for but that have no entry above: web, JSON-RPC, MQTT, serial and UDP devices, and any profile file you added. Set the host (and port) afterwards.</p>
+                  <div className="chips">
+                    {profilesWithoutEntry(profiles, NODE_CATALOG.map((s) => s.type)).map((p) => (
+                      <button key={p.id} className="chip" title={`${p.transport} · ${p.dept}`} onClick={() => addFromProfile(p)}>
+                        + {p.name}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
           </Card>
         )}
 

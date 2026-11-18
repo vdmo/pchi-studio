@@ -535,19 +535,19 @@ fn outputs() -> Vec<Value> {
     use serde_json::json;
     let mut v = Vec::new();
     macro_rules! add {
-        ($transport:expr, $list:expr, $acts:expr, $built:expr) => {
+        ($transport:expr, $list:expr, $acts:expr, $built:expr, $port:expr) => {
             for p in $list {
                 let kinds = $acts(&*p);
-                v.push(json!({"id": p.id, "name": p.name, "dept": p.dept, "transport": $transport, "built_in": $built(&*p), "notes": p.notes, "hint": p.hint, "kinds": kinds.iter().map(|k| k.0.clone()).collect::<Vec<_>>(), "actions": kinds.iter().map(|k| json!({"kind": k.0, "basis": k.1, "source": k.2})).collect::<Vec<_>>()}));
+                v.push(json!({"id": p.id, "name": p.name, "dept": p.dept, "transport": $transport, "port": $port(&*p), "built_in": $built(&*p), "notes": p.notes, "hint": p.hint, "kinds": kinds.iter().map(|k| k.0.clone()).collect::<Vec<_>>(), "actions": kinds.iter().map(|k| json!({"kind": k.0, "basis": k.1, "source": k.2})).collect::<Vec<_>>()}));
             }
         };
     }
-    add!("tcp-text", crate::textlink::list(), |p: &crate::textlink::LinkProfile| p.kinds().iter().map(|k| (k.clone(), p.basis.clone(), p.source.clone())).collect::<Vec<_>>(), |p: &crate::textlink::LinkProfile| p.built_in);
-    add!("http", crate::httpout::list(), |p: &crate::httpout::HttpProfile| p.kinds.iter().filter_map(|k| p.actions.get(k).map(|a| (k.clone(), a.basis.clone(), a.source.clone()))).collect::<Vec<_>>(), |p: &crate::httpout::HttpProfile| p.built_in);
-    add!("jsonrpc-tcp", crate::jsonrpc::list(), |p: &crate::jsonrpc::RpcProfile| p.kinds.iter().filter_map(|k| p.actions.get(k).map(|a| (k.clone(), a.basis.clone(), a.source.clone()))).collect::<Vec<_>>(), |p: &crate::jsonrpc::RpcProfile| p.built_in);
-    add!("mqtt", crate::mqttout::list(), |p: &crate::mqttout::MqttProfile| p.kinds.iter().filter_map(|k| p.actions.get(k).map(|a| (k.clone(), a.basis.clone(), a.source.clone()))).collect::<Vec<_>>(), |p: &crate::mqttout::MqttProfile| p.built_in);
-    add!("serial", crate::serialout::list(), |p: &crate::serialout::SerialProfile| p.kinds.iter().filter_map(|k| p.actions.get(k).map(|a| (k.clone(), a.basis.clone(), a.source.clone()))).collect::<Vec<_>>(), |p: &crate::serialout::SerialProfile| p.built_in);
-    add!("udp", crate::udpout::list(), |p: &crate::udpout::UdpProfile| p.kinds.iter().filter_map(|k| p.actions.get(k).map(|a| (k.clone(), a.basis.clone(), a.source.clone()))).collect::<Vec<_>>(), |_p: &crate::udpout::UdpProfile| false);
+    add!("tcp-text", crate::textlink::list(), |p: &crate::textlink::LinkProfile| p.kinds().iter().map(|k| (k.clone(), p.basis.clone(), p.source.clone())).collect::<Vec<_>>(), |p: &crate::textlink::LinkProfile| p.built_in, |p: &crate::textlink::LinkProfile| p.port);
+    add!("http", crate::httpout::list(), |p: &crate::httpout::HttpProfile| p.kinds.iter().filter_map(|k| p.actions.get(k).map(|a| (k.clone(), a.basis.clone(), a.source.clone()))).collect::<Vec<_>>(), |p: &crate::httpout::HttpProfile| p.built_in, |p: &crate::httpout::HttpProfile| p.port);
+    add!("jsonrpc-tcp", crate::jsonrpc::list(), |p: &crate::jsonrpc::RpcProfile| p.kinds.iter().filter_map(|k| p.actions.get(k).map(|a| (k.clone(), a.basis.clone(), a.source.clone()))).collect::<Vec<_>>(), |p: &crate::jsonrpc::RpcProfile| p.built_in, |p: &crate::jsonrpc::RpcProfile| p.port);
+    add!("mqtt", crate::mqttout::list(), |p: &crate::mqttout::MqttProfile| p.kinds.iter().filter_map(|k| p.actions.get(k).map(|a| (k.clone(), a.basis.clone(), a.source.clone()))).collect::<Vec<_>>(), |p: &crate::mqttout::MqttProfile| p.built_in, |p: &crate::mqttout::MqttProfile| p.port);
+    add!("serial", crate::serialout::list(), |p: &crate::serialout::SerialProfile| p.kinds.iter().filter_map(|k| p.actions.get(k).map(|a| (k.clone(), a.basis.clone(), a.source.clone()))).collect::<Vec<_>>(), |p: &crate::serialout::SerialProfile| p.built_in, |_p: &crate::serialout::SerialProfile| None::<u16>);
+    add!("udp", crate::udpout::list(), |p: &crate::udpout::UdpProfile| p.kinds.iter().filter_map(|k| p.actions.get(k).map(|a| (k.clone(), a.basis.clone(), a.source.clone()))).collect::<Vec<_>>(), |_p: &crate::udpout::UdpProfile| false, |p: &crate::udpout::UdpProfile| p.port);
     v
 }
 
@@ -890,6 +890,9 @@ mod outputs_listing_tests {
         assert_eq!(by("x32")["transport"], "osc");
         assert_eq!(by("companion-http")["transport"], "http");
         assert_eq!(by("qsys")["transport"], "jsonrpc-tcp");
+        assert_eq!(by("qsys")["port"], 1710);
+        assert_eq!(by("pjlink")["port"], 4352);
+        assert!(by("x32")["port"].is_null() || by("x32").get("port").is_none());
         assert_eq!(by("pjlink")["transport"], "tcp-text");
         let q = by("qsys");
         assert_eq!(q["dept"], "audio");

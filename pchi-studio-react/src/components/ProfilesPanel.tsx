@@ -1,8 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { apiBase, feedToken, signedInSession } from './liveFeed'
-
-type Action = { kind: string; basis: string; source: string }
-type Profile = { id: string; name: string; dept: string; transport: string; built_in: boolean; hint?: string; notes?: string; kinds: string[]; actions?: Action[] }
+import { fetchProfiles, type Profile } from '../lib/profiles'
 
 const TRANSPORT: Record<string, string> = {
   osc: 'OSC (UDP)',
@@ -24,16 +21,7 @@ export default function ProfilesPanel() {
   const [q, setQ] = useState('')
 
   useEffect(() => {
-    const t = feedToken()
-    const s = signedInSession()
-    fetch(`${apiBase()}/profiles`, { headers: { ...(t ? { Authorization: `Bearer ${t}` } : {}), ...(s ? { 'X-Pchi-Session': s } : {}) } })
-      .then(async (r) => {
-        if (!r.ok) throw new Error(`the runtime refused it (${r.status})`)
-        const body = await r.json()
-        if (!Array.isArray(body)) throw new Error('the runtime sent something else')
-        setList(body as Profile[])
-      })
-      .catch((e) => setError(e instanceof Error ? e.message : 'the runtime did not answer'))
+    fetchProfiles().then(setList).catch((e) => setError(e instanceof Error ? e.message : 'the runtime did not answer'))
   }, [])
 
   const groups = useMemo(() => {

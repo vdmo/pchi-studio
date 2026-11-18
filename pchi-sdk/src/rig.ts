@@ -129,3 +129,33 @@ export function requiredFor(chart: Showchart, scene: string | undefined, nodes: 
   }
   return need
 }
+
+/** What the runtime says about a profile (GET /profiles): enough to put a device on the rig. */
+export interface ProfileInfo {
+  id: string
+  name: string
+  dept: string
+  transport: string
+  port?: number | null
+  hint?: string
+}
+
+/** Profiles that already have an entry of their own in the "Add a system" list (a catalog type with the same id). */
+export function profilesWithoutEntry<T extends ProfileInfo>(profiles: T[], catalogTypes: string[]): T[] {
+  const have = new Set(catalogTypes)
+  return profiles.filter((p) => !have.has(p.id) && typeof p.id === 'string' && /^[A-Za-z0-9_-]{1,40}$/.test(p.id))
+}
+
+/**
+ * A rig device for a profile the runtime has loaded. It is a generic device (type `osc`) that names the profile in its settings, which
+ * is how the runtime finds the dialect; the department comes from the profile. A serial profile's port name goes in `host` (COM3,
+ * /dev/ttyUSB0), so it starts blank; the others start at this machine and the profile's own port.
+ */
+export function deviceForProfile(p: ProfileInfo, existing: PchiNode[], position: { x: number; y: number }): PchiNode {
+  let id = `${p.id}-${existing.length + 1}`
+  for (let n = existing.length + 1; existing.some((x) => x.id === id); n++) id = `${p.id}-${n}`
+  const params: Record<string, string | number | boolean> = { host: p.transport === 'serial' ? '' : '127.0.0.1', profile: p.id }
+  if (p.transport !== 'serial' && typeof p.port === 'number' && p.port > 0) params.port = p.port
+  const dept = (RIG_DEPTS as readonly string[]).includes(p.dept) ? p.dept : undefined
+  return { id, type: 'osc', label: p.name, dept, position, params }
+}
