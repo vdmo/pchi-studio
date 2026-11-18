@@ -2,7 +2,7 @@
 
 How a PCHI cue becomes the OSC a tool understands used to be code. It is now a small JSON file per tool, so a crew can add a tool or
 correct a message without touching Rust. The eleven built-in profiles (Resolume, grandMA3, ETC Eos, X32, BEYOND, QLab, MagicQ, Ableton Live, Millumin, Bitfocus Companion, REAPER) are
-files too: `crates/pchi-studio-api/profiles/*.json`. `GET /profiles` lists everything loaded.
+files too: `crates/pchi-studio-api/profiles/*.json`. `GET /profiles` lists everything loaded: the OSC dialects and also the text-link, web, JSON-RPC, MQTT, serial and UDP profiles. Each entry has a `transport` (`osc`, `tcp-text`, `http`, `jsonrpc-tcp`, `mqtt`, `serial`, `udp`), its `hint` and `notes`, its cue `kinds`, and for the non-OSC ones an `actions` list saying what each kind rests on (`basis` vendor, community or memory, and its `source`).
 
 ## Use your own
 

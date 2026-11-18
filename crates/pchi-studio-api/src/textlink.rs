@@ -298,6 +298,11 @@ pub struct LinkProfile {
 }
 
 impl LinkProfile {
+    /// The cue kinds this profile takes.
+    pub fn kinds(&self) -> &[String] {
+        &self.kinds
+    }
+
     /// The byte that ends a line the device sends on connect: a carriage return for a device whose replies end in one, else a line feed.
     fn line_byte(&self) -> u8 {
         if self.reply_until.as_deref() == Some("\r") {

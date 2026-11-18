@@ -530,9 +530,29 @@ pub fn capture(device_profile: &str, address: &str) -> Option<(String, String, B
 }
 
 /// Every profile and what each rule rests on, for `GET /profiles` and the docs.
+/// The profile-driven outputs that are not OSC (text link, web, JSON-RPC, MQTT, serial, UDP), in the same listing: what each takes, and what it rests on.
+fn outputs() -> Vec<Value> {
+    use serde_json::json;
+    let mut v = Vec::new();
+    macro_rules! add {
+        ($transport:expr, $list:expr, $acts:expr, $built:expr) => {
+            for p in $list {
+                let kinds = $acts(&*p);
+                v.push(json!({"id": p.id, "name": p.name, "dept": p.dept, "transport": $transport, "built_in": $built(&*p), "notes": p.notes, "hint": p.hint, "kinds": kinds.iter().map(|k| k.0.clone()).collect::<Vec<_>>(), "actions": kinds.iter().map(|k| json!({"kind": k.0, "basis": k.1, "source": k.2})).collect::<Vec<_>>()}));
+            }
+        };
+    }
+    add!("tcp-text", crate::textlink::list(), |p: &crate::textlink::LinkProfile| p.kinds().iter().map(|k| (k.clone(), p.basis.clone(), p.source.clone())).collect::<Vec<_>>(), |p: &crate::textlink::LinkProfile| p.built_in);
+    add!("http", crate::httpout::list(), |p: &crate::httpout::HttpProfile| p.kinds.iter().filter_map(|k| p.actions.get(k).map(|a| (k.clone(), a.basis.clone(), a.source.clone()))).collect::<Vec<_>>(), |p: &crate::httpout::HttpProfile| p.built_in);
+    add!("jsonrpc-tcp", crate::jsonrpc::list(), |p: &crate::jsonrpc::RpcProfile| p.kinds.iter().filter_map(|k| p.actions.get(k).map(|a| (k.clone(), a.basis.clone(), a.source.clone()))).collect::<Vec<_>>(), |p: &crate::jsonrpc::RpcProfile| p.built_in);
+    add!("mqtt", crate::mqttout::list(), |p: &crate::mqttout::MqttProfile| p.kinds.iter().filter_map(|k| p.actions.get(k).map(|a| (k.clone(), a.basis.clone(), a.source.clone()))).collect::<Vec<_>>(), |p: &crate::mqttout::MqttProfile| p.built_in);
+    add!("serial", crate::serialout::list(), |p: &crate::serialout::SerialProfile| p.kinds.iter().filter_map(|k| p.actions.get(k).map(|a| (k.clone(), a.basis.clone(), a.source.clone()))).collect::<Vec<_>>(), |p: &crate::serialout::SerialProfile| p.built_in);
+    add!("udp", crate::udpout::list(), |p: &crate::udpout::UdpProfile| p.kinds.iter().filter_map(|k| p.actions.get(k).map(|a| (k.clone(), a.basis.clone(), a.source.clone()))).collect::<Vec<_>>(), |_p: &crate::udpout::UdpProfile| false);
+    v
+}
+
 pub fn summary() -> Value {
-    Value::Array(
-        list()
+    let osc = list()
             .iter()
             .map(|p| {
                 serde_json::json!({
@@ -542,8 +562,12 @@ pub fn summary() -> Value {
                     "rules": p.rules.iter().map(|r| serde_json::json!({"match": r.pattern, "send": r.send, "basis": r.basis.word(), "source": r.source, "proven": r.proven})).collect::<Vec<_>>(),
                 })
             })
-            .collect(),
-    )
+            .map(|mut v| {
+                v["transport"] = serde_json::json!("osc");
+                v
+            })
+            .collect::<Vec<Value>>();
+    Value::Array(osc.into_iter().chain(outputs()).collect())
 }
 
 /// The messages for `action` on a device whose profile is `profile`; `None` when there is no such profile (the generic
@@ -851,5 +875,32 @@ mod tests {
         let p = Profile::from_json(&with(r#"{"listen":"/out/(\\w+)","kind":"lighting.look","value":"{1}"}"#), false).unwrap();
         assert!(p.capture("/out/12").is_some());
         assert!(p.capture("/out/warm").is_none(), "the profile's rules only take numbers");
+    }
+}
+
+#[cfg(test)]
+mod outputs_listing_tests {
+    use super::*;
+
+    #[test]
+    fn the_listing_names_every_kind_of_profile_driven_output_with_what_it_rests_on() {
+        let v = summary();
+        let all = v.as_array().unwrap();
+        let by = |id: &str| all.iter().find(|p| p["id"] == id).unwrap_or_else(|| panic!("{id} is not listed"));
+        assert_eq!(by("x32")["transport"], "osc");
+        assert_eq!(by("companion-http")["transport"], "http");
+        assert_eq!(by("qsys")["transport"], "jsonrpc-tcp");
+        assert_eq!(by("pjlink")["transport"], "tcp-text");
+        let q = by("qsys");
+        assert_eq!(q["dept"], "audio");
+        let acts = q["actions"].as_array().unwrap();
+        assert!(acts.iter().any(|a| a["kind"] == "audio.control" && a["basis"] == "memory" && !a["source"].as_str().unwrap().is_empty()));
+        assert!(q["hint"].as_str().unwrap().contains("Main Gain"));
+        // the transports a user can add by file are in the listing once loaded
+        let _ = crate::udpout::load_values(vec![serde_json::json!({"id":"listed-udp","name":"L","transport":"udp","dept":"lighting","port":9,"kinds":["lighting.blackout"],"actions":{"lighting.blackout":{"send":"BO","basis":"vendor","source":"t"}}})], "t").unwrap();
+        let u = summary();
+        let l = u.as_array().unwrap().iter().find(|p| p["id"] == "listed-udp").unwrap();
+        assert_eq!(l["transport"], "udp");
+        assert_eq!(l["actions"][0]["basis"], "vendor");
     }
 }

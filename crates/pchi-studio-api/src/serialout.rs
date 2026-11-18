@@ -184,6 +184,12 @@ pub fn get(id: &str) -> Option<Arc<SerialProfile>> {
     registry().read().unwrap().get(id).cloned()
 }
 
+pub fn list() -> Vec<Arc<SerialProfile>> {
+    let mut v: Vec<_> = registry().read().unwrap().values().cloned().collect();
+    v.sort_by(|a, b| a.id.cmp(&b.id));
+    v
+}
+
 pub fn dept_of(id: &str) -> Option<String> {
     get(id).map(|p| p.dept.clone())
 }
