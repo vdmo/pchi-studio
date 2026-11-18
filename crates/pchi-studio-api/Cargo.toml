@@ -82,6 +82,7 @@ primeswarm-pchi = { path = "../../primeswarm-pchi" }
 midir = { version = "0.10", optional = true }
 cpal = { version = "0.15", optional = true }
 serialport = { version = "4", default-features = false, optional = true }
+socket2 = { version = "0.6", features = ["all"] }
 
 [features]
 # Read MIDI ports (notes, controllers, MIDI Time Code). Needs the system MIDI library: libasound2-dev on Linux.

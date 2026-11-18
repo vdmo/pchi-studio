@@ -15,7 +15,7 @@ use pchi_studio_api::{output::Output, rig, router_with_token, Show};
 #[command(version, about)]
 struct Cli {
     /// Show file: a Studio .pchi file (showchart + rig) or a bare showchart (.pchi.json).
-    #[arg(required_unless_present_any = ["midi_ports", "serial_ports", "audio_devices", "new_roster_entry", "replay", "export_run"])]
+    #[arg(required_unless_present_any = ["midi_ports", "serial_ports", "link_peers", "audio_devices", "new_roster_entry", "replay", "export_run"])]
     file: Option<String>,
     /// Record to this SQLite file (default: in memory, lost on exit).
     #[arg(long)]
@@ -43,6 +43,9 @@ struct Cli {
     /// List the serial ports this machine reports (needs a build with --features serial) and exit.
     #[arg(long)]
     serial_ports: bool,
+    /// Listen for Ableton Link peers on this network for this many seconds, print their tempo, and exit. Listen only: nothing is sent.
+    #[arg(long, value_name = "SECONDS")]
+    link_peers: Option<u64>,
     /// A folder of tool profile files (*.json) to add to the built-in ones: how an action becomes the OSC a tool understands. A file with a built-in's id replaces it. See docs/profiles.md.
     #[arg(long, value_name = "DIR", env = "PCHI_PROFILES")]
     profiles: Option<String>,
@@ -157,6 +160,16 @@ async fn main() -> anyhow::Result<()> {
         }
         for d in pchi_studio_api::ltcout::list_devices() {
             println!("out: {d}");
+        }
+        return Ok(());
+    }
+    if let Some(secs) = cli.link_peers {
+        let peers = pchi_studio_api::link::listen(std::time::Duration::from_secs(secs.clamp(1, 60))).map_err(|e| anyhow::anyhow!("listening for Link peers: {e}"))?;
+        if peers.is_empty() {
+            println!("no Link peers heard");
+        }
+        for p in peers {
+            println!("peer {} session {} tempo {} playing {} from {}", p.ident, p.session.as_deref().unwrap_or("-"), p.bpm.map(|b| format!("{b:.2} bpm")).unwrap_or_else(|| "-".into()), p.playing.map(|x| x.to_string()).unwrap_or_else(|| "-".into()), p.from);
         }
         return Ok(());
     }

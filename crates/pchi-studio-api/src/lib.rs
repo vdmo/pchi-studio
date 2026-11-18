@@ -79,6 +79,7 @@ pub mod describe;
 pub mod bench;
 pub mod follow;
 pub mod modbus;
+pub mod link;
 pub mod plcsim;
 pub mod rig;
 pub mod textlink;

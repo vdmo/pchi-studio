@@ -37,9 +37,10 @@ Counting a protocol that fails these would make the list longer and the claim wo
 | In | MIDI notes, controllers and MIDI Time Code (needs `--features midi`) | built; the transport is not tested on real MIDI hardware | `midi.rs` |
 | In | MIDI Show Control commands (needs `--features midi`) | built; byte-tested only | `msc.rs`, `midi.rs` |
 | In | LTC timecode from an audio input (needs `--features audio`) | built | `ltc.rs` |
+| In | Ableton Link peers: who is on the network and their tempo (listen only: `--link-peers`; no beat sync, does not drive the show) | built; layout read from the Link source; never heard a real peer | `link.rs` |
 | Import | CSV, QLab 4 cue lists | built | `import.rs` |
 
-**Not built:** GPIO, UDP/TCP raw-text send other than through a TCP link profile, NDI control, Ableton Link. A search of the code for `visca` finds nothing; PJLink is a text-link profile, and HTTP and MQTT are small hand-written clients (no `reqwest`, no MQTT library, no TLS).
+**Not built:** GPIO, UDP/TCP raw-text send other than through a TCP link profile, NDI control, Link beat/phase sync and joining a Link session (only listening is built). A search of the code for `visca` finds nothing; PJLink is a text-link profile, and HTTP and MQTT are small hand-written clients (no `reqwest`, no MQTT library, no TLS).
 
 ## Order of work, cheapest and most useful first
 
@@ -64,7 +65,7 @@ In this order, because each is testable without gear by checking bytes:
 3. *(Done.)* **JSON-RPC over TCP** (the style used by Q-SYS and some media servers): built, Q-SYS from memory, no login.
 4. *(Done.)* **MQTT publish** (installations, sensors, building systems), with a topic allow-list.
 5. *(Done.)* **Serial RS-232/RS-485**, behind `--features serial` (no system library is needed; the flag keeps the dependency out of builds that do not want it).
-6. *(LTC output done.)* **SMPTE/LTC output** and **Ableton Link**, last, since they are clocks, not cues. Ableton Link is not built.
+6. *(LTC output done.)* **SMPTE/LTC output** and **Ableton Link**, last, since they are clocks, not cues. Ableton Link: listen only, see [ableton-link.md](ableton-link.md).
 
 *Done means:* encode tests, a stand-in receiver in the style of `ursim.rs` or `plcsim.rs`, a Rig tab entry, `gearcheck` coverage, a doc page that says what was and was not tried.
 
@@ -85,7 +86,7 @@ Each slice ends with a commit and push, so progress is visible and nothing sits 
 | 5 | HTTP/REST output with URL templates (C2) | **Done, `219613e`.** Profiles of `GET`/`POST`/`PUT` templates over plain http, a built-in Companion profile (route from memory), a documented camera/webhook recipe; a stand-in server tests the request and the outcomes. No TLS, no authentication, no answer body; never tried on a real device |
 | 6 | Update this page, [industry-tools.md](industry-tools.md) and [positioning.md](positioning.md) to the new truth | **Done.** Protocol rows, the "Not built" line and the positioning claim about protocol reach now match the code |
 
-**Next:** Ableton Link is the last item in the clocks tranche. The larger gap is not protocols: nothing here has run against a real tool.
+**Next:** the clocks tranche is done (Link listen-only). The larger gap is not protocols: nothing here has run against a real tool.
 
 If a slice finds a source I cannot confirm, the rules go in as `memory` and the Doors check will say so. The schedule slips before the honesty does.
 
