@@ -100,7 +100,7 @@ fn full(p: &str) -> Result<Regex, String> {
 
 /// Placeholders are `{0}` (the whole value) and `{1}` to `{9}` (the bracketed parts of the value's pattern), and nothing else. A literal
 /// brace is written twice (`{{` and `}}`), which a JSON body needs.
-fn placeholders(t: &str) -> Result<Vec<usize>, String> {
+pub(crate) fn placeholders(t: &str) -> Result<Vec<usize>, String> {
     let mut found = Vec::new();
     let b = t.as_bytes();
     let mut i = 0;
@@ -262,13 +262,13 @@ pub fn value_of(action: &Action) -> String {
 }
 
 #[derive(Clone, Copy)]
-enum Enc {
+pub(crate) enum Enc {
     Path,
     Json,
     Text,
 }
 
-fn encode(v: &str, how: Enc) -> String {
+pub(crate) fn encode(v: &str, how: Enc) -> String {
     match how {
         Enc::Path => v.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect(),
         Enc::Json => {
@@ -279,7 +279,7 @@ fn encode(v: &str, how: Enc) -> String {
     }
 }
 
-fn render(t: &str, whole: &str, caps: &[String], how: Enc) -> String {
+pub(crate) fn render(t: &str, whole: &str, caps: &[String], how: Enc) -> String {
     let mut out = String::new();
     let b = t.as_bytes();
     let (mut i, mut start) = (0, 0);

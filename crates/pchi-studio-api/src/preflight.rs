@@ -164,6 +164,15 @@ pub fn run(chart: &Showchart, output: Option<&Output>, readiness: &BTreeMap<Stri
                     Ok(_) => None,
                 };
             }
+            if dev.is_mqtt() {
+                return match crate::mqttout::check_action(dev, action) {
+                    Err(e) => {
+                        *bad += 1;
+                        Some(("fail", format!("{what} to {}: {e}.", dev.label), Some(dev.id.clone())))
+                    }
+                    Ok(_) => None,
+                };
+            }
             if dev.is_rpc() {
                 return match crate::jsonrpc::check_action(dev, action) {
                     Err(e) => {

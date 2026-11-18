@@ -47,7 +47,7 @@ impl Device {
     }
 
     pub fn is_direct_kind(kind: &str) -> bool {
-        kind == "obs" || kind == crate::midiout::KIND || crate::dmx::proto_of(kind).is_some() || crate::textlink::get(kind).is_some() || crate::httpout::get(kind).is_some() || crate::jsonrpc::get(kind).is_some()
+        kind == "obs" || kind == crate::midiout::KIND || crate::dmx::proto_of(kind).is_some() || crate::textlink::get(kind).is_some() || crate::httpout::get(kind).is_some() || crate::jsonrpc::get(kind).is_some() || crate::mqttout::get(kind).is_some()
     }
 
     /// A device driven by a line of text over TCP, described by a link profile (see `textlink`): a robot's own command interface.
@@ -65,13 +65,18 @@ impl Device {
         crate::jsonrpc::get(self.profile_key()).is_some()
     }
 
+    /// A device that publishes MQTT messages from a profile (see `mqttout`).
+    pub fn is_mqtt(&self) -> bool {
+        crate::mqttout::get(self.profile_key()).is_some()
+    }
+
     pub fn address(&self) -> Option<String> {
         // an sACN device with no host sends to its universe's multicast address
         if let (Some(crate::dmx::Proto::Sacn), true) = (crate::dmx::proto_of(&self.kind), self.host.as_deref().map_or(true, |h| h.trim().is_empty())) {
             let u = self.universe.unwrap_or(1) as u16;
             return Some(format!("{}:{}", crate::dmx::sacn_multicast(u), self.port.unwrap_or(5568)));
         }
-        let port = self.port.or_else(|| crate::textlink::get(self.profile_key()).and_then(|p| p.port)).or_else(|| crate::httpout::get(self.profile_key()).and_then(|p| p.port)).or_else(|| crate::jsonrpc::get(self.profile_key()).and_then(|p| p.port));
+        let port = self.port.or_else(|| crate::textlink::get(self.profile_key()).and_then(|p| p.port)).or_else(|| crate::httpout::get(self.profile_key()).and_then(|p| p.port)).or_else(|| crate::jsonrpc::get(self.profile_key()).and_then(|p| p.port)).or_else(|| crate::mqttout::get(self.profile_key()).map(|p| p.port.unwrap_or(1883)));
         match (&self.host, port) {
             (Some(h), Some(p)) if !h.trim().is_empty() => Some(format!("{}:{}", h.trim(), p)),
             _ => None,

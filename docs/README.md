@@ -45,6 +45,7 @@ This is the map. Start with the first section that fits you.
 - [link-profiles.md](link-profiles.md): describe a device driven by lines of text over TCP in a file, with a list of commands it must never send
 - [http-output.md](http-output.md): a cue becomes one web request from a closed list in a profile (Companion built in); plain http only
 - [jsonrpc-output.md](jsonrpc-output.md): a cue becomes one JSON-RPC request over TCP from a closed list in a profile (Q-SYS built in)
+- [mqtt-output.md](mqtt-output.md): a cue becomes one MQTT publish to a closed list of topics in a profile; no built-in profile, no login or TLS
 - [motion.md](motion.md): the motion department: robots and moving rigs, armed like lasers, with their own stop (step 1 of the robotics plan; no real robot driver yet)
 - [robotics-kuka-ur.md](robotics-kuka-ur.md): the design for KUKA and Universal Robots (not built)
 - [robotics-plan.md](robotics-plan.md): a plan (not built) for controlling robots and motion rigs: what exists, the safety rule, and the order to build in

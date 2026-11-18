@@ -56,6 +56,7 @@ pub mod midiout;
 pub mod msc;
 pub mod httpout;
 pub mod jsonrpc;
+pub mod mqttout;
 pub mod library;
 pub mod links;
 pub mod memory_api;

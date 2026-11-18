@@ -482,7 +482,7 @@ pub fn list() -> Vec<Arc<Profile>> {
 
 /// The department a profile's devices serve, for a device that names it.
 pub fn dept_of(id: &str) -> Option<String> {
-    get(id).map(|p| p.dept.clone()).or_else(|| crate::textlink::dept_of(id)).or_else(|| crate::httpout::dept_of(id)).or_else(|| crate::jsonrpc::dept_of(id))
+    get(id).map(|p| p.dept.clone()).or_else(|| crate::textlink::dept_of(id)).or_else(|| crate::httpout::dept_of(id)).or_else(|| crate::jsonrpc::dept_of(id)).or_else(|| crate::mqttout::dept_of(id))
 }
 
 /// Add the profile files (`*.json`, each one profile or a list of them) in `dir`. A file with a built-in's id replaces it.
@@ -497,6 +497,8 @@ pub fn load_dir(dir: &Path) -> Result<Vec<String>, String> {
         let text = std::fs::read_to_string(f).map_err(|e| format!("{}: {e}", f.display()))?;
         let v: Value = serde_json::from_str(&text).map_err(|e| format!("{}: not valid JSON: {e}", f.display()))?;
         let items: Vec<Value> = if let Value::Array(a) = v { a } else { vec![v] };
+        let (mqtts, items): (Vec<Value>, Vec<Value>) = items.into_iter().partition(crate::mqttout::is_mqtt_json);
+        link_lines.extend(crate::mqttout::load_values(mqtts, &f.display().to_string())?);
         let (rpcs, items): (Vec<Value>, Vec<Value>) = items.into_iter().partition(crate::jsonrpc::is_rpc_json);
         link_lines.extend(crate::jsonrpc::load_values(rpcs, &f.display().to_string())?);
         let (https, items): (Vec<Value>, Vec<Value>) = items.into_iter().partition(crate::httpout::is_http_json);
