@@ -100,6 +100,8 @@ test('the tool profiles serve the departments they are for', () => {
   assert.equal(rigDept(node('a', 'millumin')), 'visual')
   assert.equal(rigDept(node('a', 'companion')), 'visual')
   assert.equal(rigDept(node('a2', 'companion', { dept: 'lighting' })), 'lighting', 'Companion can be set to the department it drives')
+  assert.equal(rigDept(node('p', 'pjlink')), 'visual')
+  assert.equal(specOf('pjlink').defaults.port, 4352)
   assert.equal(specOf('ableton').defaults.port, 11000)
   assert.equal(specOf('companion').defaults.port, 12321)
   assert.equal(specOf('qlab').defaults.port, 53000)

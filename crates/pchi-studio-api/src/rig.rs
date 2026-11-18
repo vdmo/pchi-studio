@@ -72,7 +72,7 @@ impl Device {
 /// The department a device type serves (same table as the SDK's `rigDept`).
 pub fn dept_of_type(t: &str) -> Option<&'static str> {
     Some(match t {
-        "vork" | "unreal" | "touchdesigner" | "notch" | "projector" | "led-wall" | "resolume" | "obs" | "millumin" | "companion" => "visual",
+        "vork" | "unreal" | "touchdesigner" | "notch" | "projector" | "led-wall" | "resolume" | "obs" | "millumin" | "companion" | "pjlink" => "visual",
         "lighting" | "lighting-desk" | "grandma3" | "eos" | "magicq" | "artnet" | "sacn" => "lighting",
         "laser" | "beyond" => "laser",
         "audio-zone" | "audio-console" | "audio-agent" | "x32" | "qlab" | "ableton" | "reaper" => "audio",

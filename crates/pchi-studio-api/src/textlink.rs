@@ -75,6 +75,17 @@ struct RawAction {
     /// Run, best effort, if any step fails: put back what the steps changed (release a start pulse). Never skipped by an error.
     #[serde(default)]
     cleanup: Vec<RawStep>,
+    /// What this action's value may be (a whole-value pattern), instead of the profile's. Its bracketed parts are `{1}`, `{2}`... in the commands.
+    #[serde(default)]
+    value: Option<String>,
+}
+
+/// A greeting the device sends on connect that this profile cannot work with (a password challenge), and what to tell the person.
+#[derive(Deserialize)]
+struct RawRefuse {
+    #[serde(rename = "match")]
+    pattern: String,
+    why: String,
 }
 
 #[derive(Deserialize)]
@@ -136,6 +147,8 @@ struct RawLink {
     /// For a device whose replies are not one line (XML): the text that ends a reply, for example "</Reply>". Without it a reply is one line.
     #[serde(default)]
     reply_until: Option<String>,
+    #[serde(default)]
+    greeting_refuse: Option<RawRefuse>,
     actions: BTreeMap<String, RawAction>,
     #[serde(default)]
     status: Option<RawStatus>,
@@ -167,6 +180,8 @@ struct Action2 {
     steps: Vec<Step>,
     confirm: Option<Step>,
     cleanup: Vec<Step>,
+    /// This action's own value pattern, if it has one.
+    value: Option<Regex>,
 }
 
 /// What a Modbus profile is told on the wire: the unit, and the addresses it can never write.
@@ -175,20 +190,52 @@ struct ModbusCfg {
     never: Vec<crate::modbus::Forbidden>,
 }
 
-/// What goes into a command template: the program's name (`{0}`) and, for a PLC that picks programs by number, its number (`{n}`).
+/// What goes into a command template: the program's name or value (`{0}`), the bracketed parts of the value's pattern (`{1}` to `{9}`)
+/// and, for a PLC that picks programs by number, its number (`{n}`).
 struct Subst<'a> {
     name: &'a str,
     num: Option<u16>,
+    caps: Vec<String>,
 }
 
 impl Subst<'_> {
+    /// One pass over the template, so text that came out of a value is never read as a placeholder itself.
     fn render(&self, t: &str) -> String {
-        let t = t.replace("{0}", self.name);
-        match self.num {
-            Some(n) => t.replace("{n}", &n.to_string()),
-            None => t,
+        let mut out = String::with_capacity(t.len() + 16);
+        let mut it = t.chars().peekable();
+        while let Some(c) = it.next() {
+            if c == '{' {
+                let rest: String = it.clone().take(2).collect();
+                let mut cs = rest.chars();
+                if let (Some(k), Some('}')) = (cs.next(), cs.next()) {
+                    let put = match k {
+                        '0' => Some(self.name.to_string()),
+                        'n' => self.num.map(|n| n.to_string()),
+                        '1'..='9' => Some(self.caps.get(k as usize - '1' as usize).cloned().unwrap_or_default()),
+                        _ => None,
+                    };
+                    if let Some(p) = put {
+                        out.push_str(&p);
+                        it.next();
+                        it.next();
+                        continue;
+                    }
+                }
+            }
+            out.push(c);
         }
+        out
     }
+}
+
+/// Whether a command takes the cue's value (or a part of it, or its program number).
+fn uses_value(send: &str) -> bool {
+    send.contains("{0}") || send.contains("{n}") || (1..=9).any(|i| send.contains(&format!("{{{i}}}")))
+}
+
+/// The bracketed parts of a value that fits the pattern.
+fn caps_of(re: &Regex, v: &str) -> Vec<String> {
+    re.captures(v).map(|c| (1..c.len()).map(|i| c.get(i).map_or(String::new(), |m| m.as_str().to_string())).collect()).unwrap_or_default()
 }
 
 struct Read {
@@ -246,14 +293,32 @@ pub struct LinkProfile {
     stop: Vec<Step>,
     request_end: String,
     reply_until: Option<String>,
+    greeting_refuse: Option<(Regex, String)>,
     modbus: Option<ModbusCfg>,
+}
+
+impl LinkProfile {
+    /// The byte that ends a line the device sends on connect: a carriage return for a device whose replies end in one, else a line feed.
+    fn line_byte(&self) -> u8 {
+        if self.reply_until.as_deref() == Some("\r") {
+            b'\r'
+        } else {
+            b'\n'
+        }
+    }
+
+    /// Why this profile cannot work with the greeting the device sent, if it cannot.
+    fn refuses_greeting(&self, greeting: &str) -> Option<String> {
+        self.greeting_refuse.as_ref().filter(|(re, _)| re.is_match(greeting.trim())).map(|(_, why)| why.clone())
+    }
 }
 
 fn full(p: &str) -> Result<Regex, String> {
     regex::RegexBuilder::new(&format!("^(?:{p})$")).dot_matches_new_line(true).size_limit(1 << 20).build().map_err(|e| format!("pattern '{p}': {e}"))
 }
 
-/// A command template: printable text, with `{0}` (the program's name) and `{n}` (its number) as the only placeholders.
+/// A command template: printable text, with `{0}` (the program's name or the value), `{1}` to `{9}` (the bracketed parts of the value's
+/// pattern) and `{n}` (the program's number) as the only placeholders.
 fn template_ok(t: &str) -> Result<(), String> {
     if t.trim().is_empty() {
         return Err("an empty command".into());
@@ -264,8 +329,9 @@ fn template_ok(t: &str) -> Result<(), String> {
     let mut rest = t;
     while let Some(i) = rest.find('{') {
         let after = &rest[i..];
-        if !after.starts_with("{0}") && !after.starts_with("{n}") {
-            return Err(format!("'{t}': the only placeholders are {{0}} (the program name) and {{n}} (its number)"));
+        let ok = after.len() >= 3 && after.as_bytes()[2] == b'}' && matches!(after.as_bytes()[1], b'0'..=b'9' | b'n');
+        if !ok {
+            return Err(format!("'{t}': the only placeholders are {{0}} (the value), {{1}} to {{9}} (its bracketed parts) and {{n}} (the program number)"));
         }
         rest = &after[3..];
     }
@@ -328,13 +394,21 @@ impl LinkProfile {
         let request_end = match raw.request_end.as_deref() {
             None | Some("\n") => "\n".to_string(),
             Some("\r\n") => "\r\n".to_string(),
+            Some("\r") => "\r".to_string(),
             Some("") => String::new(),
-            Some(other) => return Err(format!("{id}: request_end must be \"\\n\", \"\\r\\n\" or \"\", not {other:?}")),
+            Some(other) => return Err(format!("{id}: request_end must be \"\\n\", \"\\r\\n\", \"\\r\" or \"\", not {other:?}")),
         };
+        // a reply ends at a line feed, at text such as "</Reply>", or, for a device that ends its lines with a carriage return alone, at that
         let reply_until = match raw.reply_until.as_deref() {
             None => None,
+            Some("\r") => Some("\r".to_string()),
             Some(u) if !u.is_empty() && u.len() <= 64 && !u.chars().any(|c| c.is_control()) => Some(u.to_string()),
-            Some(u) => return Err(format!("{id}: reply_until {u:?} must be 1 to 64 printable characters")),
+            Some(u) => return Err(format!("{id}: reply_until {u:?} must be 1 to 64 printable characters, or a single carriage return")),
+        };
+        let greeting_refuse = match &raw.greeting_refuse {
+            None => None,
+            Some(g) if g.why.trim().is_empty() => return Err(format!("{id}: greeting_refuse needs a why")),
+            Some(g) => Some((regex::RegexBuilder::new(&g.pattern).size_limit(1 << 20).build().map_err(|e| format!("{id} greeting_refuse: {e}"))?, g.why.clone())),
         };
         let never: Vec<String> = raw.never.iter().map(|n| n.trim().to_ascii_lowercase()).filter(|n| !n.is_empty()).collect();
         let mut sent: Vec<(String, String)> = Vec::new(); // (where, command)
@@ -370,11 +444,22 @@ impl LinkProfile {
                 sent.push((at.clone(), c.send.clone()));
                 cleanup.push(step_of(c, &at)?);
             }
-            actions.insert(kind.clone(), Action2 { steps, confirm, cleanup });
+            let own = a.value.as_deref().map(full).transpose().map_err(|e| format!("{id} {kind} value: {e}"))?;
+            // every {1}..{9} in a command must be a bracketed part of the pattern that value is checked against
+            let groups = own.as_ref().unwrap_or(&value).captures_len() - 1;
+            for s in a.steps.iter().chain(a.confirm.iter()).chain(a.cleanup.iter()) {
+                if let Some(k) = (1..=9).find(|k| s.send.contains(&format!("{{{k}}}")) && *k > groups) {
+                    return Err(format!("{id} {kind}: '{}' uses {{{k}}} but the value pattern has {groups} bracketed part(s)", s.send));
+                }
+            }
+            actions.insert(kind.clone(), Action2 { steps, confirm, cleanup, value: own });
         }
         let mut stop = Vec::new();
         for (n, s) in raw.stop.iter().enumerate() {
             let at = format!("{id} stop step {}", n + 1);
+            if uses_value(&s.send) {
+                return Err(format!("{at}: a stop has no program to put in"));
+            }
             sent.push((at.clone(), s.send.clone()));
             stop.push(step_of(s, &at)?);
         }
@@ -384,7 +469,7 @@ impl LinkProfile {
             for (n, r) in st.reads.iter().enumerate() {
                 let at = format!("{id} status read {}", n + 1);
                 template_ok(&r.send).map_err(|e| format!("{at}: {e}"))?;
-                if r.send.contains("{0}") || r.send.contains("{n}") {
+                if uses_value(&r.send) {
                     return Err(format!("{at}: a status read has no program to put in"));
                 }
                 sent.push((at.clone(), r.send.clone()));
@@ -449,6 +534,7 @@ impl LinkProfile {
             stop,
             request_end,
             reply_until,
+            greeting_refuse,
             modbus,
         })
     }
@@ -475,7 +561,7 @@ impl LinkProfile {
 
 // ---- the registry ----
 
-const BUILT_IN: [&str; 1] = [include_str!("../profiles/link/ur.json")];
+const BUILT_IN: [&str; 2] = [include_str!("../profiles/link/ur.json"), include_str!("../profiles/link/pjlink.json")];
 
 fn registry() -> &'static RwLock<HashMap<String, Arc<LinkProfile>>> {
     static R: OnceLock<RwLock<HashMap<String, Arc<LinkProfile>>>> = OnceLock::new();
@@ -569,16 +655,17 @@ pub fn check_action(dev: &Device, action: &Action) -> Result<(), String> {
         return Err(format!("{} has no mapping for \"{}\"", p.name, action.kind));
     }
     // pause and stop take no program name; run does. A step uses {0} only if it needs one.
-    let needs_value = a.is_some_and(|a| a.steps.iter().chain(a.confirm.iter()).chain(a.cleanup.iter()).any(|s| s.send.contains("{0}") || s.send.contains("{n}") || s.skip_if.is_some()));
+    let needs_value = a.is_some_and(|a| a.steps.iter().chain(a.confirm.iter()).chain(a.cleanup.iter()).any(|s| uses_value(&s.send) || s.skip_if.is_some()));
     let v = value_of(action);
     if !needs_value {
         return Ok(());
     }
     if v.is_empty() {
-        return Err(format!("{} has no value: write the program name in the Cue sheet", action.kind));
+        return Err(format!("{} has no value: write it in the Cue sheet", action.kind));
     }
-    if !p.value.is_match(&v) {
-        return Err(format!("\"{v}\" is not a program name {} accepts: use {}", p.name, if p.hint.is_empty() { "letters, digits and _ . -" } else { &p.hint }));
+    let pattern = a.and_then(|a| a.value.as_ref()).unwrap_or(&p.value);
+    if !pattern.is_match(&v) {
+        return Err(format!("\"{v}\" is not a value {} accepts for {}: use {}", p.name, action.kind, if p.hint.is_empty() { "letters, digits and _ . -" } else { &p.hint }));
     }
     if p.needs_programs {
         let allowed = allowed_programs(dev);
@@ -601,7 +688,7 @@ pub fn describe(dev: &Device, action: &Action) -> Result<Vec<(String, Vec<Value>
     let p = get(dev.profile_key()).ok_or("no link profile")?;
     let a = p.actions.get(&action.kind).ok_or("no mapping")?;
     let v = value_of(action);
-    let sub = Subst { name: &v, num: program_number(dev, &v) };
+    let sub = Subst { name: &v, num: program_number(dev, &v), caps: caps_of(a.value.as_ref().unwrap_or(&p.value), &v) };
     let mut out = Vec::new();
     for s in &a.steps {
         let line = sub.render(&s.send);
@@ -735,12 +822,15 @@ pub async fn probe(profile: &LinkProfile, addr: &str) -> Result<Probe, String> {
     let greeting = if profile.modbus.is_some() {
         None
     } else {
-        let mut line = String::new();
-        match tokio::time::timeout(Duration::from_millis(1500), r.read_line(&mut line)).await {
-            Ok(Ok(n)) if n > 0 => Some(line.trim().to_string()),
+        let mut line: Vec<u8> = Vec::new();
+        match tokio::time::timeout(Duration::from_millis(1500), r.read_until(profile.line_byte(), &mut line)).await {
+            Ok(Ok(n)) if n > 0 => Some(String::from_utf8_lossy(&line).trim().to_string()),
             _ => None,
         }
     };
+    if let Some(why) = greeting.as_deref().and_then(|g| profile.refuses_greeting(g)) {
+        return Err(why);
+    }
     let mut txid: u16 = 0;
     let mut reads = Vec::new();
     let mut vars: BTreeMap<String, String> = BTreeMap::new();
@@ -853,8 +943,12 @@ impl Link {
         let mut r = BufReader::new(s);
         if self.profile.modbus.is_none() {
             // some text devices greet on connect: take that line if it comes, so it is not read as the answer to the first command
-            let mut greeting = String::new();
-            let _ = tokio::time::timeout(GREETING, r.read_line(&mut greeting)).await;
+            let mut greeting: Vec<u8> = Vec::new();
+            let _ = tokio::time::timeout(GREETING, r.read_until(self.profile.line_byte(), &mut greeting)).await;
+            // a greeting this profile cannot work with (a password challenge): say so, and send nothing
+            if let Some(why) = self.profile.refuses_greeting(&String::from_utf8_lossy(&greeting)) {
+                return Err(why);
+            }
         }
         conn.stream = Some(r);
         Ok(())
@@ -946,7 +1040,7 @@ impl Link {
         check_action(dev, action).map_err(LinkError::Failed)?;
         let a = self.profile.actions.get(&action.kind).ok_or_else(|| LinkError::Failed("no mapping".into()))?;
         let value = value_of(action);
-        let sub = Subst { name: &value, num: program_number(dev, &value) };
+        let sub = Subst { name: &value, num: program_number(dev, &value), caps: caps_of(a.value.as_ref().unwrap_or(&self.profile.value), &value) };
         let mut conn = self.lock().await?;
         let mut vars = HashMap::new();
         let mut changed = false;
@@ -980,7 +1074,7 @@ impl Link {
         let mut conn = self.lock().await?;
         // a stop is the one request that must try twice: a dropped connection is retried once on a fresh one
         let mut vars = HashMap::new();
-        let none = Subst { name: "", num: None };
+        let none = Subst { name: "", num: None, caps: Vec::new() };
         let mut changed = false;
         let mut r = self.run_steps(&mut conn, &self.profile.stop, &none, &mut vars, &mut changed).await;
         if matches!(r, Err(LinkError::Failed(_))) {
@@ -1149,7 +1243,8 @@ mod tests {
         let e = LinkProfile::from_json(&mk("power on"), false).err().unwrap();
         assert!(e.contains("must never send"), "{e}");
         assert!(LinkProfile::from_json(&mk("Brake release now"), false).err().unwrap().contains("must never send"), "case and trailing words do not get around it");
-        assert!(LinkProfile::from_json(&mk("play {1}"), false).err().unwrap().contains("only placeholder"));
+        assert!(LinkProfile::from_json(&mk("play {1}"), false).err().unwrap().contains("bracketed part"), "a part the value pattern does not have");
+        assert!(LinkProfile::from_json(&mk("play {x}"), false).err().unwrap().contains("only placeholder"));
         assert!(LinkProfile::from_json(&mk("play\\nstop"), false).err().unwrap().contains("control character"), "one command is one line");
         assert!(LinkProfile::from_json(&mk("play").replace("tcp-text", "udp"), false).is_err());
     }
@@ -1158,7 +1253,7 @@ mod tests {
     async fn a_cue_not_on_the_allow_list_sends_nothing_at_all() {
         let sim = UrSim::start(&["OPEN_ARM", "PARK"]).await.unwrap();
         let links = TextLinks::default();
-        for (prog, list, why) in [("OPEN_ARM", "", "no list of allowed programs"), ("PARK", "OPEN_ARM", "not on UR's list"), ("OPEN ARM", "OPEN_ARM", "not a program name"), ("a;power on", "a;power on", "not a program name"), ("", "OPEN_ARM", "no value")] {
+        for (prog, list, why) in [("OPEN_ARM", "", "no list of allowed programs"), ("PARK", "OPEN_ARM", "not on UR's list"), ("OPEN ARM", "OPEN_ARM", "not a value"), ("a;power on", "a;power on", "not a value"), ("", "OPEN_ARM", "no value")] {
             let e = links.apply(&dev(sim.port, list), &run(prog)).await.err().unwrap_or_else(|| panic!("{prog} should be refused"));
             assert!(e.text().contains(why), "{prog}: {}", e.text());
             assert_eq!(e.status(), "failed");
@@ -1584,7 +1679,7 @@ mod tests {
         with_plc_profile();
         let sim = crate::plcsim::PlcSim::start(1, &[3]).await.unwrap();
         let links = TextLinks::default();
-        for (prog, list, why) in [("OPEN_ARM", "OPEN_ARM", "has no program number"), ("PARK", "OPEN_ARM=3", "not on"), ("OPEN_ARM", "", "no list of allowed programs"), ("open_arm", "OPEN_ARM=3", "not a program name")] {
+        for (prog, list, why) in [("OPEN_ARM", "OPEN_ARM", "has no program number"), ("PARK", "OPEN_ARM=3", "not on"), ("OPEN_ARM", "", "no list of allowed programs"), ("open_arm", "OPEN_ARM=3", "not a value")] {
             let e = links.apply(&plc_dev(sim.port, list), &run(prog)).await.err().unwrap_or_else(|| panic!("{prog} should be refused"));
             assert!(e.text().contains(why), "{prog}/{list}: {}", e.text());
         }
@@ -1678,5 +1773,192 @@ mod tests {
         assert!(text.iter().any(|l| l.contains("load OPEN_ARM.urp") && l.contains("skipped if it is already loaded")), "{text:?}");
         assert!(text.iter().any(|l| l.ends_with("play")), "{text:?}");
         assert!(describe(&d, &run("PARK")).is_err());
+    }
+
+    // ---- PJLink: a projector that ends every line with a carriage return and never sends a line feed ----
+
+    fn projector_dev(port: u16) -> Device {
+        Device { id: "pj1".into(), label: "Projector".into(), kind: "pjlink".into(), dept: "visual".into(), host: Some("127.0.0.1".into()), port: Some(port), listen_port: None, profile: None, universe: None, patch: None, password: None, programs: None }
+    }
+
+    /// A pretend projector. `greeting` is what it says on connect; `bad_input` is an input it says it does not have. Returns the port and
+    /// every request it received, as text without the carriage return.
+    async fn pretend_projector(greeting: &'static str, bad_input: &'static str) -> (u16, Arc<Mutex<Vec<String>>>) {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+        let s2 = Arc::clone(&seen);
+        tokio::spawn(async move {
+            loop {
+                let Ok((sock, _)) = l.accept().await else { continue };
+                let seen = Arc::clone(&s2);
+                tokio::spawn(async move {
+                    let (rd, mut wr) = sock.into_split();
+                    let _ = wr.write_all(format!("{greeting}\r").as_bytes()).await;
+                    let mut rd = tokio::io::BufReader::new(rd);
+                    let mut power = 0;
+                    loop {
+                        let mut b = Vec::new();
+                        match rd.read_until(b'\r', &mut b).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(_) => {}
+                        }
+                        let req = String::from_utf8_lossy(&b).trim_end_matches('\r').to_string();
+                        seen.lock().unwrap().push(req.clone());
+                        let reply = match req.as_str() {
+                            "%1POWR 1" => {
+                                power = 1;
+                                "%1POWR=OK".to_string()
+                            }
+                            "%1POWR 0" => {
+                                power = 0;
+                                "%1POWR=OK".to_string()
+                            }
+                            "%1POWR ?" => format!("%1POWR={power}"),
+                            "%1ERST ?" => "%1ERST=000000".to_string(),
+                            r if r.starts_with("%1INPT ") => if r.ends_with(bad_input) { "%1INPT=ERR2".to_string() } else { "%1INPT=OK".to_string() },
+                            r if r.starts_with("%1AVMT ") => "%1AVMT=OK".to_string(),
+                            _ => "%1UNKN=ERR1".to_string(),
+                        };
+                        // the reply is written in two pieces, with no line feed anywhere: a reader that waits for one would hang
+                        let (a, c) = reply.split_at(4);
+                        let _ = wr.write_all(a.as_bytes()).await;
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        let _ = wr.write_all(format!("{c}\r").as_bytes()).await;
+                    }
+                });
+            }
+        });
+        (port, seen)
+    }
+
+    fn pj(kind: &str, v: &str) -> Action {
+        Action::new(kind, json!({"value": v}))
+    }
+
+    #[test]
+    fn the_built_in_pjlink_profile_cannot_switch_a_projector_off_and_its_whole_command_set_is_known() {
+        let p = get("pjlink").expect("pjlink profile");
+        assert_eq!((p.dept.as_str(), p.port, p.built_in, p.basis.as_str()), ("visual", Some(4352), true, "community"));
+        assert_eq!(p.commands(), ["%1AVMT {0}", "%1ERST ?", "%1INPT {0}", "%1POWR 1", "%1POWR ?"]);
+        assert!(!p.commands().iter().any(|c| c.to_ascii_lowercase().starts_with("%1powr 0")), "no way to power off");
+        // and a profile that could is refused when it is loaded
+        let bad = include_str!("../profiles/link/pjlink.json").replace("\"%1POWR 1\"", "\"%1POWR 0\"");
+        assert!(LinkProfile::from_json(&bad, false).err().unwrap().contains("must never send"));
+    }
+
+    #[test]
+    fn a_pjlink_cue_is_checked_against_that_actions_own_values() {
+        let d = projector_dev(1);
+        assert!(check_action(&d, &pj("visual.input", "31")).is_ok());
+        assert!(check_action(&d, &pj("visual.mute", "11")).is_ok());
+        assert!(check_action(&d, &Action::new("visual.power_on", json!({}))).is_ok(), "power on takes no value");
+        for bad in ["99", "10", "3", "311", "hdmi1", "31\r%1POWR 0"] {
+            assert!(check_action(&d, &pj("visual.input", bad)).is_err(), "input {bad}");
+        }
+        for bad in ["34", "12", "on", "1"] {
+            assert!(check_action(&d, &pj("visual.mute", bad)).is_err(), "mute {bad}");
+        }
+        assert!(check_action(&d, &pj("visual.power_off", "1")).unwrap_err().contains("no mapping"));
+        assert!(check_action(&d, &pj("scene.activate", "3")).unwrap_err().contains("no mapping"));
+        assert!(check_action(&d, &pj("visual.input", "")).unwrap_err().contains("no value"));
+        let text = describe(&d, &pj("visual.mute", "31")).unwrap();
+        assert!(text[0].0.ends_with("%1AVMT 31"), "{text:?}");
+    }
+
+    #[tokio::test]
+    async fn a_projector_is_driven_with_carriage_returns_only_and_its_words_are_reported() {
+        let (port, seen) = pretend_projector("PJLINK 0", "99").await;
+        let links = TextLinks::default();
+        let d = projector_dev(port);
+        let o = links.apply(&d, &Action::new("visual.power_on", json!({}))).await.unwrap();
+        assert_eq!(o.status, "running", "a read-back shows it is on: {}", o.note);
+        assert_eq!(links.apply(&d, &pj("visual.input", "31")).await.unwrap().status, "accepted");
+        assert_eq!(links.apply(&d, &pj("visual.mute", "31")).await.unwrap().status, "accepted");
+        assert_eq!(*seen.lock().unwrap(), ["%1POWR 1", "%1POWR ?", "%1INPT 31", "%1AVMT 31"]);
+        for c in seen.lock().unwrap().iter() {
+            assert!(!c.to_ascii_lowercase().starts_with("%1powr 0"), "PCHI sent '{c}'");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_projector_that_says_no_is_refused_in_its_own_words() {
+        // 99 is not a projector input; the pattern lets it through only if it is 11 to 59, so use an input the projector lacks
+        let (port, _) = pretend_projector("PJLINK 0", "55").await;
+        let links = TextLinks::default();
+        let e = links.apply(&projector_dev(port), &pj("visual.input", "55")).await.err().unwrap();
+        assert_eq!(e.status(), "refused");
+        assert!(e.text().contains("select input 55") && e.text().contains("ERR2"), "{}", e.text());
+    }
+
+    #[tokio::test]
+    async fn a_projector_that_wants_a_password_is_refused_and_sent_nothing() {
+        for greeting in ["PJLINK 1 498e4a67", "PJLINK ERRA"] {
+            let (port, seen) = pretend_projector(greeting, "99").await;
+            let links = TextLinks::default();
+            let e = links.apply(&projector_dev(port), &pj("visual.input", "31")).await.err().unwrap();
+            assert!(e.text().contains("PJLink password"), "{greeting}: {}", e.text());
+            assert!(seen.lock().unwrap().is_empty(), "{greeting}: nothing may be sent to it: {:?}", seen.lock().unwrap());
+            let r = probe(&get("pjlink").unwrap(), &format!("127.0.0.1:{port}")).await;
+            assert!(r.err().unwrap().contains("PJLink password"));
+            assert!(seen.lock().unwrap().is_empty(), "a probe sends nothing either");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_pjlink_probe_reads_only_and_reports_the_greeting() {
+        let (port, seen) = pretend_projector("PJLINK 0", "99").await;
+        let r = probe(&get("pjlink").unwrap(), &format!("127.0.0.1:{port}")).await.unwrap();
+        assert_eq!(r.greeting.as_deref(), Some("PJLINK 0"));
+        assert!(r.all_matched(), "{r:?}");
+        assert_eq!(r.ready, None, "no readiness rule: a projector in standby must still be able to be powered on");
+        assert_eq!(*seen.lock().unwrap(), ["%1POWR ?", "%1ERST ?"]);
+    }
+
+    #[test]
+    fn a_value_can_be_taken_apart_and_the_pieces_put_into_the_command() {
+        let text = r#"{"id":"fixed","name":"Fixed","transport":"tcp-text","dept":"visual","port":9000,"request_end":"\r\n",
+            "kinds":["visual.cue"],"value":"[0-9]{1,3}","hint":"page/row",
+            "actions":{"visual.cue":{"value":"(\\d{1,2})/(\\d{1,2})","steps":[{"send":"CUE {1} {2}","expect":"OK"}]}}}"#;
+        let p = LinkProfile::from_json(text, false).unwrap();
+        let a = p.actions.get("visual.cue").unwrap();
+        let v = "3/12";
+        let sub = Subst { name: v, num: None, caps: caps_of(a.value.as_ref().unwrap(), v) };
+        assert_eq!(sub.render("CUE {1} {2}"), "CUE 3 12");
+        assert_eq!(sub.render("{0}|{1}"), "3/12|3");
+        // a part that is not there, or a placeholder that is not one, is refused when the profile is loaded
+        let err = |t: &str| LinkProfile::from_json(t, false).err().unwrap();
+        assert!(err(&text.replace("CUE {1} {2}", "CUE {1} {3}")).contains("uses {3} but the value pattern has 2"));
+        assert!(err(&text.replace("CUE {1} {2}", "CUE {x}")).contains("the only placeholders"));
+        assert!(err(&text.replace("\"actions\"", "\"stop\":[{\"send\":\"STOP {1}\"}],\"actions\"")).contains("a stop has no program to put in"));
+        // what comes out of a value is never read as a placeholder again
+        let odd = Subst { name: "a{1}b", num: None, caps: vec!["X".into()] };
+        assert_eq!(odd.render("{0}-{1}"), "a{1}b-X");
+        assert_eq!(odd.render("{n}{z}"), "{n}{z}", "a placeholder with nothing to put stays as written");
+    }
+
+    #[test]
+    fn the_fixed_line_recipe_in_the_docs_loads_and_says_what_it_would_send() {
+        // the same JSON as docs/link-profiles.md ("A device that takes fixed lines")
+        let doc = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/link-profiles.md")).unwrap();
+        let json = doc.split("## A device that takes fixed lines").nth(1).and_then(|s| s.split("```json").nth(1)).and_then(|s| s.split("```").next()).expect("the recipe is in the doc");
+        let p = LinkProfile::from_json(json, false).expect("the recipe in the doc is a valid profile");
+        assert_eq!(p.commands(), ["RELAY {1} ON"]);
+        let a = p.actions.get("lighting.look").unwrap();
+        let ok = |v: &str| a.value.as_ref().unwrap().is_match(v);
+        assert!(ok("1") && ok("16") && !ok("0") && !ok("17") && !ok("1;format"));
+        let sub = Subst { name: "12", num: None, caps: caps_of(a.value.as_ref().unwrap(), "12") };
+        assert_eq!(sub.render("RELAY {1} ON"), "RELAY 12 ON");
+        assert!(LinkProfile::from_json(&json.replace("\"RELAY {1} ON\"", "\"FORMAT\""), false).err().unwrap().contains("must never send"));
+    }
+
+    #[test]
+    fn a_carriage_return_is_a_line_end_a_profile_may_name_and_nothing_else_is() {
+        let base = include_str!("../profiles/link/pjlink.json");
+        assert!(LinkProfile::from_json(base, false).is_ok());
+        assert!(LinkProfile::from_json(&base.replace("\"request_end\": \"\\r\"", "\"request_end\": \"\\t\""), false).err().unwrap().contains("request_end"));
+        assert!(LinkProfile::from_json(&base.replace("\"reply_until\": \"\\r\"", "\"reply_until\": \"\\u0007\""), false).err().unwrap().contains("reply_until"));
+        assert!(LinkProfile::from_json(&base.replace("\"why\": \"this projector", "\"why\": \"\", \"x\": \"this projector"), false).err().unwrap().contains("greeting_refuse"));
+        assert!(LinkProfile::from_json(&base.replace("^PJLINK (1 |ERRA)", "("), false).err().unwrap().contains("greeting_refuse"));
     }
 }

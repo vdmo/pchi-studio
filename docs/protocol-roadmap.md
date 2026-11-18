@@ -71,7 +71,7 @@ Each slice ends with a commit and push, so progress is visible and nothing sits 
 | # | Slice | Ends with |
 |---|---|---|
 | 1 | Source-check and add the first Tranche A dialects (Reaper, Companion, Millumin, AbletonOSC) | **Built, not yet committed.** Ableton, Millumin and Companion rest on documents that were read; REAPER rests on search results quoting its config file. Byte tests pass; nothing tried on a real tool |
-| 2 | PJLink and the generic fixed-line profile (Tranche B) | profiles with `never` lists, tests; commit |
+| 2 | PJLink and the generic fixed-line profile (Tranche B) | **Built, not yet committed.** PJLink class 1 as a link profile (power on only, input, mute), with four small engine changes it needed: carriage-return line ends, per-action values with `{1}` to `{9}`, a greeting that can refuse a device, and replies ended by a carriage return. The fixed-line device is a documented recipe, not a built-in. No password support; not tried on a real projector |
 | 3 | MIDI output and notes/program/controller (Tranche C1) | encode tests, stand-in receiver; commit |
 | 4 | MIDI Show Control out and in | tests against the MSC byte layout; commit |
 | 5 | HTTP/REST output with URL templates (C2) | tests, a stand-in server; commit |
