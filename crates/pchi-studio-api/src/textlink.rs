@@ -733,6 +733,7 @@ impl std::fmt::Display for LinkError {
     }
 }
 
+#[derive(Debug)]
 pub struct Outcome {
     /// `accepted` (it answered yes) or `running` (a read-back shows it is doing it).
     pub status: &'static str,

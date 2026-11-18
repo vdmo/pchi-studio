@@ -1,0 +1,33 @@
+{
+  "id": "companion-http",
+  "name": "Bitfocus Companion (HTTP)",
+  "transport": "http",
+  "dept": "visual",
+  "port": 8000,
+  "kinds": ["visual.button", "visual.button_down", "visual.button_up"],
+  "hint": "write the button as page/row/column, for example 1/2/3. visual.button presses and releases it; visual.button_down and visual.button_up hold and let go",
+  "notes": "Companion's HTTP button API as remembered from its documentation: POST /api/location/<page>/<row>/<column>/press, and /down and /up for the two halves. It is the route Companion 3 documents; Companion 2 used a different one (GET /press/bank/<page>/<button>) that this profile does not send. Companion's web port is 8000 by default. Not checked against a running Companion, so confirm the path in your version's own documentation before a show. There is no TLS and no authentication header.",
+  "actions": {
+    "visual.button": {
+      "value": "(\\d{1,3})/(\\d{1,3})/(\\d{1,3})",
+      "method": "POST",
+      "path": "/api/location/{1}/{2}/{3}/press",
+      "basis": "memory",
+      "source": "Bitfocus Companion HTTP remote control documentation, from memory; no copy read"
+    },
+    "visual.button_down": {
+      "value": "(\\d{1,3})/(\\d{1,3})/(\\d{1,3})",
+      "method": "POST",
+      "path": "/api/location/{1}/{2}/{3}/down",
+      "basis": "memory",
+      "source": "Bitfocus Companion HTTP remote control documentation, from memory; no copy read"
+    },
+    "visual.button_up": {
+      "value": "(\\d{1,3})/(\\d{1,3})/(\\d{1,3})",
+      "method": "POST",
+      "path": "/api/location/{1}/{2}/{3}/up",
+      "basis": "memory",
+      "source": "Bitfocus Companion HTTP remote control documentation, from memory; no copy read"
+    }
+  }
+}

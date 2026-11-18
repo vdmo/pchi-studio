@@ -47,12 +47,17 @@ impl Device {
     }
 
     pub fn is_direct_kind(kind: &str) -> bool {
-        kind == "obs" || kind == crate::midiout::KIND || crate::dmx::proto_of(kind).is_some() || crate::textlink::get(kind).is_some()
+        kind == "obs" || kind == crate::midiout::KIND || crate::dmx::proto_of(kind).is_some() || crate::textlink::get(kind).is_some() || crate::httpout::get(kind).is_some()
     }
 
     /// A device driven by a line of text over TCP, described by a link profile (see `textlink`): a robot's own command interface.
     pub fn is_link(&self) -> bool {
         crate::textlink::get(self.profile_key()).is_some()
+    }
+
+    /// A device driven by web requests from a profile (see `httpout`).
+    pub fn is_http(&self) -> bool {
+        crate::httpout::get(self.profile_key()).is_some()
     }
 
     pub fn address(&self) -> Option<String> {
@@ -61,7 +66,7 @@ impl Device {
             let u = self.universe.unwrap_or(1) as u16;
             return Some(format!("{}:{}", crate::dmx::sacn_multicast(u), self.port.unwrap_or(5568)));
         }
-        let port = self.port.or_else(|| crate::textlink::get(self.profile_key()).and_then(|p| p.port));
+        let port = self.port.or_else(|| crate::textlink::get(self.profile_key()).and_then(|p| p.port)).or_else(|| crate::httpout::get(self.profile_key()).and_then(|p| p.port));
         match (&self.host, port) {
             (Some(h), Some(p)) if !h.trim().is_empty() => Some(format!("{}:{}", h.trim(), p)),
             _ => None,
@@ -134,7 +139,8 @@ fn device_of(n: &Value) -> Option<Device> {
         .and_then(Value::as_str)
         .map(str::to_string)
         .or_else(|| dept_of_type(&kind).map(str::to_string))
-        .or_else(|| profile.as_deref().and_then(crate::profiles::dept_of))?;
+        .or_else(|| profile.as_deref().and_then(crate::profiles::dept_of))
+        .or_else(|| crate::profiles::dept_of(&kind))?;
     let host = params.and_then(|p| p.get("host")).and_then(Value::as_str).map(str::to_string);
     let port = params.and_then(|p| p.get("port")).and_then(|p| p.as_u64().or_else(|| p.as_str().and_then(|s| s.trim().parse().ok()))).and_then(|p| u16::try_from(p).ok());
     let listen_port = params.and_then(|p| p.get("listen_port")).and_then(|p| p.as_u64().or_else(|| p.as_str().and_then(|s| s.trim().parse().ok()))).and_then(|p| u16::try_from(p).ok()).filter(|p| *p > 0);

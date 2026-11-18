@@ -27,6 +27,7 @@ Counting a protocol that fails these would make the list longer and the claim wo
 | Out | Modbus TCP (a PLC route) | built, simulated PLC only | `modbus.rs`, `plcsim.rs` |
 | Out | MIDI note, program change, controller, all-notes-off (needs `--features midi`) | built; the port-writing code has never run | `midiout.rs` |
 | Out | MIDI Show Control: go, stop, resume, load, all-off, restore, reset | built; layout from memory, never tried on a desk | `msc.rs` |
+| Out | HTTP requests from a profile (GET, POST, PUT over plain http): Companion button API built in | built; stand-in server only; Companion route from memory | `httpout.rs`, `profiles/http/` |
 | In | HTTP, WebSocket | built | `lib.rs` |
 | In | OSC (Stream Deck, tablets, button boxes) | built | `inputs.rs` |
 | In | MIDI notes, controllers and MIDI Time Code (needs `--features midi`) | built; the transport is not tested on real MIDI hardware | `midi.rs` |
@@ -34,7 +35,7 @@ Counting a protocol that fails these would make the list longer and the claim wo
 | In | LTC timecode from an audio input (needs `--features audio`) | built | `ltc.rs` |
 | Import | CSV, QLab 4 cue lists | built | `import.rs` |
 
-**Not built:** HTTP/REST output, serial (RS-232/RS-485), GPIO, MQTT, PJLink, JSON-RPC, UDP/TCP raw-text send other than through a TCP link profile, NDI control, SMPTE/LTC *output*, Ableton Link. A search of the code for `serialport`, `reqwest`, `mqtt`, `pjlink` and `visca` finds none of them.
+**Not built:** serial (RS-232/RS-485), GPIO, MQTT, JSON-RPC, UDP/TCP raw-text send other than through a TCP link profile, NDI control, SMPTE/LTC *output*, Ableton Link. A search of the code for `serialport`, `mqtt` and `visca` finds none of them; PJLink is a text-link profile and HTTP is its own small client (no `reqwest`, no TLS).
 
 ## Order of work, cheapest and most useful first
 
@@ -77,7 +78,7 @@ Each slice ends with a commit and push, so progress is visible and nothing sits 
 | 2 | PJLink and the generic fixed-line profile (Tranche B) | **Built, not yet committed.** PJLink class 1 as a link profile (power on only, input, mute), with four small engine changes it needed: carriage-return line ends, per-action values with `{1}` to `{9}`, a greeting that can refuse a device, and replies ended by a carriage return. The fixed-line device is a documented recipe, not a built-in. No password support; not tried on a real projector |
 | 3 | MIDI output and notes/program/controller (Tranche C1) | **Built, not yet committed.** A `midi-out` device with a closed set of words (note, pc, cc, panic); byte tests; Doors check; compiles with `--features midi`. **The port-writing code has never run:** the machine had no MIDI sequencer, so there was no port to send to |
 | 4 | MIDI Show Control out and in | **Built, not yet committed.** `msc` values on a MIDI output (seven commands, four formats, one device; groups, all-call and pyro refused) and `msc` bindings on a MIDI input that press an event. Byte tests and read-back tests pass; the layout is from memory of the specification; never tried on a real desk |
-| 5 | HTTP/REST output with URL templates (C2) | tests, a stand-in server; commit |
+| 5 | HTTP/REST output with URL templates (C2) | **Built, not yet committed.** Profiles of `GET`/`POST`/`PUT` templates over plain http, a built-in Companion profile (route from memory), a documented camera/webhook recipe; a stand-in server tests the request and the outcomes. No TLS, no authentication, no answer body; never tried on a real device |
 | 6 | Update this page, [industry-tools.md](industry-tools.md) and [positioning.md](positioning.md) to the new truth | commit |
 
 If a slice finds a source I cannot confirm, the rules go in as `memory` and the Doors check will say so. The schedule slips before the honesty does.

@@ -54,6 +54,7 @@ pub mod mcp;
 pub mod midi;
 pub mod midiout;
 pub mod msc;
+pub mod httpout;
 pub mod library;
 pub mod links;
 pub mod memory_api;

@@ -60,6 +60,8 @@ test('systems are added by sentence, with a name, an address, a port and a depar
   assert.equal(r.rig.nodes[0].params.host, '10.0.0.5')
   assert.equal(r.rig.nodes[0].params.port, 7000, "the tool's own default port stays")
   assert.equal(run('connect beyond').rig.nodes[0].type, 'beyond')
+  assert.equal(run('add companion http').rig.nodes[0].type, 'companion-http', 'the name finds the HTTP one')
+  assert.equal(run('add companion').rig.nodes[0].type, 'companion', 'and plain Companion stays the OSC one')
   assert.equal(run('add a lighting desk').rig.nodes[0].type, 'lighting-desk')
   assert.deepEqual(run('add 3 lasers').rig.nodes.map((x) => x.label), ['Laser', 'Laser 2', 'Laser 3'])
 })
