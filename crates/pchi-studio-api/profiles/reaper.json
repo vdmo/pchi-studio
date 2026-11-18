@@ -1,0 +1,10 @@
+{
+  "id": "reaper",
+  "name": "REAPER",
+  "dept": "audio",
+  "kinds": ["audio.*", "scene.activate"],
+  "hint": "a REAPER action ID (40757) or a custom action ID that starts with an underscore (_RS1234abcd). Needs an OSC control surface set up in REAPER's preferences",
+  "rules": [
+    {"match": "(\\d{1,7}|_[A-Za-z0-9]{1,40})", "send": "/action/{0}", "basis": "community", "source": "REAPER's own Default.ReaperOSC describes /action/<id> and /action/_<command id> as quoted by search results and community write-ups; the file itself was not opened, and reaper.fm's OSC page only points to it"}
+  ]
+}

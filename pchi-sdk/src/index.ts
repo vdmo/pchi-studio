@@ -48,7 +48,7 @@ export type NodeType =
   // venue
   | 'ghost-arcade' | 'projector' | 'led-wall' | 'audio-zone' | 'laser' | 'lighting-desk' | 'audio-console' | 'motion' | 'ur'
   // tool profiles (the exact OSC dialect of a popular tool)
-  | 'resolume' | 'grandma3' | 'eos' | 'x32' | 'beyond' | 'qlab' | 'magicq' | 'artnet' | 'sacn' | 'obs'
+  | 'resolume' | 'grandma3' | 'eos' | 'x32' | 'beyond' | 'qlab' | 'magicq' | 'ableton' | 'reaper' | 'millumin' | 'companion' | 'artnet' | 'sacn' | 'obs'
   // intelligence
   | 'director-agent' | 'vision-agent' | 'audio-agent'
 
@@ -113,6 +113,12 @@ export const NODE_CATALOG: NodeSpec[] = [
   spec('venue', 'beyond', 'Pangolin BEYOND', { host: '127.0.0.1', port: 12000 }),
   spec('venue', 'qlab', 'QLab', { host: '127.0.0.1', port: 53000, listen_port: 53001 }),
   spec('venue', 'magicq', 'ChamSys MagicQ', { host: '127.0.0.1', port: 8000 }),
+  // AbletonOSC listens on 11000 (its README). Companion's OSC port is 12321 unless changed (its OSC page). REAPER and Millumin use the port
+  // set in their own OSC settings: 8000 and 5000 here are placeholders.
+  spec('venue', 'ableton', 'Ableton Live (AbletonOSC)', { host: '127.0.0.1', port: 11000 }),
+  spec('venue', 'reaper', 'REAPER', { host: '127.0.0.1', port: 8000 }),
+  spec('venue', 'millumin', 'Millumin', { host: '127.0.0.1', port: 5000 }),
+  spec('venue', 'companion', 'Bitfocus Companion', { host: '127.0.0.1', port: 12321 }),
   // DMX over the network: the node's address (or a broadcast address) and the universe. Art-Net universes start at 0, sACN at 1;
   // an sACN device with no host sends to its universe's multicast address. "patch" names the fixtures on it, for example
   // "wash1=rgbw@1, wash2=rgbw@5, walls=wash1+wash2", so a cue can say wash1=blue instead of channel numbers.

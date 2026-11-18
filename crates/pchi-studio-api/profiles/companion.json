@@ -1,0 +1,11 @@
+{
+  "id": "companion",
+  "name": "Bitfocus Companion",
+  "dept": "visual",
+  "kinds": ["scene.activate", "visual.*", "lighting.*", "audio.*"],
+  "hint": "page/row/column of a button (1/0/5), optionally followed by down or up (1/0/5 down). A button does whatever its own actions say, so a cue is only as safe as the button. Change the department in the Rig tab if this one drives lighting or audio",
+  "rules": [
+    {"match": "(?i)(\\d{1,3})/(\\d{1,3})/(\\d{1,3}) (down|up)", "send": "/location/{1}/{2}/{3}/{4|lower}", "basis": "vendor", "source": "Companion's OSC control page (companion.free, v4.3) lists /location/<page>/<row>/<column>/down and /up"},
+    {"match": "(\\d{1,3})/(\\d{1,3})/(\\d{1,3})", "send": "/location/{1}/{2}/{3}/press", "basis": "vendor", "source": "Companion's OSC control page (companion.free, v4.3) lists /location/<page>/<row>/<column>/press; the older /press/bank form is marked deprecated there"}
+  ]
+}

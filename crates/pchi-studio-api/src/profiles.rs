@@ -28,9 +28,13 @@ use std::path::Path;
 use std::sync::{Arc, OnceLock, RwLock};
 
 /// The built-in profiles' ids.
-pub const PROFILES: [&str; 7] = ["resolume", "grandma3", "eos", "x32", "beyond", "qlab", "magicq"];
+pub const PROFILES: [&str; 11] = ["resolume", "grandma3", "eos", "x32", "beyond", "qlab", "magicq", "ableton", "millumin", "companion", "reaper"];
 
-const BUILT_IN: [&str; 8] = [
+const BUILT_IN: [&str; 12] = [
+    include_str!("../profiles/ableton.json"),
+    include_str!("../profiles/millumin.json"),
+    include_str!("../profiles/companion.json"),
+    include_str!("../profiles/reaper.json"),
     include_str!("../profiles/resolume.json"),
     include_str!("../profiles/grandma3.json"),
     include_str!("../profiles/eos.json"),
@@ -645,6 +649,49 @@ mod tests {
     }
 
     #[test]
+    fn ableton_plays_stops_and_fires_scenes_and_clips() {
+        assert_eq!(one("ableton", "audio.snapshot", json!({"snapshot": "play"})).unwrap(), ("/live/song/start_playing".into(), vec![]));
+        assert_eq!(one("ableton", "audio.snapshot", json!({"snapshot": "Stop"})).unwrap().0, "/live/song/stop_playing");
+        assert_eq!(one("ableton", "audio.snapshot", json!({"snapshot": "stop all clips"})).unwrap().0, "/live/song/stop_all_clips");
+        assert_eq!(one("ableton", "scene.activate", json!({"scene": "scene 4"})).unwrap(), ("/live/scene/fire".into(), vec![OscType::Int(4)]));
+        assert_eq!(one("ableton", "audio.scene", json!({"scene": "2/0"})).unwrap(), ("/live/clip/fire".into(), vec![OscType::Int(2), OscType::Int(0)]));
+        assert!(one("ableton", "audio.snapshot", json!({"snapshot": "delete track"})).is_err());
+        assert!(one("ableton", "audio.snapshot", json!({"snapshot": "scene x"})).is_err());
+        assert!(one("ableton", "lighting.look", json!({"look": "1"})).unwrap_err().contains("no mapping"));
+    }
+
+    #[test]
+    fn millumin_launches_columns_by_number_name_or_neighbour() {
+        assert_eq!(one("millumin", "scene.activate", json!({"scene": "3"})).unwrap(), ("/action/launchColumn".into(), vec![OscType::Int(3)]));
+        assert_eq!(one("millumin", "scene.activate", json!({"scene": "Chorus 1"})).unwrap(), ("/action/launchColumn".into(), vec![OscType::String("Chorus 1".into())]));
+        assert_eq!(one("millumin", "scene.activate", json!({"scene": "next"})).unwrap(), ("/action/launchNextColumn".into(), vec![]));
+        assert_eq!(one("millumin", "scene.activate", json!({"scene": "Previous"})).unwrap().0, "/action/launchPreviousColumn");
+        assert!(one("millumin", "scene.activate", json!({"scene": "a/b"})).is_err(), "a slash is not a column name");
+        assert!(one("millumin", "scene.activate", json!({"scene": "x".repeat(60)})).is_err());
+        assert!(one("millumin", "audio.snapshot", json!({"snapshot": "1"})).unwrap_err().contains("no mapping"));
+    }
+
+    #[test]
+    fn companion_presses_a_button_by_location() {
+        assert_eq!(one("companion", "scene.activate", json!({"scene": "1/0/5"})).unwrap(), ("/location/1/0/5/press".into(), vec![]));
+        assert_eq!(one("companion", "lighting.look", json!({"look": "2/3/4 down"})).unwrap().0, "/location/2/3/4/down");
+        assert_eq!(one("companion", "audio.snapshot", json!({"snapshot": "2/3/4 UP"})).unwrap().0, "/location/2/3/4/up");
+        assert!(one("companion", "scene.activate", json!({"scene": "1/0"})).is_err());
+        assert!(one("companion", "scene.activate", json!({"scene": "1/0/5/../x"})).is_err());
+        assert!(one("companion", "scene.activate", json!({"scene": "1/0/5 rotate-left"})).is_err(), "only press, down and up are offered");
+        assert!(one("companion", "laser.cue", json!({"cue": "1/0/5"})).unwrap_err().contains("no mapping"), "a laser cue never goes through a Companion button");
+    }
+
+    #[test]
+    fn reaper_triggers_an_action_by_id() {
+        assert_eq!(one("reaper", "audio.snapshot", json!({"snapshot": "40757"})).unwrap(), ("/action/40757".into(), vec![]));
+        assert_eq!(one("reaper", "audio.scene", json!({"scene": "_RS1a2b3c"})).unwrap().0, "/action/_RS1a2b3c");
+        for bad in ["split items", "40757/../x", "_", "12345678", "40757 1"] {
+            assert!(one("reaper", "audio.snapshot", json!({"snapshot": bad})).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
     fn beyond_starts_and_stops_cues_and_blacks_out() {
         assert_eq!(one("beyond", "laser.cue", json!({"cue": "sweep"})).unwrap(), ("/beyond/general/StartCue".into(), vec![OscType::String("sweep".into())]));
         assert_eq!(one("beyond", "laser.stop", json!({"cue": "sweep"})).unwrap().0, "/beyond/general/StopCue");
@@ -681,6 +728,13 @@ mod tests {
         assert!(basis("x32").iter().all(|b| *b == Basis::Memory));
         assert!(basis("eos").iter().all(|b| *b == Basis::Vendor));
         assert!(basis("magicq").iter().all(|b| *b == Basis::Community));
+        // the new ones rest on documents that were read, except REAPER's, which was read only second-hand
+        for id in ["ableton", "millumin", "companion"] {
+            assert!(basis(id).iter().all(|b| *b == Basis::Vendor), "{id}");
+        }
+        assert!(basis("reaper").iter().all(|b| *b == Basis::Community));
+        // and none claims to be proven on a real tool
+        assert!(PROFILES.iter().all(|id| get(id).unwrap().rules.iter().all(|r| r.proven.is_none())));
     }
 
     #[test]

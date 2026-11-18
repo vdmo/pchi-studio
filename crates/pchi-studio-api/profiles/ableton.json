@@ -1,0 +1,14 @@
+{
+  "id": "ableton",
+  "name": "Ableton Live (AbletonOSC)",
+  "dept": "audio",
+  "kinds": ["audio.*", "scene.activate"],
+  "hint": "play, stop, stop all, scene N, or track/clip (for example 2/0). Needs the AbletonOSC add-on running in Live; indexes count the way AbletonOSC counts them",
+  "rules": [
+    {"match": "(?i)stop all( clips)?", "send": "/live/song/stop_all_clips", "basis": "vendor", "source": "the AbletonOSC README (github.com/ideoforms/AbletonOSC) lists /live/song/stop_all_clips with no arguments"},
+    {"match": "(?i)(play|start)", "send": "/live/song/start_playing", "basis": "vendor", "source": "the AbletonOSC README lists /live/song/start_playing with no arguments"},
+    {"match": "(?i)stop", "send": "/live/song/stop_playing", "basis": "vendor", "source": "the AbletonOSC README lists /live/song/stop_playing with no arguments"},
+    {"match": "(?i)scene (\\d{1,3})", "send": "/live/scene/fire", "args": [{"int": "{1}"}], "basis": "vendor", "source": "the AbletonOSC README lists /live/scene/fire with one argument, scene_id"},
+    {"match": "(\\d{1,3})/(\\d{1,3})", "send": "/live/clip/fire", "args": [{"int": "{1}"}, {"int": "{2}"}], "basis": "vendor", "source": "the AbletonOSC README lists /live/clip/fire with arguments track_id and clip_id; whether counting starts at 0 or 1 was not read: check on a real Live set"}
+  ]
+}

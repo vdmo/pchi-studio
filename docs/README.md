@@ -38,6 +38,7 @@ This is the map. Start with the first section that fits you.
 - [osc-input.md](osc-input.md): Stream Deck, tablets and button boxes that press GO
 - [capture.md](capture.md): capture what a tool sends
 - [industry-tools.md](industry-tools.md): where PCHI sits next to other tools
+- [protocol-roadmap.md](protocol-roadmap.md): which protocols exist, which do not, and the order to add them
 - [ur.md](ur.md): Universal Robots: run named programs, read state, with refusals and faults handled honestly (only run against a pretend UR so far)
 - [kuka.md](kuka.md): KUKA: what is built (XML framing, an example profile, the contract a receiver must meet), what is not, and what I need to go further
 - [ursim-check.md](ursim-check.md): the procedure for checking the UR driver against URSim and then a real robot, starting read-only

@@ -1,7 +1,7 @@
 # Tool profiles are data
 
 How a PCHI cue becomes the OSC a tool understands used to be code. It is now a small JSON file per tool, so a crew can add a tool or
-correct a message without touching Rust. The seven built-in profiles (Resolume, grandMA3, ETC Eos, X32, BEYOND, QLab, MagicQ) are
+correct a message without touching Rust. The eleven built-in profiles (Resolume, grandMA3, ETC Eos, X32, BEYOND, QLab, MagicQ, Ableton Live, Millumin, Bitfocus Companion, REAPER) are
 files too: `crates/pchi-studio-api/profiles/*.json`. `GET /profiles` lists everything loaded.
 
 ## Use your own
