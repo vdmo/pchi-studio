@@ -85,8 +85,12 @@ pub fn run(chart: &Showchart, output: Option<&Output>, readiness: &BTreeMap<Stri
                 dev("fail", "device", format!("{} is a serial device, and this runtime was built without serial (cargo build --features serial): its cues cannot be sent.", d.label));
             }
         }
+        // a UDP text device: the datagram is handed to the network and nothing comes back
+        if d.is_udp() {
+            dev("warn", "device", format!("{} is sent UDP text: a datagram that is sent has left this machine and nothing says it arrived or that the device acted on it.", d.label));
+        }
         // the profile-driven outputs (web, JSON-RPC, MQTT, serial): say when their rules rest on less than the vendor's own document
-        for note in [crate::httpout::basis_note(d), crate::jsonrpc::basis_note(d), crate::mqttout::basis_note(d), crate::serialout::weak_note(d)].into_iter().flatten() {
+        for note in [crate::httpout::basis_note(d), crate::jsonrpc::basis_note(d), crate::mqttout::basis_note(d), crate::serialout::weak_note(d), crate::udpout::weak_note(d)].into_iter().flatten() {
             dev("warn", "device", note);
         }
         // a DMX device's patch must make sense: fixtures that exist, addresses that fit, no channel used twice
@@ -169,6 +173,15 @@ pub fn run(chart: &Showchart, output: Option<&Output>, readiness: &BTreeMap<Stri
             }
             if dev.kind == "obs" {
                 return match crate::obs::scene_of(action) {
+                    Err(e) => {
+                        *bad += 1;
+                        Some(("fail", format!("{what} to {}: {e}.", dev.label), Some(dev.id.clone())))
+                    }
+                    Ok(_) => None,
+                };
+            }
+            if dev.is_udp() {
+                return match crate::udpout::check_action(dev, action) {
                     Err(e) => {
                         *bad += 1;
                         Some(("fail", format!("{what} to {}: {e}.", dev.label), Some(dev.id.clone())))

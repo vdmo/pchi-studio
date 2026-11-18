@@ -47,7 +47,7 @@ impl Device {
     }
 
     pub fn is_direct_kind(kind: &str) -> bool {
-        kind == "obs" || kind == crate::midiout::KIND || crate::dmx::proto_of(kind).is_some() || crate::textlink::get(kind).is_some() || crate::httpout::get(kind).is_some() || crate::jsonrpc::get(kind).is_some() || crate::mqttout::get(kind).is_some() || crate::serialout::get(kind).is_some()
+        kind == "obs" || kind == crate::midiout::KIND || crate::dmx::proto_of(kind).is_some() || crate::textlink::get(kind).is_some() || crate::httpout::get(kind).is_some() || crate::jsonrpc::get(kind).is_some() || crate::mqttout::get(kind).is_some() || crate::serialout::get(kind).is_some() || crate::udpout::get(kind).is_some()
     }
 
     /// A device driven by a line of text over TCP, described by a link profile (see `textlink`): a robot's own command interface.
@@ -75,6 +75,11 @@ impl Device {
         crate::serialout::get(self.profile_key()).is_some()
     }
 
+    /// A device that sends a UDP text datagram from a profile (see `udpout`).
+    pub fn is_udp(&self) -> bool {
+        crate::udpout::get(self.profile_key()).is_some()
+    }
+
     pub fn address(&self) -> Option<String> {
         // a MIDI output or a serial device is found by a port name, not by host and port
         if self.kind == crate::midiout::KIND {
@@ -88,7 +93,7 @@ impl Device {
             let u = self.universe.unwrap_or(1) as u16;
             return Some(format!("{}:{}", crate::dmx::sacn_multicast(u), self.port.unwrap_or(5568)));
         }
-        let port = self.port.or_else(|| crate::textlink::get(self.profile_key()).and_then(|p| p.port)).or_else(|| crate::httpout::get(self.profile_key()).and_then(|p| p.port)).or_else(|| crate::jsonrpc::get(self.profile_key()).and_then(|p| p.port)).or_else(|| crate::mqttout::get(self.profile_key()).map(|p| p.port.unwrap_or(1883)));
+        let port = self.port.or_else(|| crate::textlink::get(self.profile_key()).and_then(|p| p.port)).or_else(|| crate::httpout::get(self.profile_key()).and_then(|p| p.port)).or_else(|| crate::jsonrpc::get(self.profile_key()).and_then(|p| p.port)).or_else(|| crate::mqttout::get(self.profile_key()).map(|p| p.port.unwrap_or(1883)).or_else(|| crate::udpout::get(self.profile_key()).and_then(|p| p.port)));
         match (&self.host, port) {
             (Some(h), Some(p)) if !h.trim().is_empty() => Some(format!("{}:{}", h.trim(), p)),
             _ => None,

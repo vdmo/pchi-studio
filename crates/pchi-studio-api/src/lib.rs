@@ -58,6 +58,7 @@ pub mod httpout;
 pub mod jsonrpc;
 pub mod mqttout;
 pub mod serialout;
+pub mod udpout;
 pub mod library;
 pub mod links;
 pub mod memory_api;

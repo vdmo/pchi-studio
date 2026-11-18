@@ -31,6 +31,7 @@ Counting a protocol that fails these would make the list longer and the claim wo
 | Out | JSON-RPC 2.0 over TCP from a profile: Q-SYS QRC built in (Control.Set, Snapshot.Load) | built; stand-in device only; method names from memory | `jsonrpc.rs`, `profiles/jsonrpc/` |
 | Out | MQTT 3.1.1 publish (QoS 0 or 1) to a closed list of topics from a profile; no login, no TLS, no built-in profile | built; stand-in broker only | `mqttout.rs` |
 | Out | Serial lines (RS-232; RS-485 via adapter) from a profile, optional expected reply; needs `--features serial`; no built-in profile | built; the port code is tested against a pseudo-terminal, never real hardware | `serialout.rs` |
+| Out | UDP text: one datagram per cue from a profile, unicast only, no reply read; no built-in profile | built; loopback receiver only | `udpout.rs` |
 | Out | LTC timecode as audio (free-run or following the show), to a file or pipe, or a device with `--features audio` | built; read back by our own decoder only, device path never played | `ltcout.rs` |
 | In | HTTP, WebSocket | built | `lib.rs` |
 | In | OSC (Stream Deck, tablets, button boxes) | built | `inputs.rs` |
@@ -40,7 +41,7 @@ Counting a protocol that fails these would make the list longer and the claim wo
 | In | Ableton Link peers: who is on the network and their tempo (listen only: `--link-peers`; no beat sync, does not drive the show) | built; layout read from the Link source; never heard a real peer | `link.rs` |
 | Import | CSV, QLab 4 cue lists | built | `import.rs` |
 
-**Not built:** GPIO, UDP/TCP raw-text send other than through a TCP link profile, NDI control, Link beat/phase sync and joining a Link session (only listening is built). A search of the code for `visca` finds nothing; PJLink is a text-link profile, and HTTP and MQTT are small hand-written clients (no `reqwest`, no MQTT library, no TLS).
+**Not built:** GPIO, raw TCP text other than through a TCP link profile, UDP binary, NDI control, Link beat/phase sync and joining a Link session (only listening is built). A search of the code for `visca` finds nothing; PJLink is a text-link profile, and HTTP and MQTT are small hand-written clients (no `reqwest`, no MQTT library, no TLS).
 
 ## Order of work, cheapest and most useful first
 
@@ -86,7 +87,7 @@ Each slice ends with a commit and push, so progress is visible and nothing sits 
 | 5 | HTTP/REST output with URL templates (C2) | **Done, `219613e`.** Profiles of `GET`/`POST`/`PUT` templates over plain http, a built-in Companion profile (route from memory), a documented camera/webhook recipe; a stand-in server tests the request and the outcomes. No TLS, no authentication, no answer body; never tried on a real device |
 | 6 | Update this page, [industry-tools.md](industry-tools.md) and [positioning.md](positioning.md) to the new truth | **Done.** Protocol rows, the "Not built" line and the positioning claim about protocol reach now match the code |
 
-**Next:** the clocks tranche is done (Link listen-only). The larger gap is not protocols: nothing here has run against a real tool.
+**Next:** the clocks tranche is done (Link listen-only), and a UDP text output followed it (see [udp-output.md](udp-output.md)). The larger gap is not protocols: nothing here has run against a real tool.
 
 If a slice finds a source I cannot confirm, the rules go in as `memory` and the Doors check will say so. The schedule slips before the honesty does.
 
