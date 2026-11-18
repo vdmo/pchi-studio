@@ -1,0 +1,27 @@
+{
+  "id": "qsys",
+  "name": "Q-SYS Core (QRC)",
+  "transport": "jsonrpc-tcp",
+  "dept": "audio",
+  "port": 1710,
+  "terminator": "nul",
+  "kinds": ["audio.control", "audio.snapshot"],
+  "hint": "audio.control: the control's name, an equals sign and a number, for example Main Gain=-10 (the name is the control's Script Access name in Q-SYS Designer). audio.snapshot: the snapshot's name, a slash and its bank number, for example Show Open/1",
+  "notes": "Q-SYS's external control protocol (QRC) as remembered from its documentation: JSON-RPC 2.0 over TCP port 1710, each message ended by a zero byte, Control.Set with Name and Value, Snapshot.Load with Name and Bank. Not checked against a running Core or its documentation, so confirm the method names, the port and the terminator against your Designer version before a show. A Core that requires a login is not supported: there is no Logon, and no password can be put in a profile. Each cue opens a connection, sends one request, reads one answer and closes.",
+  "actions": {
+    "audio.control": {
+      "value": "([A-Za-z0-9_. -]{1,60})=(-?\\d{1,6}(?:\\.\\d{1,4})?)",
+      "method": "Control.Set",
+      "params": {"Name": "{1}", "Value": "{2:number}"},
+      "basis": "memory",
+      "source": "Q-SYS QRC (External Control Protocol) documentation, from memory; no copy read"
+    },
+    "audio.snapshot": {
+      "value": "([A-Za-z0-9_. -]{1,40})/(\\d{1,3})",
+      "method": "Snapshot.Load",
+      "params": {"Name": "{1}", "Bank": "{2:number}"},
+      "basis": "memory",
+      "source": "Q-SYS QRC (External Control Protocol) documentation, from memory; no copy read"
+    }
+  }
+}

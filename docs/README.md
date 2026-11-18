@@ -44,6 +44,7 @@ This is the map. Start with the first section that fits you.
 - [ursim-check.md](ursim-check.md): the procedure for checking the UR driver against URSim and then a real robot, starting read-only
 - [link-profiles.md](link-profiles.md): describe a device driven by lines of text over TCP in a file, with a list of commands it must never send
 - [http-output.md](http-output.md): a cue becomes one web request from a closed list in a profile (Companion built in); plain http only
+- [jsonrpc-output.md](jsonrpc-output.md): a cue becomes one JSON-RPC request over TCP from a closed list in a profile (Q-SYS built in)
 - [motion.md](motion.md): the motion department: robots and moving rigs, armed like lasers, with their own stop (step 1 of the robotics plan; no real robot driver yet)
 - [robotics-kuka-ur.md](robotics-kuka-ur.md): the design for KUKA and Universal Robots (not built)
 - [robotics-plan.md](robotics-plan.md): a plan (not built) for controlling robots and motion rigs: what exists, the safety rule, and the order to build in

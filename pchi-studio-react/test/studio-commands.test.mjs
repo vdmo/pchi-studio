@@ -62,6 +62,7 @@ test('systems are added by sentence, with a name, an address, a port and a depar
   assert.equal(run('connect beyond').rig.nodes[0].type, 'beyond')
   assert.equal(run('add companion http').rig.nodes[0].type, 'companion-http', 'the name finds the HTTP one')
   assert.equal(run('add companion').rig.nodes[0].type, 'companion', 'and plain Companion stays the OSC one')
+  assert.equal(run('add q-sys').rig.nodes[0].type, 'qsys')
   assert.equal(run('add a lighting desk').rig.nodes[0].type, 'lighting-desk')
   assert.deepEqual(run('add 3 lasers').rig.nodes.map((x) => x.label), ['Laser', 'Laser 2', 'Laser 3'])
 })

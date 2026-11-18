@@ -250,6 +250,9 @@ impl Output {
 
     /// Like `deliver`, but says how far it got: `sent`, `accepted` or `running`; or `refused` / `failed` with the reason.
     pub async fn deliver_detail(&self, dev: &Device, action: &Action) -> Result<Delivered, Undelivered> {
+        if dev.is_rpc() {
+            return crate::jsonrpc::apply(dev, action).await.map(|o| Delivered { target: o.target, status: o.status, note: Some(o.note) }).map_err(|e| Undelivered { status: e.status(), error: e.text().to_string() });
+        }
         if dev.is_http() {
             return crate::httpout::apply(dev, action).await.map(|o| Delivered { target: o.target, status: o.status, note: Some(o.note) }).map_err(|e| Undelivered { status: e.status(), error: e.text().to_string() });
         }
@@ -268,6 +271,9 @@ impl Output {
     pub async fn deliver(&self, dev: &Device, action: &Action) -> Result<String, String> {
         if dev.is_dmx() {
             return self.dmx.apply(dev, action).await;
+        }
+        if dev.is_rpc() {
+            return crate::jsonrpc::apply(dev, action).await.map(|o| o.target).map_err(|e| e.to_string());
         }
         if dev.is_http() {
             return crate::httpout::apply(dev, action).await.map(|o| o.target).map_err(|e| e.to_string());
@@ -308,6 +314,9 @@ pub fn wire_lines(dev: &Device, action: &Action) -> Result<Vec<(String, Vec<Valu
         let summary = crate::dmx::describe(dev, action)?;
         let proto = crate::dmx::proto_of(&dev.kind).ok_or("not a DMX device")?;
         return Ok(vec![(format!("{} universe {}", proto.name(), dev.universe.unwrap_or(proto.default_universe())), vec![Value::String(crate::dmx::value_of(action)), Value::String(summary)])]);
+    }
+    if dev.is_rpc() {
+        return crate::jsonrpc::describe(dev, action);
     }
     if dev.is_http() {
         return crate::httpout::describe(dev, action);

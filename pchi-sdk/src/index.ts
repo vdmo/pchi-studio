@@ -48,7 +48,7 @@ export type NodeType =
   // venue
   | 'ghost-arcade' | 'projector' | 'led-wall' | 'audio-zone' | 'laser' | 'lighting-desk' | 'audio-console' | 'motion' | 'ur'
   // tool profiles (the exact OSC dialect of a popular tool)
-  | 'resolume' | 'grandma3' | 'eos' | 'x32' | 'beyond' | 'qlab' | 'magicq' | 'ableton' | 'reaper' | 'millumin' | 'companion' | 'pjlink' | 'companion-http' | 'midi-out' | 'artnet' | 'sacn' | 'obs'
+  | 'resolume' | 'grandma3' | 'eos' | 'x32' | 'beyond' | 'qlab' | 'magicq' | 'ableton' | 'reaper' | 'millumin' | 'companion' | 'pjlink' | 'companion-http' | 'qsys' | 'midi-out' | 'artnet' | 'sacn' | 'obs'
   // intelligence
   | 'director-agent' | 'vision-agent' | 'audio-agent'
 
@@ -122,6 +122,7 @@ export const NODE_CATALOG: NodeSpec[] = [
   // PJLink projectors listen on TCP 4352. A projector with a PJLink password is refused with that reason: turn authentication off on it.
   spec('venue', 'pjlink', 'Projector (PJLink)', { host: '127.0.0.1', port: 4352 }),
   spec('venue', 'companion-http', 'Companion (HTTP)', { host: '127.0.0.1', port: 8000 }),
+  spec('venue', 'qsys', 'Q-SYS Core', { host: '127.0.0.1', port: 1710 }),
   // MIDI output: the "host" is part of the MIDI output port's name (blank means the first port), and there is no port number. Cues say
   // what to send: note 60, pc 12 ch 2, cc 7 64, panic. Needs a runtime built with --features midi. Serves audio unless you set another department.
   spec('venue', 'midi-out', 'MIDI output', { host: '' }),

@@ -104,6 +104,8 @@ test('the tool profiles serve the departments they are for', () => {
   assert.equal(specOf('pjlink').defaults.port, 4352)
   assert.equal(rigDept(node('h', 'companion-http')), 'visual')
   assert.equal(specOf('companion-http').defaults.port, 8000)
+  assert.equal(rigDept(node('q', 'qsys')), 'audio')
+  assert.equal(specOf('qsys').defaults.port, 1710)
   assert.equal(rigDept(node('m', 'midi-out')), 'audio')
   assert.equal(rigDept(node('m2', 'midi-out', { dept: 'lighting' })), 'lighting', 'a MIDI output can serve any department')
   assert.equal(specOf('midi-out').label, 'MIDI output')

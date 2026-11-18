@@ -60,7 +60,7 @@ arm/disarm and a hard stop before it is used with real hardware.
 |---|---|---|---|
 | Behringer / Midas X32 and M32 | The most widespread digital mixer in small and mid-size venues | OSC over UDP, port 10023 (X-Air series: 10024); the mixer replies to the port the request came from; the protocol is documented unofficially (Patrick-Gilles Maillot) and subscriptions must be renewed with `/xremote`; *checked (secondary sources)* | The official spec is thin: verify on a real desk or an emulator. |
 | Behringer Wing, Allen & Heath SQ / dLive, Yamaha CL / QL / Rivage, DiGiCo | Mid to large venues, touring | OSC, MIDI or TCP depending on the brand; *from memory* | One adapter per family. |
-| Q-SYS | Installed sound, themed venues | JSON-RPC (QRC) over TCP; *from memory* | |
+| Q-SYS | Installed sound, themed venues | JSON-RPC (QRC) over TCP; *from memory*, now a profile (Control.Set and Snapshot.Load, no login) | |
 | Reaper | Playback / recording | OSC; *from memory*, now a profile whose rules are marked community (second-hand) | |
 
 ## Picking a few
