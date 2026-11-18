@@ -18,9 +18,11 @@ None of the parts below is new. Do not claim they are.
 | Multi-department show control | [Medialon](https://medialon.com), [7thSense](https://7thsense.one/medialon-7thsense-show-control) | Lighting, audio, video and effects together, with timelines, triggers and conditional logic. This is the closest overlap |
 | Laser software | [Pangolin](https://pangolin.com/QS/), [Showcontroller](https://www.laserworld.com/en/shownet-compatible/showcontroller) | A timeline and live engine for one department |
 | Attractions control | [Theme-park systems](https://www.inparkmagazine.com/beyond-av-control/) | Lighting, animatronics, fountains and lasers together |
-| Glue and state-chart tools | Chataigne, Bitfocus Companion, Stately/XState (from memory, not checked for this page) | Routing between tools; a state-chart editor for software |
+| Open-source show control | [Chataigne](https://github.com/benkuper/Chataigne-docs/blob/master/getting-started-1/getting-started.md) | OSC, MIDI, DMX, serial, UDP, TCP, HTTP and PJLink. It has a **State Machine** for real-time rules and a **Time Machine** (timelines), in separate modules. Free, GPL-3.0 |
+| Button and control platforms | Bitfocus Companion and its newer product [Buttons](https://www.broadcastbeat.com/articles/bitfocus-improves-availability-security-and-user-management-in-new-version-of-buttons) | Buttons now advertises high availability and user permissions |
+| State-chart editors | Stately/XState (from memory) | A state-chart editor for software, not for shows |
 
-Medialon and similar systems already offer conditional logic across departments. PCHI is not the first to coordinate several departments.
+Medialon already offers conditional logic across departments, timelines with expressions in cue properties, monitoring and failover. Chataigne already has both a state machine and a timeline. PCHI is not the first to coordinate several departments, and not the first to pair state logic with timelines. See [the comparison below](#compared-with-medialon-and-chataigne).
 
 ## What is different
 
@@ -34,6 +36,31 @@ Medialon and similar systems already offer conditional logic across departments.
 8. **A shared library** of versioned shows, with plans, venues and statuses ([library.md](library.md)).
 
 The claim to defend is the **combination**: a state chart of the show, department safety, a separate runtime with roles, and a verifiable record. It is not any one feature.
+
+## Compared with Medialon and Chataigne
+
+Built from vendor and project pages found by web search, not from running either product. Vendor claims are marked as claims. Where a row says "not found", I did not find it; that is not the same as "it does not have it".
+
+| | PCHI Studio | [Medialon Manager](https://7thsense.one/medialon-7thsense-show-control) | [Chataigne](https://github.com/benkuper/Chataigne-docs/blob/master/getting-started-1/getting-started.md) |
+|---|---|---|---|
+| Cost and licence | See `PRICING.md` | Commercial | Free, GPL-3.0 |
+| Timeline | Timelines inside each scene; editable from the Show tab | Timeline with drag-and-drop; sync accuracy claimed at 1/100 s | A Time Machine of sequences |
+| State logic | A state chart of scenes: events, timers, guards, minimum times | Triggers and conditional logic; expressions in cue properties (V7) | A State Machine of rules, kept separate from the timeline |
+| Protocols | OSC with profiles per tool, Art-Net, sACN, MIDI timecode in, UR robots | DMX, MIDI, TCP, UDP, OSC, Art-Net, sACN, RS-232, GPIO, SMPTE: **much broader** | OSC, MIDI, DMX, serial, UDP, TCP, HTTP, PJLink: **much broader** |
+| Departments with arm and hold | Yes: lasers and motion are held until armed; a ready board; GO asks twice | Monitoring and alerts claimed; arming and holds not found | Not found |
+| Editor separate from the thing that sends | Yes: Studio edits, a runtime sends, changes go as a diff, can be proposed for approval, and can be undone | Not found | Not found; it is one application |
+| Roles and who-may-do-what | Roster with operator, editor, guest and per-department limits | Not found in what I read | Not found |
+| Record of what happened | Hash-chained receipts, replay, run report | Log files and performance logging claimed | Not found |
+| Failover | Standby and witness; tested only in simulation | Claimed for Manager 4: backup takes over a failed system | Not found |
+| AI | Proposal-only panel and agent edits for approval | Not found | Not found |
+| Maturity | Never on real gear, nobody outside the project has run a show | Established commercial product, in V7 | Established, used by artists and in community modules |
+
+### What this changes
+
+- **The "state chart plus timelines" claim is weaker than I first said.** Chataigne has a state machine and a timeline, and Medialon has conditional logic with timelines. What I could not find in either is *the show itself as a graph of scenes* with timelines nested inside each scene and one model behind Show, Timeline, Cue sheet and Live. That is a difference of design, not of capability, and a user may not care.
+- **Roles and audit are the stronger difference,** but only against what I could find. Bitfocus Buttons now advertises permissions and high availability, and Medialon claims logging, so check each before saying PCHI alone has them.
+- **Protocol reach is where PCHI loses.** Both competitors speak more protocols than PCHI. Per [industry-tools.md](industry-tools.md) PCHI has no MIDI output yet, and I know of no RS-232 or GPIO support (check [connecting-systems.md](connecting-systems.md) before quoting this).
+- **Maturity is where PCHI loses most.** Both are used on real shows. PCHI has not been.
 
 ## What it is not
 
