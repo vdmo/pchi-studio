@@ -82,7 +82,7 @@ QLab 5, `.noisette` and `.score` are refused in words. A QLab cue type with no k
 ## Building and tests
 
 - `cargo build` fails on a missing system library only with `--features midi` or `audio`.
-- Studio: `npm run typecheck` then `npm run test:sdk`.
+- Studio: `npm run typecheck`, then `npm run test:sdk` (the logic) and `npm run test:ui` (the screens, in jsdom; needs `npm install` first).
 
 ## Still stuck
 

@@ -119,5 +119,7 @@ Create roster entries with `pchi-studio-api --new-roster-entry Alex:operator`. R
 
 ```bash
 cargo test                                   # runtime, engine, memory, store, protocol
-cd pchi-studio-react && npm run typecheck && npm run test:sdk
+cd pchi-studio-react && npm install && npm run typecheck && npm run test:sdk && npm run test:ui
 ```
+
+`test:sdk` tests the pure logic in `pchi-sdk` (rig checks, cue sheet, commands). `test:ui` renders the Studio's screens in a simulated browser (jsdom) against a stand-in runtime and checks that it starts, every tab opens, and the main flows work: adding a device from a runtime profile, a new cue starting as a kind its profile takes, the live cue check, and the Tool profiles dialog. It also scans the source for re-encoded characters. It cannot see layout or colour, so look at a visual change in the app too.
