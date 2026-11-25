@@ -90,6 +90,11 @@ class Tracker:
         self.pos, self.t, self.clamped = new, now, clamped or limited != raw
         self.wrists = self._wrists(frame)
 
+    def lost(self, now, after):
+        """True when no usable frame has been accepted for `after` seconds (or ever). Low-confidence frames do
+        not count as usable, so a long occlusion also becomes 'lost'."""
+        return self.t is None or now - self.t > after
+
     def _wrists(self, frame):
         """Both wrists as finite 3-tuples, or None (then the expressive values simply hold)."""
         try:
@@ -179,6 +184,7 @@ def main():
     ap.add_argument("--radius", type=float, default=1.5)
     ap.add_argument("--slew", type=float, default=6.0, help="max m/s the tracked point may move")
     ap.add_argument("--param-rate", type=float, default=20.0, help="Hz for spread/hand_elevation/energy; 0 = off")
+    ap.add_argument("--lost-after", type=float, default=2.0, help="seconds without a usable frame before position output stops")
     ap.add_argument("--lead", type=float, default=0.03, help="seconds of look-ahead")
     a = ap.parse_args()
 
@@ -201,14 +207,23 @@ def main():
 
     threading.Thread(target=receive, daemon=True).start()
     window, period, nxt = [], 1.0 / a.rate, time.monotonic()
-    next_params = nxt
+    next_params, last_tracking, tracking_at = nxt, None, 0.0
     print(f"listening {a.listen}; sending artist_tracking to {a.pchi} at {a.rate:g} Hz")
     while True:
         nxt += period
         time.sleep(max(0.0, nxt - time.monotonic()))
         with lock:
-            pos, vel, _ = trk.predict(time.monotonic())
+            now = time.monotonic()
+            pos, vel, _ = trk.predict(now)
             extra = expressive(trk, vel)
+            lost = trk.lost(now, a.lost_after)
+        live = 0.0 if lost else 1.0
+        # Say so when tracking starts or stops, and repeat once a second so a late listener learns it.
+        if live != last_tracking or time.monotonic() - tracking_at >= 1.0:
+            last_tracking, tracking_at = live, time.monotonic()
+            tx.sendto(json.dumps(control_message("rgbmocap.tracking", live)).encode(), dest)
+        if lost:
+            continue  # never keep steering the show with a position nobody is tracking any more
         window.append(pos[0])
         del window[:-8]
         tx.sendto(json.dumps(pchi_message(pos, vel, window)).encode(), dest)

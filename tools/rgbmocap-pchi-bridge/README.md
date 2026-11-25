@@ -24,6 +24,7 @@ Input frame: `{"confidence": 0.9, "joints": {"pelvis": [x, y, z]}}` in metres, s
 
 - Receiver and emitter are separate loops: the tracker may run at 15–30 Hz while output is a steady `--rate` Hz.
 - Dead reckoning with a capped horizon (70 ms) plus a small look-ahead (`--lead`); velocity decays when frames go stale or confidence drops, so a stalled tracker coasts to a stop.
+- Tracking-lost handling: if no usable frame arrives for `--lost-after` seconds (default 2; low-confidence frames do not count), the bridge stops sending position and parameters, so a moving head is not left pinned on a stale point. It sends `rgbmocap.tracking` (1 live, 0 lost) on every change and once a second. Checked live against a Conductor: 0 before the first frame, 1 during a replay, 0 after it stopped. The bridge stopping sending is not the same as the show reacting: nothing yet makes a fixture park or fade when it reads 0, and the venue rule file does not watch it.
 - Slew limit (`--slew`, m/s) so a single-frame pose flip cannot teleport the point; cylinder clamp (`--radius`, height 0–2.8 m); NaN, wrong-length and malformed frames are dropped and counted.
 
 Recordings hold a real person's body positions. Treat them as personal data and do not commit them (the repo has no rule for this yet; add `*.jsonl` to a `.gitignore` if you keep them in the tree).

@@ -119,6 +119,17 @@ class Bridge(unittest.TestCase):
             self.assertIn("t", l)
             self.assertIn("confidence", l)
 
+    def test_lost_after_silence_or_long_occlusion_and_recovers(self):
+        t = Tracker(Limits())
+        self.assertTrue(t.lost(0.0, 2.0))                     # never saw a frame
+        t.update(frame((0, 0, 1)), 1.0)
+        self.assertFalse(t.lost(2.5, 2.0))
+        self.assertTrue(t.lost(3.5, 2.0))                     # tracker went silent
+        t.update(frame((0, 0, 1), conf=0.1), 3.6)             # occluded frames do not count as usable
+        self.assertTrue(t.lost(3.7, 2.0))
+        t.update(frame((0.1, 0, 1)), 3.8)
+        self.assertFalse(t.lost(3.9, 2.0))
+
     def test_extrapolation_capped_and_decays(self):
         t = Tracker(Limits())
         t.update(frame((0, 0, 1)), 0.0)
