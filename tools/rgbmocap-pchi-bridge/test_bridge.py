@@ -10,6 +10,7 @@ import unittest
 import pear_tap
 import record
 import tune
+import watch
 from rgbmocap_pchi_bridge import Limits, Tracker, clamp_stage, control_message, expressive, pchi_message
 
 
@@ -135,6 +136,18 @@ class Bridge(unittest.TestCase):
         eased = tune.run(0.03, 0.08, 20.0, 60.0, 0.07, blend=0.03)
         self.assertLess(eased[3], snap[3] * 0.85)
         self.assertLess(eased[0], snap[0] * 1.15)   # at a modest cost in average error
+
+    def test_watch_describes_hands_and_flags_wrong_axes(self):
+        ok = {"confidence": 1.0, "joints": {"pelvis": [0.2, 0.1, 1.0], "head": [0.2, 0.1, 1.6],
+              "left_wrist": [0.0, 0.0, 1.0], "right_wrist": [0.4, 0.0, 1.9]}}
+        text = watch.describe(ok)
+        self.assertIn("right above head", text)
+        self.assertNotIn("left above", text)
+        self.assertIn("right of origin", text)
+        flipped = {"confidence": 1.0, "joints": {**ok["joints"], "head": [0.2, 0.1, 0.4]}}
+        self.assertIn("HEAD BELOW PELVIS", watch.describe(flipped))
+        self.assertEqual(watch.describe({"confidence": 0.0, "joints": {}}), "no person tracked")
+        self.assertIn("missing joint", watch.describe({"confidence": 1.0, "joints": {"pelvis": [0, 0, 1]}}))
 
     def test_extrapolation_capped_and_decays(self):
         t = Tracker(Limits())

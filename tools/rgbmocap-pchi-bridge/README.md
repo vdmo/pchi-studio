@@ -29,6 +29,10 @@ Input frame: `{"confidence": 0.9, "joints": {"pelvis": [x, y, z]}}` in metres, s
 
 Recordings hold a real person's body positions. Treat them as personal data and do not commit them (the repo has no rule for this yet; add `*.jsonl` to a `.gitignore` if you keep them in the tree).
 
+## First run on real hardware
+
+`BRINGUP.md` is a ten-step checklist, and `python watch.py` shows what the tap sends in plain words so you can confirm joint indices, left/right and the up axis by moving. None of it has been done yet.
+
 ## Choosing the look-ahead (`tune.py`)
 
 `python tune.py --delay 0.08` simulates a performer (sway plus 1 m lunges that stop dead), a 20 Hz tracker and a pipeline delay you set, then reports how far the bridge's output is from the true position. With an 80 ms delay it gave:
