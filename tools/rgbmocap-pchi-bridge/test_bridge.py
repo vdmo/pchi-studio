@@ -87,8 +87,8 @@ class Bridge(unittest.TestCase):
         self.assertEqual((d["target_id"], d["parameter"], d["value"]), ("performer_01", "rgbmocap.spread", 0.1235))
 
     def test_lookahead_trades_lag_for_overshoot_in_simulation(self):
-        rms0, _, over0 = tune.run(0.0, 0.08, 20.0, 60.0, 0.07)
-        rms4, _, over4 = tune.run(0.04, 0.08, 20.0, 60.0, 0.07)
+        rms0, _, over0, _ = tune.run(0.0, 0.08, 20.0, 60.0, 0.07)
+        rms4, _, over4, _ = tune.run(0.04, 0.08, 20.0, 60.0, 0.07)
         self.assertLess(rms4, rms0)      # some look-ahead lowers average error ...
         self.assertGreater(over4, over0)  # ... and costs overshoot after a sudden stop
 
@@ -129,6 +129,12 @@ class Bridge(unittest.TestCase):
         self.assertTrue(t.lost(3.7, 2.0))
         t.update(frame((0.1, 0, 1)), 3.8)
         self.assertFalse(t.lost(3.9, 2.0))
+
+    def test_blending_corrections_reduces_the_largest_output_jump(self):
+        snap = tune.run(0.03, 0.08, 20.0, 60.0, 0.07, blend=0.0)
+        eased = tune.run(0.03, 0.08, 20.0, 60.0, 0.07, blend=0.03)
+        self.assertLess(eased[3], snap[3] * 0.85)
+        self.assertLess(eased[0], snap[0] * 1.15)   # at a modest cost in average error
 
     def test_extrapolation_capped_and_decays(self):
         t = Tracker(Limits())

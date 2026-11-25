@@ -39,6 +39,8 @@ Recordings hold a real person's body positions. Treat them as personal data and 
 | 40 ms | 9.9 cm | 35 cm |
 | 100 ms | 12.1 cm | 62 cm |
 
+Each new frame also moves the extrapolated point, and unblended that shows up as a snap. `--blend` (default 0.03 s) eases each correction in over that time. In the same simulation the largest jump between 60 Hz output ticks fell from 20.5 cm to 14.4 cm at 30 ms and 12.1 cm at 50 ms (lead 0), for 0.3 to 0.8 cm more average error. Part of that jump is just the performer's own speed (6 m/s is 10 cm per tick), so it cannot go to zero. Run `python tune.py --blend 0.03` to see the full table.
+
 Reading it: look-ahead lowers average error by about 8% at best, then makes it worse, and overshoot after a stop grows with every millisecond of lead. The worst error (about 58 cm, during the lunge) did not move at all, because the delay itself dominates there. So the default 30 ms is a compromise, and the real fix for fast moves is less delay at the source (shutter, resolution, filter strength), not more extrapolation.
 **This is a simulation with an assumed delay.** It says nothing about your camera or PEAR's real latency, which nobody has measured here. The overshoot figure is a rough metric. Measure your real delay (for example by filming a clap against a sound), then re-run with that number.
 

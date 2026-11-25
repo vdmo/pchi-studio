@@ -25,9 +25,10 @@ ARTIST_ID = "performer_01"
 
 class Limits:
     def __init__(self, radius=1.5, zmin=0.0, zmax=2.8, slew=6.0, min_conf=0.45,
-                 horizon=0.07, lead=0.03, decay=0.85):
+                 horizon=0.07, lead=0.03, decay=0.85, blend=0.0):
         self.radius, self.zmin, self.zmax, self.slew = radius, zmin, zmax, slew
         self.min_conf, self.horizon, self.lead, self.decay = min_conf, horizon, lead, decay
+        self.blend = blend  # seconds to ease in the jump a new frame causes (0 = snap)
 
 
 def clamp_stage(p, lim):
@@ -62,6 +63,7 @@ class Tracker:
         self.conf = 0.0
         self.clamped = False
         self.rejected = 0
+        self.offset = (0.0, 0.0, 0.0)  # leftover jump from the last correction, fading to zero
         self.wrists = None     # (left, right) from the last accepted frame that had both
 
     def update(self, frame, now):
@@ -84,11 +86,16 @@ class Tracker:
             self.wrists = self._wrists(frame)
             return
         dt = max(now - self.t, 1e-3)
+        before = self.predict(now)[0] if self.lim.blend > 0 else None
         limited = slew_limit(self.pos, raw, dt, self.lim.slew)
         new, clamped = clamp_stage(limited, self.lim)
         self.vel = tuple((n - o) / dt for n, o in zip(new, self.pos))
         self.pos, self.t, self.clamped = new, now, clamped or limited != raw
         self.wrists = self._wrists(frame)
+        if before is not None:
+            self.offset = (0.0, 0.0, 0.0)
+            after = self.predict(now)[0]
+            self.offset = tuple(b - a for b, a in zip(before, after))
 
     def lost(self, now, after):
         """True when no usable frame has been accepted for `after` seconds (or ever). Low-confidence frames do
@@ -118,6 +125,9 @@ class Tracker:
             f = self.lim.decay ** max(1.0, (age - self.lim.horizon) * 60)
             v = tuple(c * f for c in v)
         p = tuple(a + c * (h + self.lim.lead) for a, c in zip(self.pos, v))
+        if self.lim.blend > 0 and age < self.lim.blend:
+            fade = 1.0 - age / self.lim.blend
+            p = tuple(a + o * fade for a, o in zip(p, self.offset))
         p, clamped = clamp_stage(p, self.lim)
         return p, v, clamped or self.clamped
 
@@ -184,11 +194,12 @@ def main():
     ap.add_argument("--radius", type=float, default=1.5)
     ap.add_argument("--slew", type=float, default=6.0, help="max m/s the tracked point may move")
     ap.add_argument("--param-rate", type=float, default=20.0, help="Hz for spread/hand_elevation/energy; 0 = off")
+    ap.add_argument("--blend", type=float, default=0.03, help="seconds to ease in each correction from a new frame; 0 = snap")
     ap.add_argument("--lost-after", type=float, default=2.0, help="seconds without a usable frame before position output stops")
     ap.add_argument("--lead", type=float, default=0.03, help="seconds of look-ahead")
     a = ap.parse_args()
 
-    trk, lock = Tracker(Limits(radius=a.radius, slew=a.slew, lead=a.lead)), threading.Lock()
+    trk, lock = Tracker(Limits(radius=a.radius, slew=a.slew, lead=a.lead, blend=a.blend)), threading.Lock()
     rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     h, p = a.listen.rsplit(":", 1)
     rx.bind((h, int(p)))

@@ -23,9 +23,9 @@ def truth(t):
     return x + 1.0 * ease(2.0, 2.25, 0) - 1.0 * ease(4.0, 4.25, 0)
 
 
-def run(lead, delay, track_hz, out_hz, horizon, seconds=6.0):
-    lim = Limits(lead=lead, horizon=horizon)
-    trk, errs, over = Tracker(lim), [], 0.0
+def run(lead, delay, track_hz, out_hz, horizon, seconds=6.0, blend=0.0):
+    lim = Limits(lead=lead, horizon=horizon, blend=blend)
+    trk, errs, over, step, prev = Tracker(lim), [], 0.0, 0.0, None
     next_track, dt_track, dt_out = 0.0, 1.0 / track_hz, 1.0 / out_hz
     t = 0.0
     while t < seconds:
@@ -36,11 +36,13 @@ def run(lead, delay, track_hz, out_hz, horizon, seconds=6.0):
             p, _, _ = trk.predict(t)
             e = p[0] - truth(t)
             errs.append(e)
+            step = max(step, abs(p[0] - prev)) if prev is not None else step
+            prev = p[0]
             if 2.25 <= t <= 2.6 or 4.25 <= t <= 4.6:     # just after each stop
                 over = max(over, abs(e) if (e > 0) == (truth(t) > truth(t - 0.3)) else 0.0)
         t += dt_out
     rms = math.sqrt(sum(e * e for e in errs) / len(errs))
-    return rms, max(abs(e) for e in errs), over
+    return rms, max(abs(e) for e in errs), over, step
 
 
 def main():
@@ -49,12 +51,14 @@ def main():
     ap.add_argument("--track-hz", type=float, default=20.0)
     ap.add_argument("--out-hz", type=float, default=60.0)
     ap.add_argument("--horizon", type=float, default=0.07)
+    ap.add_argument("--blend", type=float, default=0.0, help="seconds over which a new frame's correction is eased in")
     a = ap.parse_args()
     print(f"delay {a.delay*1000:.0f} ms, tracker {a.track_hz:g} Hz, output {a.out_hz:g} Hz, horizon {a.horizon*1000:.0f} ms")
-    print(f"{'lead ms':>8} {'rms cm':>8} {'worst cm':>9} {'overshoot cm':>13}")
+    print(f"blend {a.blend*1000:.0f} ms")
+    print(f"{'lead ms':>8} {'rms cm':>8} {'worst cm':>9} {'overshoot cm':>13} {'max step cm':>12}")
     for lead in (0.0, 0.02, 0.04, 0.06, 0.08, 0.10):
-        rms, worst, over = run(lead, a.delay, a.track_hz, a.out_hz, a.horizon)
-        print(f"{lead*1000:8.0f} {rms*100:8.1f} {worst*100:9.1f} {over*100:13.1f}")
+        rms, worst, over, step = run(lead, a.delay, a.track_hz, a.out_hz, a.horizon, blend=a.blend)
+        print(f"{lead*1000:8.0f} {rms*100:8.1f} {worst*100:9.1f} {over*100:13.1f} {step*100:12.1f}")
 
 
 if __name__ == "__main__":
