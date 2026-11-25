@@ -25,6 +25,15 @@ Input frame: `{"confidence": 0.9, "joints": {"pelvis": [x, y, z]}}` in metres, s
 - Dead reckoning with a capped horizon (70 ms) plus a small look-ahead (`--lead`); velocity decays when frames go stale or confidence drops, so a stalled tracker coasts to a stop.
 - Slew limit (`--slew`, m/s) so a single-frame pose flip cannot teleport the point; cylinder clamp (`--radius`, height 0–2.8 m); NaN, wrong-length and malformed frames are dropped and counted.
 
+## Venue rules (second check, in the Conductor)
+
+`rgbmocap-stage.only-pchi` makes the Conductor itself flag a performer outside the stage footprint (box of ±1.5 m, height 0 to 2.8 m). Run it with `primeswarm-pchi --rules rgbmocap-stage.only-pchi`, and `check_rules.py` exercises it.
+
+Tested against a locally built Conductor: in-bounds positions raise nothing, an out-of-bounds position signs a DENY receipt, and so does every later message while that position is still the stored one, until an in-bounds position arrives.
+
+**A DENY here is an alarm, not a gate.** The Conductor stores the position before it evaluates the rules, so the bad value is already in its state. Do not treat "the Conductor accepted it" as "it was in bounds".
+I did not run `scripts/verify_governance_chain.py` on the receipts (it needs `pynacl`, which I did not install), so the signature chain is unchecked.
+
 ## What it does not do (read before using on a stage)
 
 - **It is not laser or DMX safety.** Keep hardware interlocks, scan-fail zones and an E-stop independent of this process. Clamping here only smooths.

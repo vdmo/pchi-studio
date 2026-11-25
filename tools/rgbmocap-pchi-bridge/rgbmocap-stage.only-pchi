@@ -1,0 +1,20 @@
+# Venue rules for a body-tracked performer (RGBMoCap bridge). Only-Lang subset the Conductor parses today.
+#
+# A second check that does not trust the bridge: it runs inside the Conductor on whatever position
+# arrives, from any sender. Bounds are a box (the language has no arithmetic, so no radius), looser
+# than the bridge's 1.5 m circle at the corners. Edit the numbers for your stage.
+#
+# What a DENY does here: it signs a receipt into the governance log and the message returns an error.
+# The position is ALREADY stored by then (the Conductor updates state, then evaluates rules), so this is
+# a signed alarm, not a gate. Downstream consumers must not treat "accepted" as "in bounds" and must
+# keep their own limits (hardware interlocks for lasers and moving heads).
+
+harmony(1e-12)
+
+if artist_tracking.position.x > 1.5 or artist_tracking.position.x < -1.5 or artist_tracking.position.y > 1.5 or artist_tracking.position.y < -1.5 then
+    deny("Performer outside stage footprint")
+end
+
+if artist_tracking.position.z > 2.8 or artist_tracking.position.z < 0.0 then
+    deny("Performer height outside 0 to 2.8 m")
+end
