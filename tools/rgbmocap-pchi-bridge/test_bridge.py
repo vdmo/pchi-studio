@@ -112,7 +112,8 @@ class Bridge(unittest.TestCase):
         rx.close()
         tx.close()
         self.assertEqual(result["r"], (5, 2))
-        lines = [json.loads(l) for l in open(path)]
+        with open(path, encoding="utf-8") as fh:
+            lines = [json.loads(l) for l in fh]
         self.assertEqual([l["joints"] for l in lines], [f["joints"] for f in sent])
         self.assertEqual(lines[0]["t"], 0.0)
         self.assertTrue(all(b["t"] >= a["t"] for a, b in zip(lines, lines[1:])))

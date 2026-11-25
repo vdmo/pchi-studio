@@ -13,6 +13,7 @@ This repository contains all the core libraries, tools, and documentation needed
   - `touchdesigner-pchi-chop/`: Python CHOP for TouchDesigner.
   - `ableton-pchi-max/`: Max for Live device for Ableton Live.
   - `strobe-pchi-bridge/`: OSC bridge for [Strobe](https://github.com/lnorton89/strobe); drives *and* follows the shared show state.
+  - `rgbmocap-pchi-bridge/`: **prototype**, body tracking from [toyxyz_RGBMocap](https://github.com/toyxyz/toyxyz_RGBMocap) to performer position and expression parameters. Tested on synthetic data and a local Conductor only; not run on a camera or fixtures. See its README and `BRINGUP.md`.
   - `pchi-show/`: tiny operator/simulator CLI for show state (plan, enter, readiness).
 - `demos/`: end-to-end demos (`multi-tool-live-show`, `strobe-show`).
 - `docs/`: The full documentation and presentation website; `docs/STRATEGY.md` is positioning and roadmap.
