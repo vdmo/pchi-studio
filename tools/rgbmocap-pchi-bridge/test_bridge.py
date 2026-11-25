@@ -2,7 +2,7 @@ import math
 import unittest
 
 import pear_tap
-from rgbmocap_pchi_bridge import Limits, Tracker, clamp_stage, pchi_message
+from rgbmocap_pchi_bridge import Limits, Tracker, clamp_stage, control_message, expressive, pchi_message
 
 
 def frame(p, conf=0.9):
@@ -54,6 +54,29 @@ class Bridge(unittest.TestCase):
 
     def test_tap_never_raises(self):
         pear_tap.emit({"type": "frame"}, {})  # missing 'joints' array
+
+    def test_expressive_values_are_normalised(self):
+        t = Tracker(Limits())
+        fr = {"confidence": 0.9, "joints": {"pelvis": [0, 0, 1], "left_wrist": [-0.9, 0, 2.2], "right_wrist": [0.9, 0, 1.0]}}
+        t.update(fr, 0.0)
+        e = expressive(t, (3.0, 4.0, 0.0))
+        self.assertAlmostEqual(e["spread"], 1.0)
+        self.assertAlmostEqual(e["hand_elevation"], 1.0)
+        self.assertAlmostEqual(e["energy"], 1.0)
+        self.assertTrue(all(0.0 <= v <= 1.0 for v in e.values()))
+
+    def test_expressive_absent_without_wrists_and_bad_wrists_ignored(self):
+        t = Tracker(Limits())
+        t.update(frame((0, 0, 1)), 0.0)
+        self.assertIsNone(expressive(t, (0, 0, 0)))
+        t.update({"confidence": 0.9, "joints": {"pelvis": [0, 0, 1], "left_wrist": [float("nan"), 0, 1], "right_wrist": [0, 0, 1]}}, 0.05)
+        self.assertIsNone(expressive(t, (0, 0, 0)))
+
+    def test_control_message_shape(self):
+        m = control_message("rgbmocap.spread", 0.123456)
+        self.assertEqual(m["type"], "control_parameter")
+        d = m["payload"]["data"]
+        self.assertEqual((d["target_id"], d["parameter"], d["value"]), ("performer_01", "rgbmocap.spread", 0.1235))
 
     def test_extrapolation_capped_and_decays(self):
         t = Tracker(Limits())

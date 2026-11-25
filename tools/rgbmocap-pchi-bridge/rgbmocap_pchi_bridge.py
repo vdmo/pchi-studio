@@ -62,6 +62,7 @@ class Tracker:
         self.conf = 0.0
         self.clamped = False
         self.rejected = 0
+        self.wrists = None     # (left, right) from the last accepted frame that had both
 
     def update(self, frame, now):
         try:
@@ -80,12 +81,26 @@ class Tracker:
             return
         if self.t is None:
             self.pos, self.vel, self.t, self.clamped = clamp_stage(raw, self.lim)[0], (0.0, 0.0, 0.0), now, False
+            self.wrists = self._wrists(frame)
             return
         dt = max(now - self.t, 1e-3)
         limited = slew_limit(self.pos, raw, dt, self.lim.slew)
         new, clamped = clamp_stage(limited, self.lim)
         self.vel = tuple((n - o) / dt for n, o in zip(new, self.pos))
         self.pos, self.t, self.clamped = new, now, clamped or limited != raw
+        self.wrists = self._wrists(frame)
+
+    def _wrists(self, frame):
+        """Both wrists as finite 3-tuples, or None (then the expressive values simply hold)."""
+        try:
+            j = frame["joints"]
+            lw = tuple(float(v) for v in j["left_wrist"])
+            rw = tuple(float(v) for v in j["right_wrist"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if len(lw) != 3 or len(rw) != 3 or not all(map(math.isfinite, lw + rw)):
+            return None
+        return lw, rw
 
     def predict(self, now):
         """Dead-reckoned (position, velocity, clamped) at `now`."""
@@ -122,6 +137,26 @@ def ptm_invariants(window):
     }
 
 
+def expressive(trk, vel):
+    """0..1 values for the show: wingspan, highest hand, whole-body speed. None until both wrists were seen."""
+    if trk.wrists is None:
+        return None
+    lw, rw = trk.wrists
+    return {
+        "spread": min(1.0, math.dist(lw, rw) / 1.8),
+        "hand_elevation": min(1.0, max(0.0, (max(lw[2], rw[2]) - 0.5) / 1.7)),
+        "energy": min(1.0, math.sqrt(sum(c * c for c in vel)) / 5.0),
+    }
+
+
+def control_message(parameter, value):
+    m = pchi_message((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), [])
+    m["type"] = "control_parameter"
+    m["payload"] = {"payloadType": "control_parameter", "data": {
+        "target_id": ARTIST_ID, "parameter": parameter, "value": round(value, 4)}}
+    return m
+
+
 def pchi_message(pos, vel, window):
     return {
         "version": "2.0.0",
@@ -143,6 +178,7 @@ def main():
     ap.add_argument("--rate", type=float, default=60.0)
     ap.add_argument("--radius", type=float, default=1.5)
     ap.add_argument("--slew", type=float, default=6.0, help="max m/s the tracked point may move")
+    ap.add_argument("--param-rate", type=float, default=20.0, help="Hz for spread/hand_elevation/energy; 0 = off")
     ap.add_argument("--lead", type=float, default=0.03, help="seconds of look-ahead")
     a = ap.parse_args()
 
@@ -165,15 +201,21 @@ def main():
 
     threading.Thread(target=receive, daemon=True).start()
     window, period, nxt = [], 1.0 / a.rate, time.monotonic()
+    next_params = nxt
     print(f"listening {a.listen}; sending artist_tracking to {a.pchi} at {a.rate:g} Hz")
     while True:
         nxt += period
         time.sleep(max(0.0, nxt - time.monotonic()))
         with lock:
             pos, vel, _ = trk.predict(time.monotonic())
+            extra = expressive(trk, vel)
         window.append(pos[0])
         del window[:-8]
         tx.sendto(json.dumps(pchi_message(pos, vel, window)).encode(), dest)
+        if a.param_rate > 0 and extra and time.monotonic() >= next_params:
+            next_params = time.monotonic() + 1.0 / a.param_rate
+            for name, value in extra.items():
+                tx.sendto(json.dumps(control_message(f"rgbmocap.{name}", value)).encode(), dest)
 
 
 if __name__ == "__main__":
