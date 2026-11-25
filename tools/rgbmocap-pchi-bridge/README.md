@@ -15,6 +15,7 @@ toyxyz_RGBMocap (live worker) --UDP JSON--> this bridge --UDP JSON artist_tracki
 python rgbmocap_pchi_bridge.py --listen 127.0.0.1:9100 --pchi 127.0.0.1:8888 --rate 60
 python test_bridge.py
 python replay.py --synthetic     # sway, arm raises, a glitch, an occlusion; no camera needed
+python record.py take1.jsonl --seconds 60   # capture real tap output (stop the bridge first); replay with: python replay.py take1.jsonl
 ```
 
 Input frame: `{"confidence": 0.9, "joints": {"pelvis": [x, y, z]}}` in metres, stage-relative, z up.
@@ -24,6 +25,8 @@ Input frame: `{"confidence": 0.9, "joints": {"pelvis": [x, y, z]}}` in metres, s
 - Receiver and emitter are separate loops: the tracker may run at 15–30 Hz while output is a steady `--rate` Hz.
 - Dead reckoning with a capped horizon (70 ms) plus a small look-ahead (`--lead`); velocity decays when frames go stale or confidence drops, so a stalled tracker coasts to a stop.
 - Slew limit (`--slew`, m/s) so a single-frame pose flip cannot teleport the point; cylinder clamp (`--radius`, height 0–2.8 m); NaN, wrong-length and malformed frames are dropped and counted.
+
+Recordings hold a real person's body positions. Treat them as personal data and do not commit them (the repo has no rule for this yet; add `*.jsonl` to a `.gitignore` if you keep them in the tree).
 
 ## Choosing the look-ahead (`tune.py`)
 

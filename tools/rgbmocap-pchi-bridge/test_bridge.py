@@ -1,7 +1,14 @@
+import json
 import math
+import os
+import socket
+import tempfile
+import threading
+import time
 import unittest
 
 import pear_tap
+import record
 import tune
 from rgbmocap_pchi_bridge import Limits, Tracker, clamp_stage, control_message, expressive, pchi_message
 
@@ -84,6 +91,33 @@ class Bridge(unittest.TestCase):
         rms4, _, over4 = tune.run(0.04, 0.08, 20.0, 60.0, 0.07)
         self.assertLess(rms4, rms0)      # some look-ahead lowers average error ...
         self.assertGreater(over4, over0)  # ... and costs overshoot after a sudden stop
+
+    def test_recording_round_trips_through_replay_format(self):
+        rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        rx.bind(("127.0.0.1", 0))
+        port = rx.getsockname()[1]
+        path = os.path.join(tempfile.mkdtemp(), "s.jsonl")
+        result = {}
+        th = threading.Thread(target=lambda: result.update(r=record.record(rx, path, 1.0)))
+        th.start()
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sent = [{"confidence": 0.9, "joints": {"pelvis": [0.1 * i, 0, 1]}} for i in range(5)]
+        for f in sent:
+            tx.sendto(json.dumps(f).encode(), ("127.0.0.1", port))
+            time.sleep(0.02)
+        tx.sendto(b"not json", ("127.0.0.1", port))
+        tx.sendto(b"[1, 2]", ("127.0.0.1", port))
+        th.join()
+        rx.close()
+        tx.close()
+        self.assertEqual(result["r"], (5, 2))
+        lines = [json.loads(l) for l in open(path)]
+        self.assertEqual([l["joints"] for l in lines], [f["joints"] for f in sent])
+        self.assertEqual(lines[0]["t"], 0.0)
+        self.assertTrue(all(b["t"] >= a["t"] for a, b in zip(lines, lines[1:])))
+        for l in lines:  # replay.py needs "t" and the frame fields only
+            self.assertIn("t", l)
+            self.assertIn("confidence", l)
 
     def test_extrapolation_capped_and_decays(self):
         t = Tracker(Limits())
