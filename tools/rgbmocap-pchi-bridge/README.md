@@ -25,6 +25,19 @@ Input frame: `{"confidence": 0.9, "joints": {"pelvis": [x, y, z]}}` in metres, s
 - Dead reckoning with a capped horizon (70 ms) plus a small look-ahead (`--lead`); velocity decays when frames go stale or confidence drops, so a stalled tracker coasts to a stop.
 - Slew limit (`--slew`, m/s) so a single-frame pose flip cannot teleport the point; cylinder clamp (`--radius`, height 0–2.8 m); NaN, wrong-length and malformed frames are dropped and counted.
 
+## Choosing the look-ahead (`tune.py`)
+
+`python tune.py --delay 0.08` simulates a performer (sway plus 1 m lunges that stop dead), a 20 Hz tracker and a pipeline delay you set, then reports how far the bridge's output is from the true position. With an 80 ms delay it gave:
+
+| lead | RMS error | overshoot after a sudden stop |
+|---|---|---|
+| 0 ms | 10.8 cm | 21 cm |
+| 40 ms | 9.9 cm | 35 cm |
+| 100 ms | 12.1 cm | 62 cm |
+
+Reading it: look-ahead lowers average error by about 8% at best, then makes it worse, and overshoot after a stop grows with every millisecond of lead. The worst error (about 58 cm, during the lunge) did not move at all, because the delay itself dominates there. So the default 30 ms is a compromise, and the real fix for fast moves is less delay at the source (shutter, resolution, filter strength), not more extrapolation.
+**This is a simulation with an assumed delay.** It says nothing about your camera or PEAR's real latency, which nobody has measured here. The overshoot figure is a rough metric. Measure your real delay (for example by filming a clap against a sound), then re-run with that number.
+
 ## Venue rules (second check, in the Conductor)
 
 `rgbmocap-stage.only-pchi` makes the Conductor itself flag a performer outside the stage footprint (box of ±1.5 m, height 0 to 2.8 m). Run it with `primeswarm-pchi --rules rgbmocap-stage.only-pchi`, and `check_rules.py` exercises it.

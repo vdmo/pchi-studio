@@ -2,6 +2,7 @@ import math
 import unittest
 
 import pear_tap
+import tune
 from rgbmocap_pchi_bridge import Limits, Tracker, clamp_stage, control_message, expressive, pchi_message
 
 
@@ -77,6 +78,12 @@ class Bridge(unittest.TestCase):
         self.assertEqual(m["type"], "control_parameter")
         d = m["payload"]["data"]
         self.assertEqual((d["target_id"], d["parameter"], d["value"]), ("performer_01", "rgbmocap.spread", 0.1235))
+
+    def test_lookahead_trades_lag_for_overshoot_in_simulation(self):
+        rms0, _, over0 = tune.run(0.0, 0.08, 20.0, 60.0, 0.07)
+        rms4, _, over4 = tune.run(0.04, 0.08, 20.0, 60.0, 0.07)
+        self.assertLess(rms4, rms0)      # some look-ahead lowers average error ...
+        self.assertGreater(over4, over0)  # ... and costs overshoot after a sudden stop
 
     def test_extrapolation_capped_and_decays(self):
         t = Tracker(Limits())
